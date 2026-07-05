@@ -40,6 +40,7 @@ class KalshiWsStatusSnapshot:
     last_error_message: str | None
     warnings: list[str]
     blockers: list[str]
+    diagnostic_samples: list[dict[str, Any]]
     stale: bool
     checked_at: datetime
 
@@ -158,6 +159,9 @@ def build_kalshi_ws_status(
         last_error_message=_str_or_none(heartbeat_metadata.get("last_error_message")),
         warnings=sorted(set(warnings)),
         blockers=sorted(set(blockers)),
+        diagnostic_samples=_diagnostic_samples(
+            heartbeat_metadata.get("diagnostic_samples")
+        ),
         stale=stale,
         checked_at=checked_at,
     )
@@ -202,6 +206,12 @@ def _int_dict(value: Any) -> dict[str, int]:
         except (TypeError, ValueError):
             continue
     return parsed
+
+
+def _diagnostic_samples(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)][:3]
 
 
 def _datetime_or_none(value: Any) -> datetime | None:

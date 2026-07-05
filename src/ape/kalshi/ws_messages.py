@@ -244,10 +244,10 @@ def parse_ws_payload(
 
 
 def parse_decimal(value: Any) -> Decimal:
-    if value is None or value == "":
+    if value is None or value == "" or isinstance(value, bool):
         raise ValueError("missing decimal")
     try:
-        parsed = Decimal(str(value))
+        parsed = Decimal(_decimal_text(value))
     except (InvalidOperation, ValueError) as exc:
         raise ValueError("invalid decimal") from exc
     if not parsed.is_finite():
@@ -256,6 +256,8 @@ def parse_decimal(value: Any) -> Decimal:
 
 
 def parse_size(value: Any, *, allow_negative: bool = False) -> int:
+    # Kalshi fixed-point count fields are decimal contract counts. Accept only
+    # exact whole contracts after normalization; never round fractional counts.
     size = parse_decimal(value)
     if not allow_negative and size <= 0:
         raise ValueError("size must be positive")
@@ -302,9 +304,13 @@ def _trade_from_payload(
 ) -> tuple[PublicTradeInput | None, str | None]:
     try:
         price = _trade_yes_price(payload)
-        count = parse_size(payload.get("count") or payload.get("count_fp"))
     except ValueError:
-        return None, "invalid_trade_price_or_size"
+        return None, "invalid_trade_price"
+
+    try:
+        count = parse_size(_first_present(payload, ("count", "count_fp")))
+    except ValueError:
+        return None, "invalid_trade_count_fp"
 
     taker_side = _safe_trade_side(payload)
     warning = None if taker_side is not None else "trade_side_not_inferred"
@@ -327,11 +333,11 @@ def _trade_from_payload(
 
 
 def _trade_yes_price(payload: dict[str, Any]) -> Decimal:
-    if payload.get("price_dollars") not in {None, ""}:
+    if _is_present(payload.get("price_dollars")):
         return parse_decimal(payload.get("price_dollars"))
-    if payload.get("yes_price_dollars") not in {None, ""}:
+    if _is_present(payload.get("yes_price_dollars")):
         return parse_decimal(payload.get("yes_price_dollars"))
-    if payload.get("no_price_dollars") not in {None, ""}:
+    if _is_present(payload.get("no_price_dollars")):
         return ONE_DOLLAR - parse_decimal(payload.get("no_price_dollars"))
     raise ValueError("missing trade price")
 
@@ -349,6 +355,28 @@ def _safe_trade_side(payload: dict[str, Any]) -> str | None:
         return "no"
 
     return None
+
+
+def _decimal_text(value: Any) -> str:
+    if isinstance(value, int | float):
+        return str(value)
+    if isinstance(value, str):
+        text = value.strip().replace(",", "")
+        if text:
+            return text
+    raise ValueError("invalid decimal")
+
+
+def _first_present(payload: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        value = payload.get(key)
+        if _is_present(value):
+            return value
+    return None
+
+
+def _is_present(value: Any) -> bool:
+    return value is not None and value != ""
 
 
 def _timestamp_or_none(payload: dict[str, Any]) -> datetime | None:

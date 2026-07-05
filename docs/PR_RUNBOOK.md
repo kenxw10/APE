@@ -36,3 +36,12 @@ PR 6 post-merge checkpoint:
 - Redeploy the Railway worker.
 - Validate worker logs, `/ws/status`, `/health`, `/safety`, `/db/status`, `/ready`, `/kalshi/status`, and `/markets/active`.
 - Confirm `orderbook_snapshots` rows are being written. `public_trades` may be sparse.
+- PR 6b live WebSocket validation passes when `/ws/status` shows `enabled=true`,
+  `connection_state=subscribed`, a non-null recent `latest_orderbook_received_at`,
+  no blockers, and no old broad parse warnings such as `invalid_trade_price_or_size`.
+- `diagnostic_samples` in `/ws/status` may appear only as bounded shape metadata
+  for invalid orderbook/trade payloads; it must not expose credentials, signatures,
+  private keys, headers, or full raw WebSocket payloads.
+- Dashboard validation should use the `Kalshi WS` / `WS Channels` status or a
+  successful `/ws/status` response. Do not require literal browser WebSocket access
+  from the Vercel dashboard.

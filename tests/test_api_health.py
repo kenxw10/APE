@@ -274,6 +274,28 @@ def test_ws_status_reports_persisted_market_data(tmp_path) -> None:
                             "last_trade_at": _isoformat_z(now),
                             "warnings": [],
                             "blockers": [],
+                            "diagnostic_samples": [
+                                {
+                                    "reason": "invalid_orderbook_snapshot_yes_level_size",
+                                    "message_type": "orderbook_snapshot",
+                                    "raw_payload_hash": "hash-1",
+                                },
+                                {
+                                    "reason": "invalid_orderbook_delta_delta_fp",
+                                    "message_type": "orderbook_delta",
+                                    "raw_payload_hash": "hash-2",
+                                },
+                                {
+                                    "reason": "invalid_trade_count_fp",
+                                    "message_type": "trade",
+                                    "raw_payload_hash": "hash-3",
+                                },
+                                {
+                                    "reason": "invalid_trade_price",
+                                    "message_type": "trade",
+                                    "raw_payload_hash": "hash-4",
+                                },
+                            ],
                         },
                     },
                 )
@@ -293,7 +315,13 @@ def test_ws_status_reports_persisted_market_data(tmp_path) -> None:
         assert body["subscribed_channels"] == ["ticker", "orderbook_delta", "trade"]
         assert body["latest_orderbook_received_at"] is not None
         assert body["latest_trade_received_at"] is not None
+        assert len(body["diagnostic_samples"]) == 3
+        assert body["diagnostic_samples"][0]["reason"] == (
+            "invalid_orderbook_snapshot_yes_level_size"
+        )
         assert body["stale"] is False
+        assert "PRIVATE KEY" not in response.text
+        assert "KALSHI-ACCESS-SIGNATURE" not in response.text
     finally:
         engine.dispose()
 
