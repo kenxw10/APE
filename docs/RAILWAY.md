@@ -81,7 +81,7 @@ python -m ape.db.migrations
 python -m ape.worker.main
 ```
 
-The API and worker helpers both run the same idempotent migrations before their service starts. Prefer redeploying the API first for schema-changing PRs, but the worker is protected if it starts first or restarts during a deploy. If migrations fail, the worker does not start.
+The API and worker helpers both run the same idempotent migrations before their service starts. The migration runner takes a PostgreSQL advisory transaction lock and uses idempotent schema/version writes so simultaneous API and worker restarts serialize safely. Prefer redeploying the API first for schema-changing PRs, but the worker is protected if it starts first or restarts during a deploy. If migrations fail, the worker does not start.
 
 The worker is an always-on observer process. Do not configure a Railway cron job for it.
 

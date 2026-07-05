@@ -3,35 +3,39 @@ from __future__ import annotations
 import logging
 
 from sqlalchemy import inspect, select, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 
 from ape.config import ConfigError, load_config
-from ape.db.models import Base, SchemaMigration
-from ape.db.session import DatabaseConfigError, create_engine_from_config, create_session_factory
+from ape.db.models import Base, SchemaMigration, utc_now
+from ape.db.session import DatabaseConfigError, create_engine_from_config
 
 CURRENT_SCHEMA_VERSION = "0002_fixed_point_ws_quantities"
 SCHEMA_VERSIONS = ("0001_initial_schema", CURRENT_SCHEMA_VERSION)
+POSTGRES_MIGRATION_LOCK_ID = 4_150_002
 
 LOGGER = logging.getLogger(__name__)
 
 
 def run_migrations(engine: Engine) -> None:
-    Base.metadata.create_all(engine)
-    _ensure_fixed_point_quantity_columns(engine)
-
-    session_factory = create_session_factory(engine)
-    with session_factory() as session:
-        for version in SCHEMA_VERSIONS:
-            existing = session.scalar(
-                select(SchemaMigration).where(SchemaMigration.version == version)
-            )
-            if existing is None:
-                session.add(SchemaMigration(version=version))
-        session.commit()
+    with engine.begin() as connection:
+        _acquire_migration_lock(connection)
+        Base.metadata.create_all(connection)
+        _ensure_fixed_point_quantity_columns(connection)
+        _record_schema_versions(connection)
 
 
-def _ensure_fixed_point_quantity_columns(engine: Engine) -> None:
-    inspector = inspect(engine)
+def _acquire_migration_lock(connection: Connection) -> None:
+    if connection.dialect.name != "postgresql":
+        return
+
+    connection.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_id)"),
+        {"lock_id": POSTGRES_MIGRATION_LOCK_ID},
+    )
+
+
+def _ensure_fixed_point_quantity_columns(connection: Connection) -> None:
+    inspector = inspect(connection)
     existing_columns = {
         table: {column["name"] for column in inspector.get_columns(table)}
         for table in ("orderbook_snapshots", "public_trades")
@@ -47,11 +51,13 @@ def _ensure_fixed_point_quantity_columns(engine: Engine) -> None:
     ):
         if column not in existing_columns.get("orderbook_snapshots", set()):
             statements.append(
-                f"ALTER TABLE orderbook_snapshots ADD COLUMN {column} NUMERIC(24, 8)"
+                _add_numeric_column_statement(connection, "orderbook_snapshots", column)
             )
 
     if "trade_count" not in existing_columns.get("public_trades", set()):
-        statements.append("ALTER TABLE public_trades ADD COLUMN trade_count NUMERIC(24, 8)")
+        statements.append(
+            _add_numeric_column_statement(connection, "public_trades", "trade_count")
+        )
 
     backfill_statements = (
         "UPDATE orderbook_snapshots SET yes_bid_count = yes_bid_size "
@@ -66,11 +72,67 @@ def _ensure_fixed_point_quantity_columns(engine: Engine) -> None:
         'WHERE trade_count IS NULL AND "count" IS NOT NULL',
     )
 
-    with engine.begin() as connection:
-        for statement in statements:
-            connection.execute(text(statement))
-        for statement in backfill_statements:
-            connection.execute(text(statement))
+    for statement in statements:
+        connection.execute(text(statement))
+    for statement in backfill_statements:
+        connection.execute(text(statement))
+
+
+def _add_numeric_column_statement(
+    connection: Connection,
+    table_name: str,
+    column_name: str,
+) -> str:
+    if connection.dialect.name == "postgresql":
+        return (
+            f"ALTER TABLE {table_name} "
+            f"ADD COLUMN IF NOT EXISTS {column_name} NUMERIC(24, 8)"
+        )
+    return f"ALTER TABLE {table_name} ADD COLUMN {column_name} NUMERIC(24, 8)"
+
+
+def _record_schema_versions(connection: Connection) -> None:
+    for version in SCHEMA_VERSIONS:
+        _record_schema_version(connection, version)
+
+
+def _record_schema_version(connection: Connection, version: str) -> None:
+    if connection.dialect.name == "postgresql":
+        connection.execute(
+            text(
+                """
+                INSERT INTO schema_migrations (version, applied_at)
+                VALUES (:version, CURRENT_TIMESTAMP)
+                ON CONFLICT (version) DO NOTHING
+                """
+            ),
+            {"version": version},
+        )
+        return
+
+    if connection.dialect.name == "sqlite":
+        connection.execute(
+            text(
+                """
+                INSERT OR IGNORE INTO schema_migrations (version, applied_at)
+                VALUES (:version, CURRENT_TIMESTAMP)
+                """
+            ),
+            {"version": version},
+        )
+        return
+
+    applied_at = utc_now()
+    existing = connection.scalar(
+        select(SchemaMigration.version).where(SchemaMigration.version == version)
+    )
+    if existing is None:
+        connection.execute(
+            SchemaMigration.__table__.insert().values(
+                version=version,
+                applied_at=applied_at,
+            )
+        )
 
 
 def main() -> int:

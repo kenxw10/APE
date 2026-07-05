@@ -42,6 +42,8 @@ PR 6 post-merge checkpoint:
 - Worker startup runs database migrations before `ape.worker.main`; if migrations
   fail, the worker must not start. API-first deploy order is still preferred for
   schema-changing PRs, but both API and worker startup helpers are migration-safe.
+  PostgreSQL migrations are serialized with an advisory transaction lock so API
+  and worker restarts do not race on `ALTER TABLE` or schema-version writes.
 - `/ws/status.last_error_type` and `/ws/status.last_error_message` mean a current
   unresolved worker error. If current orderbook/trade rows are being written and
   warnings/blockers are empty, old recovered database errors should be null there.
