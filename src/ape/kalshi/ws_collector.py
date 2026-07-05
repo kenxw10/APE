@@ -298,6 +298,10 @@ class KalshiWsCollector:
             if not orderbook.initialized:
                 self._add_warning("orderbook_delta_before_snapshot")
                 return
+            if orderbook.has_sequence_gap(message.seq):
+                orderbook.reset()
+                self._add_warning("orderbook_sequence_gap_reset")
+                return
             orderbook.apply_delta(message)
             snapshot = orderbook.snapshot_input(
                 received_at=received_at,
@@ -317,6 +321,9 @@ class KalshiWsCollector:
             return
 
         if message.kind == "invalid":
+            if message.reason == "kalshi_websocket_buffer_overflow":
+                orderbook.reset()
+                self._add_warning("orderbook_reset_after_buffer_overflow")
             self._add_warning(message.reason or "invalid_websocket_message")
 
     def _persist_orderbook(self, snapshot) -> None:

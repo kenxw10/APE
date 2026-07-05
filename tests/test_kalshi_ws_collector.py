@@ -64,7 +64,7 @@ def test_collector_subscribes_and_persists_mock_messages(tmp_path) -> None:
                 "msg": {
                     "market_ticker": "KXBTC15M-TEST",
                     "yes_dollars_fp": [["0.60", "10"]],
-                    "no_dollars_fp": [["0.35", "8"]],
+                    "no_dollars_fp": [["0.65", "8"]],
                     "ts_ms": 1780000000000,
                 },
             },
@@ -135,6 +135,153 @@ def test_collector_subscribes_and_persists_mock_messages(tmp_path) -> None:
                 },
             },
         ]
+    finally:
+        engine.dispose()
+
+
+def test_collector_resets_orderbook_on_sequence_gap(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_sequence_gap.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket(
+        [
+            {
+                "type": "orderbook_snapshot",
+                "sid": 1,
+                "seq": 1,
+                "msg": {
+                    "market_ticker": "KXBTC15M-TEST",
+                    "yes_dollars_fp": [["0.60", "10"]],
+                    "no_dollars_fp": [["0.65", "8"]],
+                },
+            },
+            {
+                "type": "orderbook_delta",
+                "sid": 1,
+                "seq": 3,
+                "msg": {
+                    "market_ticker": "KXBTC15M-TEST",
+                    "side": "yes",
+                    "price_dollars": "0.61",
+                    "delta_fp": "4",
+                },
+            },
+        ]
+    )
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            latest_book = OrderbookRepository(session).get_latest_snapshot("KXBTC15M-TEST")
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert latest_book is not None
+            assert latest_book.sequence_number == 1
+            assert latest_book.yes_bid == Decimal("0.60000000")
+            assert latest_book.yes_ask == Decimal("0.65000000")
+            assert heartbeat is not None
+            assert "orderbook_sequence_gap_reset" in heartbeat.metadata_["ws"]["warnings"]
+    finally:
+        engine.dispose()
+
+
+def test_collector_resets_orderbook_on_buffer_overflow(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_buffer_overflow.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket(
+        [
+            {
+                "type": "orderbook_snapshot",
+                "sid": 1,
+                "seq": 1,
+                "msg": {
+                    "market_ticker": "KXBTC15M-TEST",
+                    "yes_dollars_fp": [["0.60", "10"]],
+                    "no_dollars_fp": [["0.65", "8"]],
+                },
+            },
+            {
+                "type": "error",
+                "sid": 1,
+                "seq": 2,
+                "msg": {"code": 25, "msg": "Subscription buffer overflow"},
+            },
+            {
+                "type": "orderbook_delta",
+                "sid": 1,
+                "seq": 3,
+                "msg": {
+                    "market_ticker": "KXBTC15M-TEST",
+                    "side": "yes",
+                    "price_dollars": "0.61",
+                    "delta_fp": "4",
+                },
+            },
+        ]
+    )
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            latest_book = OrderbookRepository(session).get_latest_snapshot("KXBTC15M-TEST")
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert latest_book is not None
+            assert latest_book.sequence_number == 1
+            assert heartbeat is not None
+            warnings = heartbeat.metadata_["ws"]["warnings"]
+            assert "orderbook_reset_after_buffer_overflow" in warnings
+            assert "kalshi_websocket_buffer_overflow" in warnings
+            assert "orderbook_delta_before_snapshot" in warnings
     finally:
         engine.dispose()
 

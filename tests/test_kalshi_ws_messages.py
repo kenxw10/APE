@@ -9,7 +9,7 @@ from ape.kalshi.ws_state import OrderbookState
 NOW = datetime(2026, 7, 5, 14, 35, tzinfo=UTC)
 
 
-def test_orderbook_snapshot_normalizes_top_of_book() -> None:
+def test_orderbook_snapshot_normalizes_yes_price_top_of_book() -> None:
     message = parse_ws_payload(
         {
             "type": "orderbook_snapshot",
@@ -18,7 +18,7 @@ def test_orderbook_snapshot_normalizes_top_of_book() -> None:
             "msg": {
                 "market_ticker": "KXBTC15M-TEST",
                 "yes_dollars_fp": [["0.63", "12"], ["0.61", "9"]],
-                "no_dollars_fp": [["0.39", "5"], ["0.35", "3"]],
+                "no_dollars_fp": [["0.70", "5"], ["0.72", "3"]],
                 "ts_ms": 1780000000000,
             },
         },
@@ -36,11 +36,14 @@ def test_orderbook_snapshot_normalizes_top_of_book() -> None:
     )
 
     assert snapshot.yes_bid == Decimal("0.63")
-    assert snapshot.yes_ask == Decimal("0.61")
-    assert snapshot.no_bid == Decimal("0.39")
+    assert snapshot.yes_ask == Decimal("0.70")
+    assert snapshot.no_bid == Decimal("0.30")
     assert snapshot.no_ask == Decimal("0.37")
-    assert snapshot.yes_spread == Decimal("-0.02")
-    assert snapshot.book_status == "crossed_book"
+    assert snapshot.yes_spread == Decimal("0.07")
+    assert snapshot.no_spread == Decimal("0.07")
+    assert snapshot.yes_ask_size == 5
+    assert snapshot.no_bid_size == 5
+    assert snapshot.book_status == "ok"
 
 
 def test_orderbook_delta_updates_book_after_snapshot() -> None:
@@ -52,7 +55,7 @@ def test_orderbook_delta_updates_book_after_snapshot() -> None:
             "msg": {
                 "market_ticker": "KXBTC15M-TEST",
                 "yes_dollars_fp": [["0.60", "10"]],
-                "no_dollars_fp": [["0.35", "8"]],
+                "no_dollars_fp": [["0.65", "8"]],
             },
         },
         target_market_ticker="KXBTC15M-TEST",
@@ -84,6 +87,96 @@ def test_orderbook_delta_updates_book_after_snapshot() -> None:
 
     assert snapshot.yes_bid == Decimal("0.60")
     assert snapshot.yes_bid_size == 6
+    assert snapshot.yes_ask == Decimal("0.65")
+    assert snapshot.no_bid == Decimal("0.35")
+
+
+def test_no_side_delta_uses_yes_price_scale() -> None:
+    state = OrderbookState("KXBTC15M-TEST")
+    snapshot_message = parse_ws_payload(
+        {
+            "type": "orderbook_snapshot",
+            "seq": 1,
+            "msg": {
+                "market_ticker": "KXBTC15M-TEST",
+                "yes_dollars_fp": [["0.60", "10"]],
+                "no_dollars_fp": [["0.70", "8"]],
+            },
+        },
+        target_market_ticker="KXBTC15M-TEST",
+        received_at=NOW,
+    )
+    state.apply_snapshot(snapshot_message)
+    delta_message = parse_ws_payload(
+        {
+            "type": "orderbook_delta",
+            "seq": 2,
+            "msg": {
+                "market_ticker": "KXBTC15M-TEST",
+                "side": "no",
+                "price_dollars": "0.64",
+                "delta_fp": "4",
+            },
+        },
+        target_market_ticker="KXBTC15M-TEST",
+        received_at=NOW,
+    )
+
+    state.apply_delta(delta_message)
+    snapshot = state.snapshot_input(
+        received_at=NOW,
+        sequence_number=delta_message.seq,
+        raw_payload_hash=delta_message.raw_payload_hash,
+        raw_payload=delta_message.raw_payload,
+    )
+
+    assert snapshot.yes_ask == Decimal("0.64")
+    assert snapshot.no_bid == Decimal("0.36")
+    assert snapshot.yes_ask_size == 4
+    assert snapshot.no_bid_size == 4
+
+
+def test_orderbook_sequence_gap_detection_resets_state() -> None:
+    state = OrderbookState("KXBTC15M-TEST")
+    snapshot_message = parse_ws_payload(
+        {
+            "type": "orderbook_snapshot",
+            "seq": 1,
+            "msg": {
+                "market_ticker": "KXBTC15M-TEST",
+                "yes_dollars_fp": [["0.60", "10"]],
+                "no_dollars_fp": [["0.65", "8"]],
+            },
+        },
+        target_market_ticker="KXBTC15M-TEST",
+        received_at=NOW,
+    )
+    state.apply_snapshot(snapshot_message)
+
+    assert state.has_sequence_gap(3)
+
+    state.reset()
+
+    assert not state.initialized
+    assert state.last_sequence_number is None
+    assert state.yes_levels == {}
+    assert state.no_levels == {}
+
+
+def test_websocket_buffer_overflow_error_is_distinguishable() -> None:
+    message = parse_ws_payload(
+        {
+            "type": "error",
+            "sid": 1,
+            "seq": 2,
+            "msg": {"code": 25, "msg": "Subscription buffer overflow"},
+        },
+        target_market_ticker="KXBTC15M-TEST",
+        received_at=NOW,
+    )
+
+    assert message.kind == "invalid"
+    assert message.reason == "kalshi_websocket_buffer_overflow"
 
 
 def test_crossed_and_missing_book_warnings() -> None:

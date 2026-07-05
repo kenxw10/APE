@@ -66,11 +66,14 @@ def parse_ws_payload(
         )
 
     if message_type == "error":
+        reason = "kalshi_websocket_error"
+        if isinstance(message, dict) and _int_or_none(message.get("code")) == 25:
+            reason = "kalshi_websocket_buffer_overflow"
         return ParsedWsMessage(
             kind="invalid",
             sid=sid,
             seq=seq,
-            reason="kalshi_websocket_error",
+            reason=reason,
             raw_payload_hash=raw_hash,
             raw_payload=raw_payload,
         )

@@ -14,11 +14,13 @@ class OrderbookState:
     yes_levels: dict[Decimal, int] = field(default_factory=dict)
     no_levels: dict[Decimal, int] = field(default_factory=dict)
     initialized: bool = False
+    last_sequence_number: int | None = None
 
     def apply_snapshot(self, message: ParsedWsMessage) -> None:
         self.yes_levels = _level_map(message.yes_levels or [])
         self.no_levels = _level_map(message.no_levels or [])
         self.initialized = True
+        self.last_sequence_number = message.seq
 
     def apply_delta(self, message: ParsedWsMessage) -> None:
         if message.delta_side not in {"yes", "no"}:
@@ -32,6 +34,19 @@ class OrderbookState:
             levels.pop(message.delta_price, None)
         else:
             levels[message.delta_price] = next_size
+        if message.seq is not None:
+            self.last_sequence_number = message.seq
+
+    def has_sequence_gap(self, sequence_number: int | None) -> bool:
+        if self.last_sequence_number is None or sequence_number is None:
+            return False
+        return sequence_number != self.last_sequence_number + 1
+
+    def reset(self) -> None:
+        self.yes_levels = {}
+        self.no_levels = {}
+        self.initialized = False
+        self.last_sequence_number = None
 
     def snapshot_input(
         self,
@@ -42,15 +57,17 @@ class OrderbookState:
         raw_payload: JsonPayload | None,
     ) -> OrderbookSnapshotInput:
         yes_bid = _best_bid(self.yes_levels)
-        no_bid = _best_bid(self.no_levels)
-        yes_ask = ONE_DOLLAR - no_bid.price if no_bid else None
+        # With use_yes_price=True, Kalshi sends NO-side book levels in YES price scale.
+        yes_ask_level = _best_ask(self.no_levels)
+        yes_ask = yes_ask_level.price if yes_ask_level else None
+        no_bid = ONE_DOLLAR - yes_ask_level.price if yes_ask_level else None
         no_ask = ONE_DOLLAR - yes_bid.price if yes_bid else None
         yes_spread = yes_ask - yes_bid.price if yes_ask is not None and yes_bid else None
-        no_spread = no_ask - no_bid.price if no_ask is not None and no_bid else None
+        no_spread = no_ask - no_bid if no_ask is not None and no_bid is not None else None
         warnings = _book_warnings(
             yes_bid=yes_bid.price if yes_bid else None,
             yes_ask=yes_ask,
-            no_bid=no_bid.price if no_bid else None,
+            no_bid=no_bid,
             no_ask=no_ask,
             yes_spread=yes_spread,
             no_spread=no_spread,
@@ -62,13 +79,13 @@ class OrderbookState:
             sequence_number=sequence_number,
             yes_bid=yes_bid.price if yes_bid else None,
             yes_ask=yes_ask,
-            no_bid=no_bid.price if no_bid else None,
+            no_bid=no_bid,
             no_ask=no_ask,
             yes_spread=yes_spread,
             no_spread=no_spread,
             yes_bid_size=yes_bid.size if yes_bid else None,
-            yes_ask_size=no_bid.size if no_bid else None,
-            no_bid_size=no_bid.size if no_bid else None,
+            yes_ask_size=yes_ask_level.size if yes_ask_level else None,
+            no_bid_size=yes_ask_level.size if yes_ask_level else None,
             no_ask_size=yes_bid.size if yes_bid else None,
             book_status="ok" if not warnings else "|".join(warnings),
             raw_payload_hash=raw_payload_hash,
@@ -92,6 +109,15 @@ def _best_bid(levels: dict[Decimal, int]) -> BestLevel | None:
         return None
 
     price, size = max(executable, key=lambda item: item[0])
+    return BestLevel(price=price, size=size)
+
+
+def _best_ask(levels: dict[Decimal, int]) -> BestLevel | None:
+    executable = [(price, size) for price, size in levels.items() if size > 0]
+    if not executable:
+        return None
+
+    price, size = min(executable, key=lambda item: item[0])
     return BestLevel(price=price, size=size)
 
 
