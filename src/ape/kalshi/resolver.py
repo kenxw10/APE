@@ -324,6 +324,9 @@ def _is_btc15_open_market(market: KalshiMarketPayload, config: AppConfig) -> boo
     if series_ticker is not None and series_ticker != config.kalshi_btc15_series_ticker:
         return False
 
+    if "status" not in market:
+        return True
+
     status = str(market.get("status") or "").strip().lower()
     return status in TRADABLE_MARKET_STATUSES
 

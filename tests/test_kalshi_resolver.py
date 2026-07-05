@@ -118,6 +118,25 @@ def test_resolver_rejects_explicit_series_mismatch() -> None:
     assert result.market is None
 
 
+def test_resolver_allows_open_filtered_market_without_status_field() -> None:
+    client = FakeKalshiClient([_market_payload(status=None)])
+
+    result = resolve_active_btc15_market(config=_configured(), client=client, now=NOW)
+
+    assert result.state is ResolverState.RESOLVED_OBSERVER_ONLY
+    assert result.market is not None
+    assert result.market.market_ticker == "KXBTC15M-ACTIVE"
+
+
+def test_resolver_rejects_explicit_non_tradable_status() -> None:
+    client = FakeKalshiClient([_market_payload(status="closed")])
+
+    result = resolve_active_btc15_market(config=_configured(), client=client, now=NOW)
+
+    assert result.state is ResolverState.NO_ACTIVE_MARKET
+    assert result.market is None
+
+
 def test_resolver_does_not_select_nearest_inactive_market() -> None:
     client = FakeKalshiClient(
         [
@@ -236,11 +255,11 @@ def _market_payload(
     no_sub_title: str = "At or below $62,000",
     series_ticker: str | None = "KXBTC15M",
     include_series_ticker: bool = True,
+    status: str | None = "open",
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "ticker": ticker,
         "event_ticker": "KXBTC15M-26JUL051200",
-        "status": "open",
         "title": title,
         "subtitle": "BTC 15-minute market",
         "yes_sub_title": yes_sub_title,
@@ -259,6 +278,8 @@ def _market_payload(
     }
     if include_series_ticker:
         payload["series_ticker"] = series_ticker
+    if status is not None:
+        payload["status"] = status
     if functional_strike is not None:
         payload["functional_strike"] = functional_strike
     return payload
