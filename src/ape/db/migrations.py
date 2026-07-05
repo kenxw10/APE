@@ -18,10 +18,18 @@ LOGGER = logging.getLogger(__name__)
 
 def run_migrations(engine: Engine) -> None:
     with engine.begin() as connection:
+        _disable_postgres_migration_statement_timeout(connection)
         _acquire_migration_lock(connection)
         Base.metadata.create_all(connection)
         _ensure_fixed_point_quantity_columns(connection)
         _record_schema_versions(connection)
+
+
+def _disable_postgres_migration_statement_timeout(connection: Connection) -> None:
+    if connection.dialect.name != "postgresql":
+        return
+
+    connection.execute(text("SET LOCAL statement_timeout = 0"))
 
 
 def _acquire_migration_lock(connection: Connection) -> None:

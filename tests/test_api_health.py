@@ -332,6 +332,76 @@ def test_ws_status_reports_persisted_market_data(tmp_path) -> None:
         engine.dispose()
 
 
+def test_ws_status_keeps_error_when_only_ticker_is_fresh(tmp_path) -> None:
+    now = datetime.now(UTC)
+    persisted_at = now - timedelta(minutes=5)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_api_ws_status_ticker_only.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        with session_factory() as session:
+            OrderbookRepository(session).insert_snapshot(
+                OrderbookSnapshotInput(
+                    market_ticker="KXBTC15M-ACTIVE",
+                    received_at=persisted_at,
+                    yes_bid=Decimal("0.60"),
+                    yes_ask=Decimal("0.65"),
+                    book_status="ok",
+                )
+            )
+            WorkerHeartbeatRepository(session).record_heartbeat(
+                WorkerHeartbeatInput(
+                    service_name="ape-worker",
+                    started_at=now - timedelta(minutes=1),
+                    heartbeat_at=now,
+                    app_mode="OBSERVER",
+                    is_safe=True,
+                    metadata={
+                        "mode": "kalshi_ws",
+                        "ws": {
+                            "enabled": True,
+                            "configured": True,
+                            "signer_ready": True,
+                            "connection_state": "subscribed",
+                            "active_market_ticker": "KXBTC15M-ACTIVE",
+                            "subscribed_channels": ["ticker", "orderbook_delta", "trade"],
+                            "subscription_ids": {"ticker": 2, "orderbook_delta": 1, "trade": 2},
+                            "last_message_at": _isoformat_z(now),
+                            "last_ticker_at": _isoformat_z(now),
+                            "last_orderbook_at": _isoformat_z(persisted_at),
+                            "last_error_type": "ProgrammingError",
+                            "last_error_message": "orderbook persistence failed",
+                            "warnings": [],
+                            "blockers": [],
+                        },
+                    },
+                )
+            )
+            session.commit()
+
+        app = create_app(config)
+        with TestClient(app) as client:
+            response = client.get("/ws/status")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["connection_state"] == "subscribed"
+        assert body["latest_orderbook_received_at"] is not None
+        assert body["last_error_type"] == "ProgrammingError"
+        assert body["last_error_message"] == "orderbook persistence failed"
+        assert body["stale"] is False
+    finally:
+        engine.dispose()
+
+
 class _FakeKalshiClient:
     def get_markets(self, **_kwargs):
         now = datetime.now(UTC)

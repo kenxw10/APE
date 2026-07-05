@@ -140,6 +140,7 @@ def build_kalshi_ws_status(
         stale=stale,
         warnings=final_warnings,
         blockers=final_blockers,
+        last_message_at=last_message_at,
         latest_orderbook_at=latest_orderbook_at,
         latest_trade_at=latest_trade_at,
     ):
@@ -188,15 +189,19 @@ def _healthy_stream_recovered_error(
     stale: bool,
     warnings: list[str],
     blockers: list[str],
+    last_message_at: datetime | None,
     latest_orderbook_at: datetime | None,
     latest_trade_at: datetime | None,
 ) -> bool:
+    latest_persisted_at = _latest_datetime(latest_orderbook_at, latest_trade_at)
     return (
         connection_state == "subscribed"
         and not stale
         and not warnings
         and not blockers
-        and (latest_orderbook_at is not None or latest_trade_at is not None)
+        and last_message_at is not None
+        and latest_persisted_at is not None
+        and latest_persisted_at >= _as_utc(last_message_at)
     )
 
 
