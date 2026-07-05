@@ -13,7 +13,14 @@ Planned platform split:
 - Railway Postgres
 - Vercel dashboard
 
-PR 1 is merged and validated. PR 2 is merged and validated. PR 3 adds Railway backend deployment scaffolding for the API and always-on worker, but still does not add market ingestion, strategy execution, live trading, paper trading, or Vercel dashboard code.
+PR 1 is merged and validated. PR 2 is merged and validated. PR 3 adds Railway backend deployment scaffolding for the API and always-on worker. PR 3a adds Railway runtime dependency packaging. PR 4 adds a Vercel-ready read-only dashboard scaffold, but still does not add market ingestion, strategy execution, live trading, paper trading, or execution.
+
+Railway API: https://ape-api-production.up.railway.app
+
+PR 4 dashboard style source:
+
+- HOMERUN font stack and terminal/operator visual language.
+- BULL only as a reference for chart baseline/open-line behavior.
 
 ## BULL Reference Rule
 
@@ -64,7 +71,7 @@ Current safety policy blocks startup when:
 - `TRADING_ENABLED=true`
 - `EXECUTE=true`
 
-No live trading, paper trading, Kalshi order placement, strategy execution, external market data calls, or dashboard behavior is included.
+No live trading, paper trading, Kalshi order placement, strategy execution, external market data calls, or trading-capable dashboard behavior is included.
 
 ## PR Ladder
 
@@ -72,18 +79,21 @@ This ladder is directional and should be reviewed before each PR.
 
 1. Repo foundation and observer-only skeleton. Completed and validated.
 2. Postgres schema and repository foundation. Completed and validated.
-3. Railway backend deployment scaffold. Current PR.
-4. Kalshi BTC15 market catalog and contract resolver in observer mode.
-5. BRTI/reference data intake in observer mode.
-6. Kalshi order book and trade websocket observer.
-7. Observer state API, health, safety, and SSE diagnostics.
-8. Storage lifecycle, retention policy, and local replay fixtures.
-9. Deterministic replay harness for captured market/reference data.
-10. Momentum feature calculations without trade decisions.
-11. Dry-run decision interface with execution still blocked.
-12. Spread, depth, liquidity, and anti-chop gate diagnostics.
-13. Paper trading simulator after dry-run evidence review.
-14. Calibration and reporting workflow for strategy quality.
-15. Railway Postgres/Vercel dashboard wiring beyond the backend scaffold.
-16. Manual live-canary safety plan with tiny limits and approvals.
-17. Post-canary monitoring, rollback, alerting, and hardening.
+3. Railway backend deployment scaffold. Completed and validated.
+4. Vercel-ready read-only dashboard scaffold. Current PR.
+5. Kalshi BTC15 market catalog and contract resolver in observer mode.
+6. BRTI/reference data intake in observer mode.
+7. Kalshi order book and trade websocket observer.
+8. Observer state API, health, safety, and SSE diagnostics.
+9. Storage lifecycle, retention policy, and local replay fixtures.
+10. Deterministic replay harness for captured market/reference data.
+11. Momentum feature calculations without trade decisions.
+12. Dry-run decision interface with execution still blocked.
+13. Spread, depth, liquidity, and anti-chop gate diagnostics.
+14. Paper trading simulator after dry-run evidence review.
+15. Calibration and reporting workflow for strategy quality.
+16. Railway Postgres/Vercel dashboard wiring beyond the backend scaffold.
+17. Manual live-canary safety plan with tiny limits and approvals.
+18. Post-canary monitoring, rollback, alerting, and hardening.
+
+Next manual checkpoint after PR 4: Vercel setup and validation against the live Railway observer API.
