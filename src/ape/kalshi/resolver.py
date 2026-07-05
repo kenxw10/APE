@@ -174,13 +174,14 @@ def resolve_active_btc15_market(
 
     boundary = parse_market_boundary(selected)
     raw_hash = raw_payload_hash(selected)
+    decision_reason = "market_boundary_not_parseable" if not boundary.is_parseable else reason
     market_input = market_input_from_payload(
         selected,
         series_ticker=config.kalshi_btc15_series_ticker,
         boundary=boundary,
         parser_version=config.kalshi_resolver_parser_version,
         raw_hash=raw_hash,
-        decision_reason=reason,
+        decision_reason=decision_reason,
     )
 
     if not boundary.is_parseable:
@@ -200,7 +201,7 @@ def resolve_active_btc15_market(
             market=market_input,
             boundary=boundary,
             raw_payload_hash=raw_hash,
-            reason="market_boundary_not_parseable",
+            reason=decision_reason,
             blockers=boundary.blockers,
             warnings=[*warnings, *_pagination_warnings(page_result)],
             persisted=persisted,

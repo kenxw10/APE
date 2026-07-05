@@ -202,11 +202,15 @@ def test_resolver_rejects_unparseable_boundary_but_persists_metadata(tmp_path) -
 
             assert result.state is ResolverState.MARKET_NOT_PARSEABLE
             assert result.persisted is True
+            assert result.resolver_decision_reason == "market_boundary_not_parseable"
+            assert result.market is not None
+            assert result.market.resolver_decision_reason == "market_boundary_not_parseable"
             stored = MarketsRepository(session).get_market_by_ticker("KXBTC15M-ACTIVE")
             assert stored is not None
             assert stored.raw_payload_hash == result.raw_payload_hash
             assert stored.parser_version == "btc15_resolver_v1"
             assert stored.price_level_structure == "binary"
+            assert stored.resolver_decision_reason == "market_boundary_not_parseable"
     finally:
         engine.dispose()
 
