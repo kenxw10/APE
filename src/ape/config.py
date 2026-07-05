@@ -4,9 +4,14 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from urllib.parse import urlsplit
 
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
+
+DEFAULT_KALSHI_API_BASE_URL = "https://external-api.kalshi.com/trade-api/v2"
+DEFAULT_KALSHI_BTC15_SERIES_TICKER = "KXBTC15M"
+DEFAULT_KALSHI_RESOLVER_PARSER_VERSION = "btc15_resolver_v1"
 
 
 class ConfigError(ValueError):
@@ -35,8 +40,13 @@ class AppConfig:
     db_pool_size: int = 5
     db_max_overflow: int = 10
     db_statement_timeout_ms: int = 5000
+    kalshi_api_base_url: str = DEFAULT_KALSHI_API_BASE_URL
     kalshi_api_key_id: str | None = None
     kalshi_private_key: str | None = None
+    kalshi_env: str = "prod"
+    kalshi_btc15_series_ticker: str = DEFAULT_KALSHI_BTC15_SERIES_TICKER
+    kalshi_rest_timeout_seconds: float = 10.0
+    kalshi_resolver_parser_version: str = DEFAULT_KALSHI_RESOLVER_PARSER_VERSION
 
 
 TRUE_VALUES = {"1", "true", "t", "yes", "y", "on"}
@@ -69,8 +79,29 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
             "DB_STATEMENT_TIMEOUT_MS",
             _get(source, "DB_STATEMENT_TIMEOUT_MS", "5000"),
         ),
+        kalshi_api_base_url=_parse_url(
+            "KALSHI_API_BASE_URL",
+            _get(source, "KALSHI_API_BASE_URL", DEFAULT_KALSHI_API_BASE_URL),
+        ),
         kalshi_api_key_id=_optional(source.get("KALSHI_API_KEY_ID")),
         kalshi_private_key=_optional(source.get("KALSHI_PRIVATE_KEY")),
+        kalshi_env=_get(source, "KALSHI_ENV", "prod").strip().lower() or "prod",
+        kalshi_btc15_series_ticker=_get(
+            source,
+            "KALSHI_BTC15_SERIES_TICKER",
+            DEFAULT_KALSHI_BTC15_SERIES_TICKER,
+        ).strip()
+        or DEFAULT_KALSHI_BTC15_SERIES_TICKER,
+        kalshi_rest_timeout_seconds=_parse_float(
+            "KALSHI_REST_TIMEOUT_SECONDS",
+            _get(source, "KALSHI_REST_TIMEOUT_SECONDS", "10"),
+        ),
+        kalshi_resolver_parser_version=_get(
+            source,
+            "KALSHI_RESOLVER_PARSER_VERSION",
+            DEFAULT_KALSHI_RESOLVER_PARSER_VERSION,
+        ).strip()
+        or DEFAULT_KALSHI_RESOLVER_PARSER_VERSION,
     )
 
 
@@ -98,6 +129,15 @@ def _optional_database_url(value: str | None) -> str | None:
         raise ConfigError("Invalid DATABASE_URL. Expected a SQLAlchemy database URL.") from exc
 
     return database_url
+
+
+def _parse_url(name: str, raw_value: str) -> str:
+    value = raw_value.strip().rstrip("/")
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ConfigError(f"{name} must use http or https.")
+
+    return value
 
 
 def _parse_api_port(env: Mapping[str, str]) -> int:

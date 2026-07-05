@@ -10,11 +10,19 @@ from fastapi import FastAPI
 from ape import __version__
 from ape.config import AppConfig, load_config
 from ape.db.session import check_database_connection, create_engine_from_config
+from ape.kalshi.diagnostics import build_kalshi_config_diagnostic
+from ape.kalshi.resolver import resolve_active_btc15_market
 from ape.models.health import (
     DatabaseStatusResponse,
     HealthResponse,
     ReadinessResponse,
     SafetyResponse,
+)
+from ape.models.kalshi import (
+    ActiveMarketResponse,
+    KalshiStatusResponse,
+    active_market_response,
+    kalshi_status_response,
 )
 from ape.safety import SafetyAssessment, assert_startup_safe, assess_startup_safety
 
@@ -37,6 +45,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     )
     app.state.config = settings
     app.state.safety = safety
+    app.state.kalshi_client_factory = None
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
@@ -57,6 +66,17 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.get("/db/status", response_model=DatabaseStatusResponse)
     def database_status() -> DatabaseStatusResponse:
         return _database_status(settings)
+
+    @app.get("/kalshi/status", response_model=KalshiStatusResponse)
+    def kalshi_status() -> KalshiStatusResponse:
+        return kalshi_status_response(build_kalshi_config_diagnostic(settings))
+
+    @app.get("/markets/active", response_model=ActiveMarketResponse)
+    def active_market() -> ActiveMarketResponse:
+        client_factory = getattr(app.state, "kalshi_client_factory", None)
+        client = client_factory(settings) if client_factory else None
+        result = resolve_active_btc15_market(config=settings, client=client)
+        return active_market_response(result)
 
     @app.get("/ready", response_model=ReadinessResponse)
     def readiness() -> ReadinessResponse:

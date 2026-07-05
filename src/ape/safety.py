@@ -43,7 +43,7 @@ def assess_startup_safety(config: AppConfig) -> SafetyAssessment:
         blockers.append("EXECUTE=true is blocked in PR 1.")
 
     if config.kalshi_api_key_id or config.kalshi_private_key:
-        warnings.append("Kalshi credentials are configured but unused.")
+        warnings.append("Kalshi credentials are configured for observer-only REST diagnostics.")
 
     return SafetyAssessment(
         mode=config.app_mode.value,

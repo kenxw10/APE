@@ -30,6 +30,8 @@ Do not add these to Vercel:
 
 The dashboard is read-only and only needs the public Railway API base URL.
 
+PR 5 Kalshi REST credentials are Railway-only. Do not add `KALSHI_API_KEY_ID`, `KALSHI_PRIVATE_KEY`, or `KALSHI_API_BASE_URL` to Vercel.
+
 ## Expected Build Logs
 
 The dashboard build includes a marker that proves Vercel is running from the `dashboard` app:

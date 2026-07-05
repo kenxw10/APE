@@ -30,6 +30,24 @@ def test_trading_enabled_true_is_blocked() -> None:
     assert any("TRADING_ENABLED=true" in blocker for blocker in assessment.blockers)
 
 
+def test_kalshi_credentials_do_not_enable_trading_or_execution() -> None:
+    assessment = assess_startup_safety(
+        load_config(
+            {
+                "KALSHI_API_KEY_ID": "key-id",
+                "KALSHI_PRIVATE_KEY": "private-key",
+                "EXECUTE": "true",
+                "TRADING_ENABLED": "true",
+            }
+        )
+    )
+
+    assert assessment.is_safe is False
+    assert any("EXECUTE=true" in blocker for blocker in assessment.blockers)
+    assert any("TRADING_ENABLED=true" in blocker for blocker in assessment.blockers)
+    assert any("observer-only REST diagnostics" in warning for warning in assessment.warnings)
+
+
 @pytest.mark.parametrize("mode", ["DRY_RUN", "PAPER", "LIVE"])
 def test_non_observer_modes_are_blocked_in_pr_1(mode: str) -> None:
     assessment = assess_startup_safety(load_config({"APP_MODE": mode}))
@@ -43,4 +61,3 @@ def test_unsafe_assessment_raises_on_startup() -> None:
 
     with pytest.raises(RuntimeError, match="Unsafe startup configuration"):
         assert_startup_safe(assessment)
-

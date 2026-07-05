@@ -9,7 +9,9 @@ description = "Observer-only foundation for the APE BTC15 Kalshi momentum bot."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "cryptography>=43.0,<47.0",
   "fastapi>=0.115,<1.0",
+  "httpx>=0.27,<1.0",
   "psycopg[binary]>=3.2,<4.0",
   "sqlalchemy>=2.0,<3.0",
   "uvicorn>=0.30,<1.0",
@@ -17,7 +19,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-  "httpx>=0.27,<1.0",
   "pytest>=8.0,<9.0",
   "ruff>=0.8,<1.0",
 ]
