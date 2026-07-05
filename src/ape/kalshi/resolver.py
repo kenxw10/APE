@@ -33,6 +33,8 @@ class ResolverState(StrEnum):
 
 
 TRADABLE_MARKET_STATUSES = {"open", "active"}
+MARKETS_PAGE_LIMIT = 100
+MARKETS_MAX_PAGES = 10
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,13 @@ class ResolverResult:
     raw_payload_hash: str | None
     persisted: bool
     resolved_at: datetime
+
+
+@dataclass(frozen=True)
+class MarketsPageResult:
+    markets: list[Any]
+    page_count: int
+    truncated: bool
 
 
 def resolve_active_btc15_market(
@@ -92,11 +101,7 @@ def resolve_active_btc15_market(
     )
 
     try:
-        markets_response = rest_client.get_markets(
-            series_ticker=config.kalshi_btc15_series_ticker,
-            status="open",
-            limit=100,
-        )
+        page_result = _fetch_open_market_pages(rest_client, config)
     except KalshiAuthError:
         return _result(
             state=ResolverState.AUTH_ERROR,
@@ -134,8 +139,8 @@ def resolve_active_btc15_market(
             blockers=["kalshi_unreachable"],
         )
 
-    markets = markets_response.get("markets")
-    if not isinstance(markets, list):
+    markets = page_result.markets
+    if not all(isinstance(markets_page_item, dict) for markets_page_item in markets):
         return _result(
             state=ResolverState.KALSHI_UNREACHABLE,
             diagnostic=diagnostic,
@@ -150,15 +155,21 @@ def resolve_active_btc15_market(
         for market in markets
         if isinstance(market, dict) and _is_btc15_open_market(market, config)
     ]
+    pagination_metadata = {
+        "returned_market_count": len(markets),
+        "fetched_page_count": page_result.page_count,
+        "pagination_truncated": page_result.truncated,
+    }
     selected, state, reason = _select_market(candidates, resolved_at)
     if selected is None:
         return _result(
             state=state,
             diagnostic=diagnostic,
-            query_scope={**query_scope, "returned_market_count": len(markets)},
+            query_scope={**query_scope, **pagination_metadata},
             resolved_at=resolved_at,
             reason=reason,
             blockers=[state.value],
+            warnings=_pagination_warnings(page_result),
         )
 
     boundary = parse_market_boundary(selected)
@@ -184,14 +195,14 @@ def resolve_active_btc15_market(
         return _result(
             state=ResolverState.MARKET_NOT_PARSEABLE,
             diagnostic=diagnostic,
-            query_scope={**query_scope, "returned_market_count": len(markets)},
+            query_scope={**query_scope, **pagination_metadata},
             resolved_at=resolved_at,
             market=market_input,
             boundary=boundary,
             raw_payload_hash=raw_hash,
             reason="market_boundary_not_parseable",
             blockers=boundary.blockers,
-            warnings=warnings,
+            warnings=[*warnings, *_pagination_warnings(page_result)],
             persisted=persisted,
         )
 
@@ -207,15 +218,61 @@ def resolve_active_btc15_market(
     return _result(
         state=ResolverState.RESOLVED_OBSERVER_ONLY,
         diagnostic=diagnostic,
-        query_scope={**query_scope, "returned_market_count": len(markets)},
+        query_scope={**query_scope, **pagination_metadata},
         resolved_at=resolved_at,
         market=market_input,
         boundary=boundary,
         raw_payload_hash=raw_hash,
         reason=reason,
-        warnings=warnings,
+        warnings=[*warnings, *_pagination_warnings(page_result)],
         persisted=persisted,
     )
+
+
+def _fetch_open_market_pages(
+    rest_client: KalshiRestClient,
+    config: AppConfig,
+) -> MarketsPageResult:
+    markets: list[Any] = []
+    cursor: str | None = None
+    page_count = 0
+
+    while page_count < MARKETS_MAX_PAGES:
+        response = rest_client.get_markets(
+            series_ticker=config.kalshi_btc15_series_ticker,
+            status="open",
+            limit=MARKETS_PAGE_LIMIT,
+            cursor=cursor,
+        )
+        page_count += 1
+
+        page_markets = response.get("markets")
+        if not isinstance(page_markets, list):
+            return MarketsPageResult(markets=[None], page_count=page_count, truncated=False)
+
+        markets.extend(page_markets)
+        cursor = _cursor_or_none(response.get("cursor"))
+        if cursor is None:
+            break
+
+    return MarketsPageResult(
+        markets=markets,
+        page_count=page_count,
+        truncated=cursor is not None,
+    )
+
+
+def _cursor_or_none(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _pagination_warnings(page_result: MarketsPageResult) -> list[str]:
+    if not page_result.truncated:
+        return []
+    return ["kalshi_markets_pagination_truncated"]
 
 
 def raw_payload_hash(payload: KalshiMarketPayload) -> str:
@@ -396,7 +453,8 @@ def _query_scope(config: AppConfig) -> dict[str, Any]:
         "endpoint": "/markets",
         "series_ticker": config.kalshi_btc15_series_ticker,
         "status": "open",
-        "limit": 100,
+        "limit": MARKETS_PAGE_LIMIT,
+        "max_pages": MARKETS_MAX_PAGES,
     }
 
 

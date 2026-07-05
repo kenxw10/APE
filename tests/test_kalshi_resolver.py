@@ -18,12 +18,19 @@ NOW = datetime(2026, 7, 5, 12, 5, tzinfo=UTC)
 
 
 class FakeKalshiClient:
-    def __init__(self, markets: list[dict[str, Any]]) -> None:
-        self.markets = markets
+    def __init__(
+        self,
+        markets: list[dict[str, Any]] | None = None,
+        pages: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.markets = markets or []
+        self.pages = pages
         self.calls: list[dict[str, Any]] = []
 
     def get_markets(self, **kwargs):
         self.calls.append(kwargs)
+        if self.pages is not None:
+            return self.pages[len(self.calls) - 1]
         return {"markets": self.markets, "cursor": ""}
 
 
@@ -62,7 +69,44 @@ def test_resolver_selects_active_btc15_market_and_uses_bounded_query() -> None:
     assert result.market.functional_strike == Decimal("62000")
     assert result.market.price_level_structure == "binary"
     assert result.query_scope["series_ticker"] == "KXBTC15M"
-    assert client.calls == [{"series_ticker": "KXBTC15M", "status": "open", "limit": 100}]
+    assert result.query_scope["fetched_page_count"] == 1
+    assert client.calls == [
+        {"series_ticker": "KXBTC15M", "status": "open", "limit": 100, "cursor": None}
+    ]
+
+
+def test_resolver_paginates_before_selecting_active_market() -> None:
+    client = FakeKalshiClient(
+        pages=[
+            {
+                "markets": [
+                    _market_payload(
+                        ticker="KXBTC15M-OLDER",
+                        open_time="2026-07-05T11:30:00Z",
+                        close_time="2026-07-05T11:45:00Z",
+                    )
+                ],
+                "cursor": "next-page",
+            },
+            {
+                "markets": [_market_payload(ticker="KXBTC15M-ACTIVE")],
+                "cursor": "",
+            },
+        ]
+    )
+
+    result = resolve_active_btc15_market(config=_configured(), client=client, now=NOW)
+
+    assert result.state is ResolverState.RESOLVED_OBSERVER_ONLY
+    assert result.market is not None
+    assert result.market.market_ticker == "KXBTC15M-ACTIVE"
+    assert result.query_scope["returned_market_count"] == 2
+    assert result.query_scope["fetched_page_count"] == 2
+    assert result.query_scope["pagination_truncated"] is False
+    assert client.calls == [
+        {"series_ticker": "KXBTC15M", "status": "open", "limit": 100, "cursor": None},
+        {"series_ticker": "KXBTC15M", "status": "open", "limit": 100, "cursor": "next-page"},
+    ]
 
 
 def test_resolver_rejects_explicit_series_mismatch() -> None:
