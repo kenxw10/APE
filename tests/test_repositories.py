@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from ape.config import load_config
 from ape.db.migrations import run_migrations
@@ -18,7 +19,7 @@ from ape.repositories.inputs import (
 )
 from ape.repositories.markets import MarketsRepository
 from ape.repositories.orderbook import OrderbookRepository
-from ape.repositories.public_trades import PublicTradesRepository
+from ape.repositories.public_trades import PublicTradesRepository, _recent_trades_statement
 from ape.repositories.reference_ticks import ReferenceTicksRepository
 from ape.repositories.strategy_decisions import StrategyDecisionsRepository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
@@ -130,6 +131,16 @@ def test_public_trades_repository_inserts_and_reads_recent_trades(session) -> No
     recent = repository.get_recent_trades("KXBTC-TEST-001", limit=1)
     assert len(recent) == 1
     assert recent[0].trade_id == "trade-1"
+
+
+def test_recent_public_trades_query_orders_null_executed_at_last_for_postgres() -> None:
+    compiled_sql = str(
+        _recent_trades_statement(market_ticker="KXBTC-TEST-001", limit=10).compile(
+            dialect=postgresql.dialect()
+        )
+    )
+
+    assert "public_trades.executed_at DESC NULLS LAST" in compiled_sql
 
 
 def test_strategy_decisions_repository_inserts_and_reads_decision(session) -> None:

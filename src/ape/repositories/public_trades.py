@@ -20,14 +20,19 @@ class PublicTradesRepository:
     def get_recent_trades(self, market_ticker: str, limit: int = 100) -> list[PublicTrade]:
         return list(
             self.session.scalars(
-                select(PublicTrade)
-                .where(PublicTrade.market_ticker == market_ticker)
-                .order_by(
-                    desc(PublicTrade.executed_at),
-                    desc(PublicTrade.received_at),
-                    desc(PublicTrade.id),
-                )
-                .limit(limit)
+                _recent_trades_statement(market_ticker=market_ticker, limit=limit)
             )
         )
 
+
+def _recent_trades_statement(market_ticker: str, limit: int):
+    return (
+        select(PublicTrade)
+        .where(PublicTrade.market_ticker == market_ticker)
+        .order_by(
+            desc(PublicTrade.executed_at).nulls_last(),
+            desc(PublicTrade.received_at),
+            desc(PublicTrade.id),
+        )
+        .limit(limit)
+    )
