@@ -25,6 +25,29 @@ def test_kalshi_credentials_are_not_required() -> None:
     assert config.kalshi_private_key is None
 
 
+def test_api_port_defaults_to_8000() -> None:
+    config = load_config({})
+
+    assert config.api_port == 8000
+
+
+def test_port_is_used_when_api_port_is_unset() -> None:
+    config = load_config({"PORT": "9000"})
+
+    assert config.api_port == 9000
+
+
+def test_api_port_overrides_port_when_both_are_set() -> None:
+    config = load_config({"PORT": "9000", "API_PORT": "7000"})
+
+    assert config.api_port == 7000
+
+
+def test_invalid_port_raises_clear_config_error_when_api_port_unset() -> None:
+    with pytest.raises(ConfigError, match="Invalid integer for PORT"):
+        load_config({"PORT": "not-a-port"})
+
+
 @pytest.mark.parametrize(
     ("raw_value", "expected"),
     [

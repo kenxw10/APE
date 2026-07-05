@@ -16,3 +16,4 @@ Rules:
 - Do not move to the next PR until the current PR has been reviewed, merged, and validated.
 - Do not introduce live trading, paper trading, execution, secrets, external market data calls, or deployment behavior unless that PR explicitly authorizes it.
 - Database schema/repository changes are allowed only in PRs that explicitly authorize storage work.
+- Railway worker services should be always-on processes, not cron jobs, unless a later PR explicitly changes that decision.

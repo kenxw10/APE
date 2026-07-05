@@ -6,6 +6,8 @@ PR 1 created an observer-only Python foundation: configuration, startup safety c
 
 PR 2 adds the database schema and repository foundation for future observer ingestion and dry-run decision storage. It does not ingest Kalshi/BRTI data, execute strategy logic, place orders, add dashboard code, or configure production deployment.
 
+PR 3 adds Railway backend deployment scaffolding for the API and always-on worker. It remains observer-only.
+
 ## Safety Defaults
 
 The default configuration is intentionally non-trading:
@@ -67,11 +69,14 @@ Then, in a second PowerShell window:
 Invoke-RestMethod http://127.0.0.1:8000/health
 Invoke-RestMethod http://127.0.0.1:8000/safety
 Invoke-RestMethod http://127.0.0.1:8000/db/status
+Invoke-RestMethod http://127.0.0.1:8000/ready
 ```
 
 Successful health output should report `status` as `ok`, `app_mode` as `OBSERVER`, and `is_safe` as `True`.
 
 When `DATABASE_URL` is unset, `/db/status` should report `status` as `not_configured`.
+
+When `DATABASE_URL` is unset, `/ready` should report `status` as `not_ready`. This is expected locally unless you configure a database.
 
 ## Database Setup
 
@@ -85,6 +90,15 @@ python -m ape.db.migrations
 ```
 
 Successful output should say the database schema is current. The command does not print the database URL.
+
+## Railway Deployment
+
+PR 3 adds Railway deployment helper scripts and documentation for two Railway services from this repo:
+
+- API service: `python -m scripts.railway_start_api`
+- Worker service: `python -m scripts.railway_start_worker`
+
+The API command runs database migrations before API startup. The worker command starts the always-on observer worker directly so both services do not race on migrations. Railway Postgres should provide `DATABASE_URL` in deployment. See [docs/RAILWAY.md](docs/RAILWAY.md) before configuring Railway.
 
 ## Run Worker Locally
 
@@ -105,6 +119,6 @@ Successful startup should log that the worker is running in observer mode. Stop 
 - BRTI/reference ingestion
 - Websocket collectors
 - Vercel dashboard
-- Railway deployment config
+- Railway cron
 - GitHub Actions
 - Real secrets

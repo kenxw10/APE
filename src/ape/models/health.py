@@ -24,3 +24,10 @@ class HealthResponse(BaseModel):
 class DatabaseStatusResponse(BaseModel):
     status: str
     configured: bool
+
+
+class ReadinessResponse(BaseModel):
+    status: str
+    ready: bool
+    safety: SafetyResponse
+    database: DatabaseStatusResponse
