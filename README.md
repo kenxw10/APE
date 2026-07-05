@@ -10,6 +10,8 @@ PR 3 adds Railway backend deployment scaffolding for the API and always-on worke
 
 PR 3a adds a root `requirements.txt` so Railway/Railpack installs APE's runtime Python dependencies before starting the API or worker.
 
+PR 4 adds a Vercel-ready read-only dashboard scaffold under `dashboard/`. The dashboard uses the live Railway API for health, safety, database, and readiness state. Portfolio, CF/BRTI reference, and positions sections are clearly labeled placeholders until backend endpoints exist.
+
 ## Safety Defaults
 
 The default configuration is intentionally non-trading:
@@ -104,6 +106,27 @@ The API command runs database migrations before API startup. The worker command 
 
 Railway/Railpack uses the root `requirements.txt` for runtime dependency installation. If deploy logs show missing modules such as `sqlalchemy`, verify `requirements.txt` includes the runtime dependencies from `pyproject.toml`.
 
+## Vercel Dashboard
+
+PR 4 adds a Next.js dashboard app in `dashboard/`.
+
+Run locally from the dashboard folder:
+
+```powershell
+cd dashboard
+npm install
+$env:NEXT_PUBLIC_API_BASE_URL="https://ape-api-production.up.railway.app"
+npm run dev
+```
+
+Deploy on Vercel with `dashboard` as the project root/build directory and set:
+
+```text
+NEXT_PUBLIC_API_BASE_URL=https://ape-api-production.up.railway.app
+```
+
+Do not add `DATABASE_URL`, Kalshi credentials, private keys, or trading secrets to Vercel. See [docs/VERCEL.md](docs/VERCEL.md).
+
 ## Run Worker Locally
 
 ```powershell
@@ -122,7 +145,8 @@ Successful startup should log that the worker is running in observer mode. Stop 
 - Kalshi ingestion
 - BRTI/reference ingestion
 - Websocket collectors
-- Vercel dashboard
+- Real dashboard portfolio/ledger endpoints
+- Real CF/BRTI reference data endpoint
 - Railway cron
 - GitHub Actions
 - Real secrets

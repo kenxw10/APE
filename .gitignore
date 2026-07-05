@@ -22,6 +22,13 @@ build/
 dist/
 *.egg-info/
 
+# JavaScript dashboard
+node_modules/
+dashboard/.next/
+dashboard/out/
+dashboard/.test-build/
+*.tsbuildinfo
+
 # Local databases
 *.sqlite
 *.sqlite3
