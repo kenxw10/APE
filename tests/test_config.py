@@ -57,6 +57,11 @@ def test_invalid_kalshi_api_base_url_raises_clear_config_error() -> None:
         load_config({"KALSHI_API_BASE_URL": "not-a-url"})
 
 
+def test_kalshi_api_base_url_rejects_plaintext_http() -> None:
+    with pytest.raises(ConfigError, match="must use https"):
+        load_config({"KALSHI_API_BASE_URL": "http://external-api.kalshi.com/trade-api/v2"})
+
+
 def test_api_port_defaults_to_8000() -> None:
     config = load_config({})
 

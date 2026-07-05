@@ -134,8 +134,8 @@ def _optional_database_url(value: str | None) -> str | None:
 def _parse_url(name: str, raw_value: str) -> str:
     value = raw_value.strip().rstrip("/")
     parsed = urlsplit(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ConfigError(f"{name} must use http or https.")
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise ConfigError(f"{name} must use https.")
 
     return value
 
