@@ -78,7 +78,7 @@ class KalshiRestClient:
                 follow_redirects=False,
             ) as client:
                 response = client.get(full_url, headers=headers)
-        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+        except httpx.RequestError as exc:
             raise KalshiUnreachableError("Kalshi REST request failed or timed out.") from exc
 
         if response.status_code >= 400:

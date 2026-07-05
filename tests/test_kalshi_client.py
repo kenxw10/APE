@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from ape.kalshi.client import KalshiRestClient
-from ape.kalshi.errors import KalshiRequestError
+from ape.kalshi.errors import KalshiRequestError, KalshiUnreachableError
 
 
 def test_client_signs_safe_get_market_request_without_query_in_signature() -> None:
@@ -71,6 +71,27 @@ def test_client_errors_redact_key_and_signature_from_response_context() -> None:
     assert "mock-signature" not in (error.body_preview or "")
 
 
+@pytest.mark.parametrize(
+    "error_cls",
+    [
+        httpx.RemoteProtocolError,
+        httpx.ProxyError,
+        httpx.TooManyRedirects,
+    ],
+)
+def test_client_maps_httpx_request_errors_to_unreachable(error_cls) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise error_cls("transport failed", request=request)
+
+    client = KalshiRestClient(
+        base_url="https://external-api.kalshi.com/trade-api/v2",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(KalshiUnreachableError):
+        client.get_exchange_status()
+
+
 def test_client_exposes_only_observer_read_methods() -> None:
     client = KalshiRestClient(base_url="https://external-api.kalshi.com/trade-api/v2")
 
@@ -81,4 +102,3 @@ def test_client_exposes_only_observer_read_methods() -> None:
     assert not hasattr(client, "create_order")
     assert not hasattr(client, "cancel_order")
     assert not hasattr(client, "get_fills")
-
