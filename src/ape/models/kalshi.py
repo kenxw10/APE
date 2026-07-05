@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from ape.kalshi.diagnostics import KalshiConfigDiagnostic
 from ape.kalshi.resolver import ResolverResult
-from ape.repositories.inputs import MarketInput
+from ape.repositories.inputs import JsonPayload, MarketInput
 
 
 class KalshiStatusResponse(BaseModel):
@@ -55,8 +55,8 @@ class ActiveMarketMetadataResponse(BaseModel):
     floor_strike: Decimal | None
     cap_strike: Decimal | None
     custom_strike: Decimal | None
-    price_level_structure: dict[str, Any] | list[Any] | None
-    price_ranges: dict[str, Any] | list[Any] | None
+    price_level_structure: JsonPayload | None
+    price_ranges: JsonPayload | None
     liquidity_dollars: Decimal | None
     raw_payload_hash: str | None
     parser_version: str | None
@@ -113,4 +113,3 @@ def _market_response(market: MarketInput | None) -> ActiveMarketMetadataResponse
     if market is None:
         return None
     return ActiveMarketMetadataResponse(**market.__dict__)
-

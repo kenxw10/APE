@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-JsonPayload = dict[str, Any] | list[Any]
+JsonPayload = dict[str, Any] | list[Any] | str | int | float | bool
 
 
 @dataclass(frozen=True)
@@ -119,4 +119,3 @@ class WorkerHeartbeatInput:
     is_safe: bool
     started_at: datetime | None = None
     metadata: JsonPayload | None = None
-

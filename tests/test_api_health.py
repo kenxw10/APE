@@ -175,6 +175,8 @@ def test_active_market_uses_mocked_kalshi_client_and_persists_to_db(tmp_path) ->
     assert body["configured"] is True
     assert body["signer_ready"] is True
     assert body["market"]["market_ticker"] == "KXBTC15M-ACTIVE"
+    assert body["market"]["series_ticker"] == "KXBTC15M"
+    assert body["market"]["price_level_structure"] == "binary"
     assert body["persisted"] is True
     assert "PRIVATE KEY" not in response.text
     assert "KALSHI-ACCESS-SIGNATURE" not in response.text
@@ -186,6 +188,8 @@ def test_active_market_uses_mocked_kalshi_client_and_persists_to_db(tmp_path) ->
             stored = MarketsRepository(session).get_market_by_ticker("KXBTC15M-ACTIVE")
             assert stored is not None
             assert stored.raw_payload_hash == body["raw_payload_hash"]
+            assert stored.series_ticker == "KXBTC15M"
+            assert stored.price_level_structure == "binary"
     finally:
         engine.dispose()
 
@@ -197,7 +201,6 @@ class _FakeKalshiClient:
                 {
                     "ticker": "KXBTC15M-ACTIVE",
                     "event_ticker": "KXBTC15M-26JUL051200",
-                    "series_ticker": "KXBTC15M",
                     "status": "open",
                     "title": "Bitcoin price above $62,000 at settlement?",
                     "yes_sub_title": "Above $62,000",
@@ -208,6 +211,7 @@ class _FakeKalshiClient:
                     "expiration_time": "2026-07-06T00:00:00Z",
                     "latest_expiration_time": "2026-07-06T00:00:00Z",
                     "functional_strike": "62000",
+                    "price_level_structure": "binary",
                     "rules_primary": "Observer metadata only.",
                 }
             ]

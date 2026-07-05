@@ -45,7 +45,7 @@ def test_resolver_selects_active_btc15_market_and_uses_bounded_query() -> None:
                 open_time="2026-07-05T11:30:00Z",
                 close_time="2026-07-05T11:45:00Z",
             ),
-            _market_payload(ticker="KXBTC15M-ACTIVE"),
+            _market_payload(ticker="KXBTC15M-ACTIVE", include_series_ticker=False),
         ]
     )
 
@@ -58,9 +58,20 @@ def test_resolver_selects_active_btc15_market_and_uses_bounded_query() -> None:
     assert result.state is ResolverState.RESOLVED_OBSERVER_ONLY
     assert result.market is not None
     assert result.market.market_ticker == "KXBTC15M-ACTIVE"
+    assert result.market.series_ticker == "KXBTC15M"
     assert result.market.functional_strike == Decimal("62000")
+    assert result.market.price_level_structure == "binary"
     assert result.query_scope["series_ticker"] == "KXBTC15M"
     assert client.calls == [{"series_ticker": "KXBTC15M", "status": "open", "limit": 100}]
+
+
+def test_resolver_rejects_explicit_series_mismatch() -> None:
+    client = FakeKalshiClient([_market_payload(series_ticker="KXMISMATCH")])
+
+    result = resolve_active_btc15_market(config=_configured(), client=client, now=NOW)
+
+    assert result.state is ResolverState.NO_ACTIVE_MARKET
+    assert result.market is None
 
 
 def test_resolver_rejects_ambiguous_active_markets() -> None:
@@ -133,6 +144,7 @@ def test_resolver_rejects_unparseable_boundary_but_persists_metadata(tmp_path) -
             assert stored is not None
             assert stored.raw_payload_hash == result.raw_payload_hash
             assert stored.parser_version == "btc15_resolver_v1"
+            assert stored.price_level_structure == "binary"
     finally:
         engine.dispose()
 
@@ -156,11 +168,12 @@ def _market_payload(
     title: str = "Bitcoin price above $62,000 at settlement?",
     yes_sub_title: str = "Above $62,000",
     no_sub_title: str = "At or below $62,000",
+    series_ticker: str | None = "KXBTC15M",
+    include_series_ticker: bool = True,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "ticker": ticker,
         "event_ticker": "KXBTC15M-26JUL051200",
-        "series_ticker": "KXBTC15M",
         "status": "open",
         "title": title,
         "subtitle": "BTC 15-minute market",
@@ -174,10 +187,12 @@ def _market_payload(
         "settlement_timer_seconds": 60,
         "rules_primary": "Uses CF Benchmarks settlement.",
         "rules_secondary": "Observer metadata only.",
-        "price_level_structure": {"type": "above"},
+        "price_level_structure": "binary",
         "price_ranges": [{"min": "62000"}],
         "liquidity_dollars": "123.45",
     }
+    if include_series_ticker:
+        payload["series_ticker"] = series_ticker
     if functional_strike is not None:
         payload["functional_strike"] = functional_strike
     return payload

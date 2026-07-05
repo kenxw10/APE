@@ -18,7 +18,7 @@ from ape.kalshi.client import KalshiRestClient
 from ape.kalshi.diagnostics import KalshiConfigDiagnostic, build_kalshi_config_diagnostic
 from ape.kalshi.errors import KalshiAuthError, KalshiRequestError, KalshiUnreachableError
 from ape.kalshi.types import KalshiMarketPayload
-from ape.repositories.inputs import MarketInput
+from ape.repositories.inputs import JsonPayload, MarketInput
 from ape.repositories.markets import MarketsRepository
 
 
@@ -165,6 +165,7 @@ def resolve_active_btc15_market(
     raw_hash = raw_payload_hash(selected)
     market_input = market_input_from_payload(
         selected,
+        series_ticker=config.kalshi_btc15_series_ticker,
         boundary=boundary,
         parser_version=config.kalshi_resolver_parser_version,
         raw_hash=raw_hash,
@@ -225,6 +226,7 @@ def raw_payload_hash(payload: KalshiMarketPayload) -> str:
 def market_input_from_payload(
     payload: KalshiMarketPayload,
     *,
+    series_ticker: str,
     boundary: ParsedBoundary,
     parser_version: str,
     raw_hash: str,
@@ -233,7 +235,7 @@ def market_input_from_payload(
     return MarketInput(
         market_ticker=str(payload.get("ticker") or payload.get("market_ticker")),
         event_ticker=_str_or_none(payload.get("event_ticker")),
-        series_ticker=_str_or_none(payload.get("series_ticker")),
+        series_ticker=_str_or_none(payload.get("series_ticker")) or series_ticker,
         title=_str_or_none(payload.get("title")),
         subtitle=_str_or_none(payload.get("subtitle")),
         yes_sub_title=_str_or_none(payload.get("yes_sub_title")),
@@ -260,8 +262,8 @@ def market_input_from_payload(
 
 
 def _is_btc15_open_market(market: KalshiMarketPayload, config: AppConfig) -> bool:
-    series_ticker = market.get("series_ticker")
-    if series_ticker != config.kalshi_btc15_series_ticker:
+    series_ticker = _str_or_none(market.get("series_ticker"))
+    if series_ticker is not None and series_ticker != config.kalshi_btc15_series_ticker:
         return False
 
     status = str(market.get("status") or "").strip().lower()
@@ -436,7 +438,7 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
-def _json_payload_or_none(value: Any) -> dict[str, Any] | list[Any] | None:
-    if isinstance(value, dict | list):
+def _json_payload_or_none(value: Any) -> JsonPayload | None:
+    if isinstance(value, dict | list | str | int | float | bool):
         return value
     return None
