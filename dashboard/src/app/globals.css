@@ -25,11 +25,7 @@ body {
 
 body {
   color: var(--text);
-  background-color: var(--bg);
-  background-image:
-    linear-gradient(var(--grid) 1px, transparent 1px),
-    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
-  background-size: 48px 48px;
+  background: var(--bg);
   font-family: var(--font-mono);
   letter-spacing: 0;
 }
@@ -221,8 +217,8 @@ button:disabled {
 }
 
 .chart-grid line {
-  stroke: rgba(100, 116, 139, 0.22);
-  stroke-width: 0.6;
+  stroke: rgba(100, 116, 139, 0.14);
+  stroke-width: 0.55;
 }
 
 .chart-line {
@@ -382,7 +378,7 @@ button:disabled {
 }
 
 .latest-price {
-  color: #2563eb;
+  color: var(--gold);
   font-size: 13px;
   white-space: nowrap;
 }

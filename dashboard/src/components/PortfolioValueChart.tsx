@@ -127,13 +127,33 @@ export function PortfolioValueChart({
 }
 
 export function Grid() {
+  const horizontalLines = [CHART_PLOT.top, (CHART_PLOT.top + CHART_PLOT.bottom) / 2, CHART_PLOT.bottom];
+  const verticalLines = [
+    CHART_PLOT.left + (CHART_PLOT.right - CHART_PLOT.left) / 3,
+    CHART_PLOT.left + ((CHART_PLOT.right - CHART_PLOT.left) * 2) / 3
+  ];
+
   return (
-    <g className="chart-grid" vectorEffect="non-scaling-stroke">
-      {[CHART_PLOT.top, (CHART_PLOT.top + CHART_PLOT.bottom) / 2, CHART_PLOT.bottom].map((y) => (
-        <line key={`y:${y}`} x1={CHART_PLOT.left} x2={CHART_PLOT.right} y1={y} y2={y} />
+    <g className="chart-grid">
+      {horizontalLines.map((y) => (
+        <line
+          key={`y:${y}`}
+          x1={CHART_PLOT.left}
+          x2={CHART_PLOT.right}
+          y1={y}
+          y2={y}
+          vectorEffect="non-scaling-stroke"
+        />
       ))}
-      {[CHART_PLOT.left, (CHART_PLOT.left + CHART_PLOT.right) / 2, CHART_PLOT.right].map((x) => (
-        <line key={`x:${x}`} x1={x} x2={x} y1={CHART_PLOT.top} y2={CHART_PLOT.bottom} />
+      {verticalLines.map((x) => (
+        <line
+          key={`x:${x}`}
+          x1={x}
+          x2={x}
+          y1={CHART_PLOT.top}
+          y2={CHART_PLOT.bottom}
+          vectorEffect="non-scaling-stroke"
+        />
       ))}
     </g>
   );
