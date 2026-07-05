@@ -8,6 +8,8 @@ PR 2 adds the database schema and repository foundation for future observer inge
 
 PR 3 adds Railway backend deployment scaffolding for the API and always-on worker. It remains observer-only.
 
+PR 3a adds a root `requirements.txt` so Railway/Railpack installs APE's runtime Python dependencies before starting the API or worker.
+
 ## Safety Defaults
 
 The default configuration is intentionally non-trading:
@@ -99,6 +101,8 @@ PR 3 adds Railway deployment helper scripts and documentation for two Railway se
 - Worker service: `python -m scripts.railway_start_worker`
 
 The API command runs database migrations before API startup. The worker command starts the always-on observer worker directly so both services do not race on migrations. Railway Postgres should provide `DATABASE_URL` in deployment. See [docs/RAILWAY.md](docs/RAILWAY.md) before configuring Railway.
+
+Railway/Railpack uses the root `requirements.txt` for runtime dependency installation. If deploy logs show missing modules such as `sqlalchemy`, verify `requirements.txt` includes the runtime dependencies from `pyproject.toml`.
 
 ## Run Worker Locally
 
