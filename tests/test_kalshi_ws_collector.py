@@ -93,7 +93,7 @@ def test_collector_subscribes_and_persists_mock_messages(tmp_path) -> None:
                     "market_ticker": "KXBTC15M-TEST",
                     "side": "yes",
                     "price_dollars": "0.6200",
-                    "delta_fp": "4.00",
+                    "delta_fp": "4.25",
                     "ts_ms": 1780000000500,
                 },
             },
@@ -105,7 +105,7 @@ def test_collector_subscribes_and_persists_mock_messages(tmp_path) -> None:
                     "trade_id": "trade-1",
                     "market_ticker": "KXBTC15M-TEST",
                     "yes_price_dollars": "0.61",
-                    "count_fp": "2",
+                    "count_fp": "2.50",
                     "taker_side": "yes",
                     "ts_ms": 1780000001000,
                 },
@@ -138,10 +138,13 @@ def test_collector_subscribes_and_persists_mock_messages(tmp_path) -> None:
             assert latest_book.sequence_number == 2
             assert latest_book.yes_bid == Decimal("0.62000000")
             assert latest_book.yes_ask == Decimal("0.65000000")
-            assert latest_book.yes_bid_size == 4
+            assert latest_book.yes_bid_size is None
+            assert latest_book.yes_bid_count == Decimal("4.25000000")
             assert latest_book.book_status == "ok"
             assert latest_trade is not None
             assert latest_trade.trade_id == "trade-1"
+            assert latest_trade.count is None
+            assert latest_trade.trade_count == Decimal("2.50000000")
             assert latest_trade.taker_side == "yes"
             assert heartbeat is not None
             assert heartbeat.metadata_["ws"]["connection_state"] == "subscribed"
@@ -217,7 +220,7 @@ def test_collector_records_bounded_safe_parse_diagnostic_samples(tmp_path) -> No
                     "trade_id": "trade-1",
                     "market_ticker": "KXBTC15M-TEST",
                     "yes_price_dollars": "0.61",
-                    "count_fp": "2.50",
+                    "count_fp": "2.345",
                 },
             },
             {
@@ -365,7 +368,7 @@ def test_collector_persists_valid_snapshot_after_invalid_live_like_snapshot(tmp_
                 "seq": 2,
                 "msg": {
                     "market_ticker": "KXBTC15M-TEST",
-                    "yes_dollars_fp": [["0.6000", "1,200.00"]],
+                    "yes_dollars_fp": [["0.6000", "1,200.50"]],
                     "no_dollars_fp": [["0.6500", "8.00"]],
                 },
             },
@@ -394,7 +397,8 @@ def test_collector_persists_valid_snapshot_after_invalid_live_like_snapshot(tmp_
 
             assert latest_book is not None
             assert latest_book.sequence_number == 2
-            assert latest_book.yes_bid_size == 1200
+            assert latest_book.yes_bid_size is None
+            assert latest_book.yes_bid_count == Decimal("1200.50000000")
             assert heartbeat is not None
             assert (
                 "invalid_orderbook_snapshot_yes_level_size"

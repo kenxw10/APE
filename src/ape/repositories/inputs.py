@@ -73,6 +73,10 @@ class OrderbookSnapshotInput:
     yes_ask_size: int | None = None
     no_bid_size: int | None = None
     no_ask_size: int | None = None
+    yes_bid_count: Decimal | None = None
+    yes_ask_count: Decimal | None = None
+    no_bid_count: Decimal | None = None
+    no_ask_count: Decimal | None = None
     book_status: str | None = None
     raw_payload_hash: str | None = None
     raw_payload: JsonPayload | None = None
@@ -86,6 +90,7 @@ class PublicTradeInput:
     executed_at: datetime | None = None
     price: Decimal | None = None
     count: int | None = None
+    trade_count: Decimal | None = None
     taker_side: str | None = None
     side_inferred: str | None = None
     raw_payload_hash: str | None = None

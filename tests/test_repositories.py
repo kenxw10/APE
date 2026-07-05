@@ -103,6 +103,8 @@ def test_orderbook_repository_inserts_and_reads_latest_snapshot(session) -> None
             received_at=now,
             yes_bid=Decimal("49"),
             yes_ask=Decimal("51"),
+            yes_bid_count=Decimal("12.50"),
+            yes_ask_count=Decimal("8.25"),
             raw_payload={"top": "book"},
         )
     )
@@ -110,6 +112,8 @@ def test_orderbook_repository_inserts_and_reads_latest_snapshot(session) -> None
     latest = repository.get_latest_snapshot("KXBTC-TEST-001")
     assert latest is not None
     assert latest.yes_bid == Decimal("49.00000000")
+    assert latest.yes_bid_count == Decimal("12.50000000")
+    assert latest.yes_ask_count == Decimal("8.25000000")
     assert repository.get_latest_snapshot_any().market_ticker == "KXBTC-TEST-001"
 
 
@@ -124,7 +128,7 @@ def test_public_trades_repository_inserts_and_reads_recent_trades(session) -> No
             received_at=now,
             executed_at=now,
             price=Decimal("52"),
-            count=3,
+            trade_count=Decimal("3.50"),
             taker_side="yes",
         )
     )
@@ -132,6 +136,8 @@ def test_public_trades_repository_inserts_and_reads_recent_trades(session) -> No
     recent = repository.get_recent_trades("KXBTC-TEST-001", limit=1)
     assert len(recent) == 1
     assert recent[0].trade_id == "trade-1"
+    assert recent[0].count is None
+    assert recent[0].trade_count == Decimal("3.50000000")
     assert repository.get_latest_trade("KXBTC-TEST-001").trade_id == "trade-1"
     assert repository.get_latest_trade().market_ticker == "KXBTC-TEST-001"
 
