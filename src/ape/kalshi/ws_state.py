@@ -11,8 +11,8 @@ from ape.repositories.inputs import JsonPayload, OrderbookSnapshotInput
 @dataclass
 class OrderbookState:
     market_ticker: str
-    yes_levels: dict[Decimal, int] = field(default_factory=dict)
-    no_levels: dict[Decimal, int] = field(default_factory=dict)
+    yes_levels: dict[Decimal, Decimal] = field(default_factory=dict)
+    no_levels: dict[Decimal, Decimal] = field(default_factory=dict)
     initialized: bool = False
     last_sequence_number: int | None = None
 
@@ -29,7 +29,7 @@ class OrderbookState:
             return
 
         levels = self.yes_levels if message.delta_side == "yes" else self.no_levels
-        next_size = levels.get(message.delta_price, 0) + message.delta_size
+        next_size = levels.get(message.delta_price, Decimal("0")) + message.delta_size
         if next_size <= 0:
             levels.pop(message.delta_price, None)
         else:
@@ -83,10 +83,16 @@ class OrderbookState:
             no_ask=no_ask,
             yes_spread=yes_spread,
             no_spread=no_spread,
-            yes_bid_size=yes_bid.size if yes_bid else None,
-            yes_ask_size=yes_ask_level.size if yes_ask_level else None,
-            no_bid_size=yes_ask_level.size if yes_ask_level else None,
-            no_ask_size=yes_bid.size if yes_bid else None,
+            yes_bid_size=_legacy_int_count(yes_bid.size) if yes_bid else None,
+            yes_ask_size=(
+                _legacy_int_count(yes_ask_level.size) if yes_ask_level else None
+            ),
+            no_bid_size=_legacy_int_count(yes_ask_level.size) if yes_ask_level else None,
+            no_ask_size=_legacy_int_count(yes_bid.size) if yes_bid else None,
+            yes_bid_count=yes_bid.size if yes_bid else None,
+            yes_ask_count=yes_ask_level.size if yes_ask_level else None,
+            no_bid_count=yes_ask_level.size if yes_ask_level else None,
+            no_ask_count=yes_bid.size if yes_bid else None,
             book_status="ok" if not warnings else "|".join(warnings),
             raw_payload_hash=raw_payload_hash,
             raw_payload=raw_payload,
@@ -96,14 +102,14 @@ class OrderbookState:
 @dataclass(frozen=True)
 class BestLevel:
     price: Decimal
-    size: int
+    size: Decimal
 
 
-def _level_map(levels: list[PriceLevel]) -> dict[Decimal, int]:
+def _level_map(levels: list[PriceLevel]) -> dict[Decimal, Decimal]:
     return {level.price: level.size for level in levels if level.size > 0}
 
 
-def _best_bid(levels: dict[Decimal, int]) -> BestLevel | None:
+def _best_bid(levels: dict[Decimal, Decimal]) -> BestLevel | None:
     executable = [(price, size) for price, size in levels.items() if size > 0]
     if not executable:
         return None
@@ -112,7 +118,7 @@ def _best_bid(levels: dict[Decimal, int]) -> BestLevel | None:
     return BestLevel(price=price, size=size)
 
 
-def _best_ask(levels: dict[Decimal, int]) -> BestLevel | None:
+def _best_ask(levels: dict[Decimal, Decimal]) -> BestLevel | None:
     executable = [(price, size) for price, size in levels.items() if size > 0]
     if not executable:
         return None
@@ -143,3 +149,8 @@ def _book_warnings(
         warnings.append("crossed_book")
 
     return warnings
+
+
+def _legacy_int_count(value: Decimal) -> int | None:
+    integral_value = value.to_integral_value()
+    return int(integral_value) if value == integral_value else None

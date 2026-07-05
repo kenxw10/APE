@@ -10,6 +10,7 @@ from typing import Any
 from ape.repositories.inputs import JsonPayload, PublicTradeInput
 
 ONE_DOLLAR = Decimal("1")
+CONTRACT_COUNT_QUANTUM = Decimal("0.01")
 
 
 class WsMessageParseError(ValueError):
@@ -21,7 +22,7 @@ class WsMessageParseError(ValueError):
 @dataclass(frozen=True)
 class PriceLevel:
     price: Decimal
-    size: int
+    size: Decimal
 
 
 @dataclass(frozen=True)
@@ -35,7 +36,7 @@ class ParsedWsMessage:
     no_levels: list[PriceLevel] | None = None
     delta_side: str | None = None
     delta_price: Decimal | None = None
-    delta_size: int | None = None
+    delta_size: Decimal | None = None
     trade: PublicTradeInput | None = None
     control_type: str | None = None
     reason: str | None = None
@@ -177,7 +178,10 @@ def parse_ws_payload(
             )
 
         try:
-            delta_size = parse_size(message.get("delta_fp"), allow_negative=True)
+            delta_size = parse_fixed_point_contract_count(
+                message.get("delta_fp"),
+                allow_negative=True,
+            )
         except ValueError:
             return ParsedWsMessage(
                 kind="invalid",
@@ -255,16 +259,25 @@ def parse_decimal(value: Any) -> Decimal:
     return parsed
 
 
-def parse_size(value: Any, *, allow_negative: bool = False) -> int:
-    # Kalshi fixed-point count fields are decimal contract counts. Accept only
-    # exact whole contracts after normalization; never round fractional counts.
-    size = parse_decimal(value)
-    if not allow_negative and size <= 0:
-        raise ValueError("size must be positive")
-    integral_size = size.to_integral_value()
-    if size != integral_size:
-        raise ValueError("size must be an integer")
-    return int(integral_size)
+def parse_fixed_point_contract_count(
+    value: Any,
+    *,
+    allow_negative: bool = False,
+    allow_zero: bool = True,
+) -> Decimal:
+    count = parse_decimal(value)
+    if not allow_negative and count < 0:
+        raise ValueError("count must not be negative")
+    if not allow_zero and count == 0:
+        raise ValueError("count must be positive")
+
+    try:
+        normalized = count.quantize(CONTRACT_COUNT_QUANTUM)
+    except InvalidOperation as exc:
+        raise ValueError("invalid count precision") from exc
+    if count != normalized:
+        raise ValueError("count has more than two decimal places")
+    return normalized
 
 
 def raw_payload_hash(payload: Any) -> str:
@@ -287,7 +300,7 @@ def _levels_from_payload(value: Any, *, reason_prefix: str) -> list[PriceLevel]:
         except ValueError as exc:
             raise WsMessageParseError(f"{reason_prefix}_level_price") from exc
         try:
-            size = parse_size(raw_level[1])
+            size = parse_fixed_point_contract_count(raw_level[1])
         except ValueError as exc:
             raise WsMessageParseError(f"{reason_prefix}_level_size") from exc
         levels.append(PriceLevel(price=price, size=size))
@@ -308,7 +321,10 @@ def _trade_from_payload(
         return None, "invalid_trade_price"
 
     try:
-        count = parse_size(_first_present(payload, ("count", "count_fp")))
+        trade_count = parse_fixed_point_contract_count(
+            _first_present(payload, ("count", "count_fp")),
+            allow_zero=False,
+        )
     except ValueError:
         return None, "invalid_trade_count_fp"
 
@@ -322,7 +338,8 @@ def _trade_from_payload(
             received_at=received_at,
             executed_at=_timestamp_or_none(payload),
             price=price,
-            count=count,
+            count=_legacy_int_count(trade_count),
+            trade_count=trade_count,
             taker_side=taker_side,
             side_inferred="provided" if taker_side else "unknown",
             raw_payload_hash=raw_payload_hash,
@@ -377,6 +394,11 @@ def _first_present(payload: dict[str, Any], keys: tuple[str, ...]) -> Any:
 
 def _is_present(value: Any) -> bool:
     return value is not None and value != ""
+
+
+def _legacy_int_count(value: Decimal) -> int | None:
+    integral_value = value.to_integral_value()
+    return int(integral_value) if value == integral_value else None
 
 
 def _timestamp_or_none(payload: dict[str, Any]) -> datetime | None:
