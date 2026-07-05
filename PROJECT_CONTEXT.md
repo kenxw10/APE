@@ -13,7 +13,7 @@ Planned platform split:
 - Railway Postgres
 - Vercel dashboard
 
-PR 1 does not add Railway, Postgres, or Vercel configuration.
+PR 1 is merged and validated. PR 2 adds a SQLAlchemy schema and repository foundation, but still does not add Railway, Postgres deployment wiring, or Vercel configuration.
 
 ## BULL Reference Rule
 
@@ -46,7 +46,7 @@ High-level future ingredients may include:
 - Paper trading later
 - Tiny live canary only after evidence
 
-PR 1 does not implement the strategy.
+PR 1 did not implement the strategy. PR 2 also does not implement ingestion, strategy decisions, paper trading, live trading, or execution.
 
 ## Safety Defaults
 
@@ -58,31 +58,31 @@ TRADING_ENABLED=false
 EXECUTE=false
 ```
 
-PR 1 blocks startup when:
+Current safety policy blocks startup when:
 
 - `APP_MODE` is not `OBSERVER`
 - `TRADING_ENABLED=true`
 - `EXECUTE=true`
 
-No live trading, paper trading, Kalshi order placement, strategy execution, or database persistence is included in PR 1.
+No live trading, paper trading, Kalshi order placement, strategy execution, external market data calls, or dashboard behavior is included.
 
 ## PR Ladder
 
 This ladder is directional and should be reviewed before each PR.
 
-1. Repo foundation and observer-only skeleton.
-2. Kalshi BTC15 market catalog and contract resolver in observer mode.
-3. BRTI/reference data intake in observer mode.
-4. Kalshi order book and trade websocket observer.
-5. Observer state API, health, safety, and SSE diagnostics.
-6. Storage lifecycle, retention policy, and local replay fixtures.
-7. Deterministic replay harness for captured market/reference data.
-8. Momentum feature calculations without trade decisions.
-9. Dry-run decision interface with execution still blocked.
-10. Spread, depth, liquidity, and anti-chop gate diagnostics.
-11. Paper trading simulator after dry-run evidence review.
-12. Calibration and reporting workflow for strategy quality.
-13. Railway API/worker/Postgres and Vercel dashboard wiring.
-14. Manual live-canary safety plan with tiny limits and approvals.
-15. Post-canary monitoring, rollback, alerting, and hardening.
-
+1. Repo foundation and observer-only skeleton. Completed and validated.
+2. Postgres schema and repository foundation. Current PR.
+3. Kalshi BTC15 market catalog and contract resolver in observer mode.
+4. BRTI/reference data intake in observer mode.
+5. Kalshi order book and trade websocket observer.
+6. Observer state API, health, safety, and SSE diagnostics.
+7. Storage lifecycle, retention policy, and local replay fixtures.
+8. Deterministic replay harness for captured market/reference data.
+9. Momentum feature calculations without trade decisions.
+10. Dry-run decision interface with execution still blocked.
+11. Spread, depth, liquidity, and anti-chop gate diagnostics.
+12. Paper trading simulator after dry-run evidence review.
+13. Calibration and reporting workflow for strategy quality.
+14. Railway API/worker/Postgres and Vercel dashboard wiring.
+15. Manual live-canary safety plan with tiny limits and approvals.
+16. Post-canary monitoring, rollback, alerting, and hardening.

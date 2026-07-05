@@ -20,3 +20,7 @@ class HealthResponse(BaseModel):
     safety: SafetyResponse
     version: str | None
 
+
+class DatabaseStatusResponse(BaseModel):
+    status: str
+    configured: bool

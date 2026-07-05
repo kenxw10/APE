@@ -22,9 +22,12 @@ build/
 dist/
 *.egg-info/
 
+# Local databases
+*.sqlite
+*.sqlite3
+
 # OS/editor noise
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
-

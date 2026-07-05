@@ -5,6 +5,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
+
 
 class ConfigError(ValueError):
     """Raised when environment configuration is invalid."""
@@ -28,6 +31,10 @@ class AppConfig:
     api_port: int = 8000
     worker_poll_seconds: float = 1.0
     database_url: str | None = None
+    db_echo: bool = False
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    db_statement_timeout_ms: int = 5000
     kalshi_api_key_id: str | None = None
     kalshi_private_key: str | None = None
 
@@ -51,7 +58,17 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
             "WORKER_POLL_SECONDS",
             _get(source, "WORKER_POLL_SECONDS", "1.0"),
         ),
-        database_url=_optional(source.get("DATABASE_URL")),
+        database_url=_optional_database_url(source.get("DATABASE_URL")),
+        db_echo=_parse_bool("DB_ECHO", _get(source, "DB_ECHO", "false")),
+        db_pool_size=_parse_int("DB_POOL_SIZE", _get(source, "DB_POOL_SIZE", "5")),
+        db_max_overflow=_parse_non_negative_int(
+            "DB_MAX_OVERFLOW",
+            _get(source, "DB_MAX_OVERFLOW", "10"),
+        ),
+        db_statement_timeout_ms=_parse_int(
+            "DB_STATEMENT_TIMEOUT_MS",
+            _get(source, "DB_STATEMENT_TIMEOUT_MS", "5000"),
+        ),
         kalshi_api_key_id=_optional(source.get("KALSHI_API_KEY_ID")),
         kalshi_private_key=_optional(source.get("KALSHI_PRIVATE_KEY")),
     )
@@ -68,6 +85,19 @@ def _optional(value: str | None) -> str | None:
     if value is None or value == "":
         return None
     return value
+
+
+def _optional_database_url(value: str | None) -> str | None:
+    database_url = _optional(value)
+    if database_url is None:
+        return None
+
+    try:
+        make_url(database_url)
+    except ArgumentError as exc:
+        raise ConfigError("Invalid DATABASE_URL. Expected a SQLAlchemy database URL.") from exc
+
+    return database_url
 
 
 def _parse_mode(raw_value: str) -> AppMode:
@@ -100,6 +130,16 @@ def _parse_int(name: str, raw_value: str) -> int:
         raise ConfigError(f"Invalid integer for {name}: {raw_value!r}.") from exc
     if value <= 0:
         raise ConfigError(f"{name} must be greater than 0.")
+    return value
+
+
+def _parse_non_negative_int(name: str, raw_value: str) -> int:
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ConfigError(f"Invalid integer for {name}: {raw_value!r}.") from exc
+    if value < 0:
+        raise ConfigError(f"{name} must be greater than or equal to 0.")
     return value
 
 

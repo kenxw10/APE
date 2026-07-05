@@ -14,5 +14,5 @@ Rules:
 - Keep each PR bounded.
 - Do not skip validation.
 - Do not move to the next PR until the current PR has been reviewed, merged, and validated.
-- Do not introduce live trading, paper trading, execution, secrets, database writes, or deployment behavior unless that PR explicitly authorizes it.
-
+- Do not introduce live trading, paper trading, execution, secrets, external market data calls, or deployment behavior unless that PR explicitly authorizes it.
+- Database schema/repository changes are allowed only in PRs that explicitly authorize storage work.

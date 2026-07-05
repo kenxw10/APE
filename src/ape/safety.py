@@ -34,7 +34,7 @@ def assess_startup_safety(config: AppConfig) -> SafetyAssessment:
     warnings: list[str] = []
 
     if config.app_mode is not AppMode.OBSERVER:
-        blockers.append("PR 1 only permits APP_MODE=OBSERVER.")
+        blockers.append("Current safety policy only permits APP_MODE=OBSERVER.")
 
     if config.trading_enabled:
         blockers.append("TRADING_ENABLED=true is blocked in PR 1.")
@@ -42,11 +42,8 @@ def assess_startup_safety(config: AppConfig) -> SafetyAssessment:
     if config.execute:
         blockers.append("EXECUTE=true is blocked in PR 1.")
 
-    if config.database_url:
-        warnings.append("DATABASE_URL is configured but unused in PR 1.")
-
     if config.kalshi_api_key_id or config.kalshi_private_key:
-        warnings.append("Kalshi credentials are configured but unused in PR 1.")
+        warnings.append("Kalshi credentials are configured but unused.")
 
     return SafetyAssessment(
         mode=config.app_mode.value,
@@ -64,4 +61,3 @@ def assert_startup_safe(assessment: SafetyAssessment) -> None:
 
     joined_blockers = "; ".join(assessment.blockers)
     raise SafetyError(f"Unsafe startup configuration: {joined_blockers}")
-
