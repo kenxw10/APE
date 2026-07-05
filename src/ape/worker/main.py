@@ -13,6 +13,7 @@ def configure_logging(log_level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+        force=True,
     )
 
 
@@ -40,8 +41,6 @@ def run_worker(
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s - %(message)s")
-
     try:
         config = load_config()
         configure_logging(config.log_level)
@@ -61,4 +60,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
