@@ -34,6 +34,12 @@ npm run build
 
 Successful output should end without TypeScript, ESLint, test, or Next.js build errors.
 
+`npm run build` should print this marker before `next build`:
+
+```text
+APE_DASHBOARD_BUILD_PATH_CONFIRMED
+```
+
 ## Environment
 
 Required:
@@ -57,3 +63,29 @@ Do not add secrets to the dashboard. Do not add `DATABASE_URL`, Kalshi credentia
 - No real open or closed positions endpoint yet.
 
 The dashboard fetches Railway API status server-side, so browser CORS is not required for PR 4.
+
+## Vercel Deployment Troubleshooting
+
+This app includes `vercel.json` so Vercel should run the dashboard install and build from the `dashboard` directory.
+
+The repo config sets `outputDirectory` to `null` to clear stale Vercel UI overrides such as `public` and let Vercel auto-detect the Next.js output.
+
+Expected Vercel logs should include:
+
+```text
+Running "install" command: npm install
+APE_DASHBOARD_BUILD_PATH_CONFIRMED
+> @ape/dashboard@0.1.0 build
+> next build
+Compiled successfully
+```
+
+Keep Vercel configured with:
+
+- Root Directory: `dashboard`
+- Framework Preset: `Next.js`
+- Build Command: `npm run build`
+- Install Command: `npm install`
+- Output Directory: blank / Next.js default in the Vercel UI
+
+If logs show `Build Completed in /vercel/output [70ms]` without npm install or next build, Vercel did not run the dashboard build path.
