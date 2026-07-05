@@ -7,6 +7,7 @@ import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from inspect import isawaitable
 from typing import Any
 
 from sqlalchemy.orm import Session, sessionmaker
@@ -190,15 +191,23 @@ class KalshiWsCollector:
                 self.config.kalshi_ws_connect_timeout_seconds,
                 self.config.kalshi_ws_heartbeat_timeout_seconds,
             )
-            self.status.connection_state = "connected"
-            self.status.last_connected_at = self.now()
-            self.record_heartbeat()
+            try:
+                self.status.connection_state = "connected"
+                self.status.last_connected_at = self.now()
+                self.record_heartbeat()
 
-            await self._subscribe(websocket, market_ticker)
-            self.status.connection_state = "subscribed"
-            self.record_heartbeat()
+                await self._subscribe(websocket, market_ticker)
+                self.status.connection_state = "subscribed"
+                self.record_heartbeat()
 
-            await self._read_messages(websocket, market_ticker, stop_event)
+                await self._read_messages(
+                    websocket,
+                    market_ticker,
+                    resolver_result.market.close_time,
+                    stop_event,
+                )
+            finally:
+                await _close_websocket(websocket)
         except Exception as exc:
             self.status.reconnect_count += 1
             self._set_error(exc.__class__.__name__, exc)
@@ -245,13 +254,31 @@ class KalshiWsCollector:
         self,
         websocket: Any,
         market_ticker: str,
+        market_close_time: datetime | None,
         stop_event: threading.Event,
     ) -> None:
         orderbook = OrderbookState(market_ticker=market_ticker)
+        message_iterator = websocket.__aiter__()
 
-        async for raw_message in websocket:
-            if stop_event.is_set():
-                break
+        while not stop_event.is_set():
+            if _market_window_closed(self.now(), market_close_time):
+                self.status.connection_state = "market_roll_reresolve"
+                self._add_warning("active_market_window_closed")
+                self.record_heartbeat()
+                return
+
+            try:
+                raw_message = await _next_websocket_message(
+                    message_iterator,
+                    _seconds_until_market_close(self.now(), market_close_time),
+                )
+            except StopAsyncIteration:
+                return
+            except TimeoutError:
+                self.status.connection_state = "market_roll_reresolve"
+                self._add_warning("active_market_window_closed")
+                self.record_heartbeat()
+                return
 
             received_at = self.now()
             parsed_json = _json_or_none(raw_message)
@@ -266,7 +293,12 @@ class KalshiWsCollector:
                 received_at=received_at,
             )
             self.status.last_message_at = received_at
-            self._handle_message(message, orderbook, received_at)
+            resubscribe_reason = self._handle_message(message, orderbook, received_at)
+            if resubscribe_reason is not None:
+                self.status.connection_state = "resubscribe_pending"
+                self._add_warning("kalshi_ws_resubscribe_requested")
+                self.record_heartbeat()
+                return
             self.record_heartbeat()
 
     def _handle_message(
@@ -274,13 +306,13 @@ class KalshiWsCollector:
         message: ParsedWsMessage,
         orderbook: OrderbookState,
         received_at: datetime,
-    ) -> None:
+    ) -> str | None:
         if message.kind == "control":
-            return
+            return None
 
         if message.kind == "ticker":
             self.status.last_ticker_at = received_at
-            return
+            return None
 
         if message.kind == "orderbook_snapshot":
             orderbook.apply_snapshot(message)
@@ -292,16 +324,16 @@ class KalshiWsCollector:
             )
             self._persist_orderbook(snapshot)
             self.status.last_orderbook_at = received_at
-            return
+            return None
 
         if message.kind == "orderbook_delta":
             if not orderbook.initialized:
                 self._add_warning("orderbook_delta_before_snapshot")
-                return
+                return None
             if orderbook.has_sequence_gap(message.seq):
                 orderbook.reset()
                 self._add_warning("orderbook_sequence_gap_reset")
-                return
+                return "orderbook_sequence_gap_reset"
             orderbook.apply_delta(message)
             snapshot = orderbook.snapshot_input(
                 received_at=received_at,
@@ -311,20 +343,25 @@ class KalshiWsCollector:
             )
             self._persist_orderbook(snapshot)
             self.status.last_orderbook_at = received_at
-            return
+            return None
 
         if message.kind == "trade" and message.trade is not None:
             self._persist_trade(message.trade)
             self.status.last_trade_at = received_at
             if message.warning:
                 self._add_warning(message.warning)
-            return
+            return None
 
         if message.kind == "invalid":
             if message.reason == "kalshi_websocket_buffer_overflow":
                 orderbook.reset()
                 self._add_warning("orderbook_reset_after_buffer_overflow")
+                self._add_warning(message.reason)
+                return "orderbook_reset_after_buffer_overflow"
             self._add_warning(message.reason or "invalid_websocket_message")
+            return None
+
+        return None
 
     def _persist_orderbook(self, snapshot) -> None:
         if self.session_factory is None:
@@ -408,6 +445,40 @@ def _json_or_none(raw_message: Any) -> Any | None:
         return json.loads(raw_message)
     except ValueError:
         return None
+
+
+async def _next_websocket_message(
+    message_iterator: Any,
+    timeout_seconds: float | None,
+) -> Any:
+    next_message = anext(message_iterator)
+    if timeout_seconds is None:
+        return await next_message
+    return await asyncio.wait_for(next_message, timeout=timeout_seconds)
+
+
+def _market_window_closed(now: datetime, close_time: datetime | None) -> bool:
+    if close_time is None:
+        return False
+    return now.astimezone(UTC) >= close_time.astimezone(UTC)
+
+
+def _seconds_until_market_close(now: datetime, close_time: datetime | None) -> float | None:
+    if close_time is None:
+        return None
+    return max(0.0, (close_time.astimezone(UTC) - now.astimezone(UTC)).total_seconds())
+
+
+async def _close_websocket(websocket: Any) -> None:
+    close = getattr(websocket, "close", None)
+    if not callable(close):
+        return
+    try:
+        result = close()
+        if isawaitable(result):
+            await result
+    except Exception:
+        LOGGER.debug("Kalshi WebSocket close failed.", exc_info=True)
 
 
 async def _sleep_or_stop(stop_event: threading.Event, seconds: float) -> None:
