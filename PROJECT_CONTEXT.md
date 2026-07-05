@@ -13,7 +13,7 @@ Planned platform split:
 - Railway Postgres
 - Vercel dashboard
 
-PR 1 is merged and validated. PR 2 is merged and validated. PR 3 adds Railway backend deployment scaffolding for the API and always-on worker. PR 3a adds Railway runtime dependency packaging. PR 4 adds a Vercel-ready read-only dashboard scaffold. PR 4a adds explicit Vercel build configuration. PR 4b adds dashboard visual polish. PR 5 adds observer-only Kalshi REST auth diagnostics and active BTC15 market resolution, but still does not add market ingestion loops, WebSockets, BRTI intake, strategy execution, paper trading, live trading, or execution.
+PR 1 is merged and validated. PR 2 is merged and validated. PR 3 adds Railway backend deployment scaffolding for the API and always-on worker. PR 3a adds Railway runtime dependency packaging. PR 4 adds a Vercel-ready read-only dashboard scaffold. PR 4a adds explicit Vercel build configuration. PR 4b adds dashboard visual polish. PR 5 adds observer-only Kalshi REST auth diagnostics and active BTC15 market resolution. PR 6 adds observer-only Kalshi WebSocket market-data intake for the Railway worker, disabled by default. PR 6 still does not add BRTI intake, strategy execution, paper trading, live trading, or execution.
 
 Railway API: https://ape-api-production.up.railway.app
 
@@ -71,9 +71,9 @@ Current safety policy blocks startup when:
 - `TRADING_ENABLED=true`
 - `EXECUTE=true`
 
-No live trading, paper trading, Kalshi order placement, strategy execution, ingestion loops, WebSocket collectors, BRTI intake, or trading-capable dashboard behavior is included.
+No live trading, paper trading, Kalshi order placement, strategy execution, BRTI intake, or trading-capable dashboard behavior is included. The only PR 6 ingestion loop is an observer-only Railway worker WebSocket collector for public Kalshi ticker, orderbook, and trade messages.
 
-Kalshi REST credentials are optional at startup. When missing, `/kalshi/status` and `/markets/active` return safe `not_configured` diagnostics. If configured, credentials belong only in Railway API/worker environment variables, never in Vercel.
+Kalshi REST/WebSocket credentials are optional at startup. When missing, `/kalshi/status`, `/markets/active`, and `/ws/status` return safe diagnostics. If configured, credentials belong only in Railway API/worker environment variables, never in Vercel.
 
 ## PR Ladder
 
@@ -83,9 +83,9 @@ This ladder is directional and should be reviewed before each PR.
 2. Postgres schema and repository foundation. Completed and validated.
 3. Railway backend deployment scaffold. Completed and validated.
 4. Vercel-ready read-only dashboard scaffold. Completed and validated.
-5. Kalshi BTC15 market catalog and contract resolver in observer mode. Current PR.
-6. BRTI/reference data intake in observer mode.
-7. Kalshi order book and trade websocket observer.
+5. Kalshi BTC15 market catalog and contract resolver in observer mode. Completed and validated.
+6. Kalshi orderbook, ticker, and public trade WebSocket observer. Current PR.
+7. BRTI/reference data intake in observer mode.
 8. Observer state API, health, safety, and SSE diagnostics.
 9. Storage lifecycle, retention policy, and local replay fixtures.
 10. Deterministic replay harness for captured market/reference data.
@@ -98,4 +98,4 @@ This ladder is directional and should be reviewed before each PR.
 17. Manual live-canary safety plan with tiny limits and approvals.
 18. Post-canary monitoring, rollback, alerting, and hardening.
 
-Next manual checkpoint after PR 5: add Kalshi credentials to Railway API and worker env only, redeploy Railway, and validate `/kalshi/status`, `/markets/active`, `/health`, `/safety`, `/db/status`, and `/ready`. Do not add Kalshi credentials to Vercel.
+Next manual checkpoint after PR 6: set `KALSHI_WS_ENABLED=true` on the Railway worker only, keep API and worker observer-only, redeploy the worker, and validate worker logs, `/ws/status`, `orderbook_snapshots`, `public_trades`, `/health`, `/safety`, `/db/status`, `/ready`, `/kalshi/status`, and `/markets/active`. Do not add Kalshi credentials or WebSocket variables to Vercel.

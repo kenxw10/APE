@@ -110,6 +110,7 @@ def test_orderbook_repository_inserts_and_reads_latest_snapshot(session) -> None
     latest = repository.get_latest_snapshot("KXBTC-TEST-001")
     assert latest is not None
     assert latest.yes_bid == Decimal("49.00000000")
+    assert repository.get_latest_snapshot_any().market_ticker == "KXBTC-TEST-001"
 
 
 def test_public_trades_repository_inserts_and_reads_recent_trades(session) -> None:
@@ -131,6 +132,8 @@ def test_public_trades_repository_inserts_and_reads_recent_trades(session) -> No
     recent = repository.get_recent_trades("KXBTC-TEST-001", limit=1)
     assert len(recent) == 1
     assert recent[0].trade_id == "trade-1"
+    assert repository.get_latest_trade("KXBTC-TEST-001").trade_id == "trade-1"
+    assert repository.get_latest_trade().market_ticker == "KXBTC-TEST-001"
 
 
 def test_recent_public_trades_query_orders_null_executed_at_last_for_postgres() -> None:

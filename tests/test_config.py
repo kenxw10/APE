@@ -21,6 +21,15 @@ def test_default_config_is_observer_only() -> None:
     assert config.kalshi_btc15_series_ticker == "KXBTC15M"
     assert config.kalshi_rest_timeout_seconds == 10
     assert config.kalshi_resolver_parser_version == "btc15_resolver_v1"
+    assert config.kalshi_ws_base_url == "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
+    assert config.kalshi_ws_enabled is False
+    assert config.kalshi_ws_connect_timeout_seconds == 10
+    assert config.kalshi_ws_heartbeat_timeout_seconds == 30
+    assert config.kalshi_ws_reconnect_seconds == 5
+    assert config.kalshi_ws_max_reconnect_seconds == 60
+    assert config.kalshi_ws_subscribe_orderbook is True
+    assert config.kalshi_ws_subscribe_ticker is True
+    assert config.kalshi_ws_subscribe_trades is True
 
 
 def test_kalshi_credentials_are_not_required() -> None:
@@ -52,6 +61,32 @@ def test_kalshi_env_vars_parse_without_requiring_credentials() -> None:
     assert config.kalshi_resolver_parser_version == "btc15_resolver_test"
 
 
+def test_kalshi_websocket_env_vars_parse_safely() -> None:
+    config = load_config(
+        {
+            "KALSHI_WS_BASE_URL": "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2/",
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_CONNECT_TIMEOUT_SECONDS": "8",
+            "KALSHI_WS_HEARTBEAT_TIMEOUT_SECONDS": "25",
+            "KALSHI_WS_RECONNECT_SECONDS": "3",
+            "KALSHI_WS_MAX_RECONNECT_SECONDS": "45",
+            "KALSHI_WS_SUBSCRIBE_ORDERBOOK": "false",
+            "KALSHI_WS_SUBSCRIBE_TICKER": "true",
+            "KALSHI_WS_SUBSCRIBE_TRADES": "false",
+        }
+    )
+
+    assert config.kalshi_ws_base_url == "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2"
+    assert config.kalshi_ws_enabled is True
+    assert config.kalshi_ws_connect_timeout_seconds == 8
+    assert config.kalshi_ws_heartbeat_timeout_seconds == 25
+    assert config.kalshi_ws_reconnect_seconds == 3
+    assert config.kalshi_ws_max_reconnect_seconds == 45
+    assert config.kalshi_ws_subscribe_orderbook is False
+    assert config.kalshi_ws_subscribe_ticker is True
+    assert config.kalshi_ws_subscribe_trades is False
+
+
 def test_invalid_kalshi_api_base_url_raises_clear_config_error() -> None:
     with pytest.raises(ConfigError, match="KALSHI_API_BASE_URL"):
         load_config({"KALSHI_API_BASE_URL": "not-a-url"})
@@ -60,6 +95,11 @@ def test_invalid_kalshi_api_base_url_raises_clear_config_error() -> None:
 def test_kalshi_api_base_url_rejects_plaintext_http() -> None:
     with pytest.raises(ConfigError, match="must use https"):
         load_config({"KALSHI_API_BASE_URL": "http://external-api.kalshi.com/trade-api/v2"})
+
+
+def test_kalshi_websocket_base_url_rejects_plaintext_ws() -> None:
+    with pytest.raises(ConfigError, match="must use wss"):
+        load_config({"KALSHI_WS_BASE_URL": "ws://external-api-ws.kalshi.com/trade-api/ws/v2"})
 
 
 def test_api_port_defaults_to_8000() -> None:
