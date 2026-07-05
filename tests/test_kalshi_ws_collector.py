@@ -80,15 +80,27 @@ def test_collector_subscribes_and_persists_mock_messages(tmp_path) -> None:
                 "seq": 1,
                 "msg": {
                     "market_ticker": "KXBTC15M-TEST",
-                    "yes_dollars_fp": [["0.60", "10"]],
-                    "no_dollars_fp": [["0.65", "8"]],
+                    "yes_dollars_fp": [["0.6000", "10.00"]],
+                    "no_dollars_fp": [["0.6500", "8.00"]],
                     "ts_ms": 1780000000000,
+                },
+            },
+            {
+                "type": "orderbook_delta",
+                "sid": 1,
+                "seq": 2,
+                "msg": {
+                    "market_ticker": "KXBTC15M-TEST",
+                    "side": "yes",
+                    "price_dollars": "0.6200",
+                    "delta_fp": "4.00",
+                    "ts_ms": 1780000000500,
                 },
             },
             {
                 "type": "trade",
                 "sid": 2,
-                "seq": 2,
+                "seq": 3,
                 "msg": {
                     "trade_id": "trade-1",
                     "market_ticker": "KXBTC15M-TEST",
@@ -123,8 +135,10 @@ def test_collector_subscribes_and_persists_mock_messages(tmp_path) -> None:
             heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
 
             assert latest_book is not None
-            assert latest_book.yes_bid == Decimal("0.60000000")
+            assert latest_book.sequence_number == 2
+            assert latest_book.yes_bid == Decimal("0.62000000")
             assert latest_book.yes_ask == Decimal("0.65000000")
+            assert latest_book.yes_bid_size == 4
             assert latest_book.book_status == "ok"
             assert latest_trade is not None
             assert latest_trade.trade_id == "trade-1"

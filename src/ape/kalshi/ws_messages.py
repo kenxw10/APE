@@ -12,6 +12,12 @@ from ape.repositories.inputs import JsonPayload, PublicTradeInput
 ONE_DOLLAR = Decimal("1")
 
 
+class WsMessageParseError(ValueError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 @dataclass(frozen=True)
 class PriceLevel:
     price: Decimal
@@ -113,15 +119,21 @@ def parse_ws_payload(
 
     if message_type == "orderbook_snapshot":
         try:
-            yes_levels = _levels_from_payload(message.get("yes_dollars_fp"))
-            no_levels = _levels_from_payload(message.get("no_dollars_fp"))
-        except ValueError:
+            yes_levels = _levels_from_payload(
+                message.get("yes_dollars_fp"),
+                reason_prefix="invalid_orderbook_snapshot_yes",
+            )
+            no_levels = _levels_from_payload(
+                message.get("no_dollars_fp"),
+                reason_prefix="invalid_orderbook_snapshot_no",
+            )
+        except WsMessageParseError as exc:
             return ParsedWsMessage(
                 kind="invalid",
                 sid=sid,
                 seq=seq,
                 market_ticker=market_ticker,
-                reason="invalid_orderbook_snapshot_price_or_size",
+                reason=exc.reason,
                 raw_payload_hash=raw_hash,
                 raw_payload=raw_payload,
             )
@@ -153,6 +165,18 @@ def parse_ws_payload(
 
         try:
             price = parse_decimal(message.get("price_dollars"))
+        except ValueError:
+            return ParsedWsMessage(
+                kind="invalid",
+                sid=sid,
+                seq=seq,
+                market_ticker=market_ticker,
+                reason="invalid_orderbook_delta_price_dollars",
+                raw_payload_hash=raw_hash,
+                raw_payload=raw_payload,
+            )
+
+        try:
             delta_size = parse_size(message.get("delta_fp"), allow_negative=True)
         except ValueError:
             return ParsedWsMessage(
@@ -160,7 +184,7 @@ def parse_ws_payload(
                 sid=sid,
                 seq=seq,
                 market_ticker=market_ticker,
-                reason="invalid_orderbook_delta_price_or_size",
+                reason="invalid_orderbook_delta_delta_fp",
                 raw_payload_hash=raw_hash,
                 raw_payload=raw_payload,
             )
@@ -223,18 +247,22 @@ def parse_decimal(value: Any) -> Decimal:
     if value is None or value == "":
         raise ValueError("missing decimal")
     try:
-        return Decimal(str(value))
+        parsed = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
         raise ValueError("invalid decimal") from exc
+    if not parsed.is_finite():
+        raise ValueError("invalid decimal")
+    return parsed
 
 
 def parse_size(value: Any, *, allow_negative: bool = False) -> int:
     size = parse_decimal(value)
     if not allow_negative and size <= 0:
         raise ValueError("size must be positive")
-    if size != size.to_integral_value():
+    integral_size = size.to_integral_value()
+    if size != integral_size:
         raise ValueError("size must be an integer")
-    return int(size)
+    return int(integral_size)
 
 
 def raw_payload_hash(payload: Any) -> str:
@@ -242,16 +270,24 @@ def raw_payload_hash(payload: Any) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _levels_from_payload(value: Any) -> list[PriceLevel]:
-    if not isinstance(value, list):
+def _levels_from_payload(value: Any, *, reason_prefix: str) -> list[PriceLevel]:
+    if value is None:
         return []
+    if not isinstance(value, list):
+        raise WsMessageParseError(f"{reason_prefix}_levels_not_array")
 
     levels: list[PriceLevel] = []
     for raw_level in value:
         if not isinstance(raw_level, list | tuple) or len(raw_level) != 2:
-            raise ValueError("invalid level")
-        price = parse_decimal(raw_level[0])
-        size = parse_size(raw_level[1])
+            raise WsMessageParseError(f"{reason_prefix}_level_shape")
+        try:
+            price = parse_decimal(raw_level[0])
+        except ValueError as exc:
+            raise WsMessageParseError(f"{reason_prefix}_level_price") from exc
+        try:
+            size = parse_size(raw_level[1])
+        except ValueError as exc:
+            raise WsMessageParseError(f"{reason_prefix}_level_size") from exc
         levels.append(PriceLevel(price=price, size=size))
 
     return levels
