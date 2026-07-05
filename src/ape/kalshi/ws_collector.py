@@ -34,6 +34,8 @@ from ape.safety import SafetyAssessment
 LOGGER = logging.getLogger(__name__)
 MAX_HEARTBEAT_INTERVAL_SECONDS = 10.0
 MIN_HEARTBEAT_INTERVAL_SECONDS = 1.0
+MAX_DIAGNOSTIC_SAMPLES = 3
+MAX_DIAGNOSTIC_KEYS = 20
 
 WebSocketFactory = Callable[
     [str, dict[str, str], float, float],
@@ -61,6 +63,7 @@ class KalshiWsCollectorStatus:
     last_error_message: str | None = None
     warnings: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
+    diagnostic_samples: list[dict[str, Any]] = field(default_factory=list)
 
     def as_metadata(self) -> dict[str, Any]:
         return {
@@ -81,6 +84,7 @@ class KalshiWsCollectorStatus:
             "last_error_message": self.last_error_message,
             "warnings": self.warnings,
             "blockers": self.blockers,
+            "diagnostic_samples": self.diagnostic_samples,
         }
 
 
@@ -309,7 +313,7 @@ class KalshiWsCollector:
                 self._add_warning("kalshi_ws_resubscribe_requested")
                 self.record_heartbeat()
                 return
-            self.record_heartbeat(force=False)
+            self.record_heartbeat(force=message.kind == "invalid")
 
     def _handle_message(
         self,
@@ -334,6 +338,14 @@ class KalshiWsCollector:
             )
             self._persist_orderbook(snapshot)
             self.status.last_orderbook_at = received_at
+            warnings_cleared = self._clear_warning_prefixes(
+                "invalid_orderbook_snapshot_"
+            )
+            warnings_cleared = (
+                self._clear_warnings("orderbook_delta_before_snapshot") or warnings_cleared
+            )
+            if warnings_cleared:
+                self.record_heartbeat()
             return None
 
         if message.kind == "orderbook_delta":
@@ -353,13 +365,25 @@ class KalshiWsCollector:
             )
             self._persist_orderbook(snapshot)
             self.status.last_orderbook_at = received_at
+            warnings_cleared = self._clear_warning_prefixes("invalid_orderbook_delta_")
+            warnings_cleared = (
+                self._clear_warnings("orderbook_delta_before_snapshot") or warnings_cleared
+            )
+            if warnings_cleared:
+                self.record_heartbeat()
             return None
 
         if message.kind == "trade" and message.trade is not None:
             self._persist_trade(message.trade)
             self.status.last_trade_at = received_at
+            warnings_cleared = self._clear_warning_prefixes("invalid_trade_")
+            warnings_cleared = (
+                self._clear_warnings("invalid_trade_price_or_size") or warnings_cleared
+            )
             if message.warning:
                 self._add_warning(message.warning)
+            if warnings_cleared:
+                self.record_heartbeat()
             return None
 
         if message.kind == "invalid":
@@ -368,6 +392,7 @@ class KalshiWsCollector:
                 self._add_warning("orderbook_reset_after_buffer_overflow")
                 self._add_warning(message.reason)
                 return "orderbook_reset_after_buffer_overflow"
+            self._record_parse_diagnostic(message)
             self._add_warning(message.reason or "invalid_websocket_message")
             return None
 
@@ -438,6 +463,36 @@ class KalshiWsCollector:
         if warning not in self.status.warnings:
             self.status.warnings.append(warning)
 
+    def _clear_warnings(self, *warnings: str) -> bool:
+        if not warnings:
+            return False
+        warning_set = set(warnings)
+        existing = self.status.warnings
+        self.status.warnings = [
+            warning for warning in self.status.warnings if warning not in warning_set
+        ]
+        return self.status.warnings != existing
+
+    def _clear_warning_prefixes(self, *prefixes: str) -> bool:
+        if not prefixes:
+            return False
+        existing = self.status.warnings
+        self.status.warnings = [
+            warning
+            for warning in self.status.warnings
+            if not any(warning.startswith(prefix) for prefix in prefixes)
+        ]
+        return self.status.warnings != existing
+
+    def _record_parse_diagnostic(self, message: ParsedWsMessage) -> None:
+        sample = _invalid_message_diagnostic_sample(message)
+        if sample is None:
+            return
+        self.status.diagnostic_samples.append(sample)
+        self.status.diagnostic_samples = self.status.diagnostic_samples[
+            -MAX_DIAGNOSTIC_SAMPLES:
+        ]
+
 
 async def _default_websocket_factory(
     endpoint: str,
@@ -495,6 +550,139 @@ def _seconds_until_market_close(now: datetime, close_time: datetime | None) -> f
     if close_time is None:
         return None
     return max(0.0, (close_time.astimezone(UTC) - now.astimezone(UTC)).total_seconds())
+
+
+def _invalid_message_diagnostic_sample(message: ParsedWsMessage) -> dict[str, Any] | None:
+    reason = message.reason or "invalid_websocket_message"
+    if not reason.startswith(
+        ("invalid_orderbook_snapshot_", "invalid_orderbook_delta_", "invalid_trade_")
+    ):
+        return None
+    raw_payload = message.raw_payload if isinstance(message.raw_payload, dict) else {}
+    msg_payload = raw_payload.get("msg")
+    msg = msg_payload if isinstance(msg_payload, dict) else {}
+    message_type = _safe_text(raw_payload.get("type"))
+
+    sample: dict[str, Any] = {
+        "reason": reason,
+        "message_type": message_type,
+        "market_ticker": message.market_ticker or _safe_text(msg.get("market_ticker")),
+        "payload_keys": _bounded_keys(raw_payload),
+        "message_keys": _bounded_keys(msg),
+        "raw_payload_hash": message.raw_payload_hash,
+    }
+
+    if message_type == "orderbook_snapshot" or reason.startswith(
+        "invalid_orderbook_snapshot_"
+    ):
+        sample["snapshot"] = {
+            "yes": _levels_diagnostic_shape(msg.get("yes_dollars_fp")),
+            "no": _levels_diagnostic_shape(msg.get("no_dollars_fp")),
+        }
+    elif message_type == "orderbook_delta" or reason.startswith("invalid_orderbook_delta_"):
+        sample["delta"] = _fields_diagnostic(
+            msg,
+            ("price_dollars", "delta_fp", "side"),
+        )
+    elif message_type == "trade" or reason.startswith("invalid_trade_"):
+        sample["trade"] = _fields_diagnostic(
+            msg,
+            (
+                "price_dollars",
+                "yes_price_dollars",
+                "no_price_dollars",
+                "count",
+                "count_fp",
+                "taker_outcome_side",
+                "taker_side",
+                "taker_book_side",
+            ),
+        )
+
+    return sample
+
+
+def _levels_diagnostic_shape(value: Any) -> dict[str, Any]:
+    if not isinstance(value, list):
+        return {
+            "present": value is not None,
+            "level_count": None,
+            "shape": _value_shape(value),
+            "level_samples": [],
+        }
+    return {
+        "present": True,
+        "level_count": len(value),
+        "shape": {"type": "list", "length": len(value)},
+        "level_samples": [_value_shape(item) for item in value[:3]],
+    }
+
+
+def _fields_diagnostic(payload: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
+    return {
+        field: {
+            "present": field in payload,
+            "shape": _value_shape(payload.get(field)) if field in payload else None,
+        }
+        for field in fields
+    }
+
+
+def _value_shape(value: Any, *, depth: int = 0) -> dict[str, Any]:
+    if value is None:
+        return {"type": "null"}
+    if isinstance(value, bool):
+        return {"type": "bool"}
+    if isinstance(value, int):
+        return {"type": "int"}
+    if isinstance(value, float):
+        return {"type": "float"}
+    if isinstance(value, str):
+        return {"type": "string", "length": len(value), "blank": value.strip() == ""}
+    if isinstance(value, list | tuple):
+        shape: dict[str, Any] = {"type": "list", "length": len(value)}
+        if depth < 2:
+            shape["items"] = [_value_shape(item, depth=depth + 1) for item in value[:3]]
+        return shape
+    if isinstance(value, dict):
+        shape = {
+            "type": "object",
+            "key_count": len(value),
+            "keys": _bounded_keys(value),
+        }
+        return shape
+    return {"type": type(value).__name__}
+
+
+def _bounded_keys(payload: dict[str, Any]) -> list[str]:
+    return [_safe_key(key) for key in list(payload.keys())[:MAX_DIAGNOSTIC_KEYS]]
+
+
+def _safe_key(key: Any) -> str:
+    text = str(key)[:80]
+    lowered = text.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "authorization",
+            "header",
+            "signature",
+            "secret",
+            "private",
+            "api_key",
+            "access_key",
+            "signed",
+        )
+    ):
+        return "[redacted_key]"
+    return text
+
+
+def _safe_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text[:120] if text else None
 
 
 def heartbeat_interval_seconds(config: AppConfig) -> float:

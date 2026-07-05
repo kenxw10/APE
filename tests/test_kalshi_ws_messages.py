@@ -113,6 +113,29 @@ def test_orderbook_snapshot_allows_empty_sides() -> None:
     assert message.no_levels == []
 
 
+def test_orderbook_snapshot_accepts_comma_decimal_contract_counts() -> None:
+    message = parse_ws_payload(
+        {
+            "type": "orderbook_snapshot",
+            "sid": 1,
+            "seq": 10,
+            "msg": {
+                "market_ticker": "KXBTC15M-TEST",
+                "yes_dollars_fp": [["0.6300", "1,200.00"]],
+                "no_dollars_fp": [["0.7000", "2,500.0000"]],
+            },
+        },
+        target_market_ticker="KXBTC15M-TEST",
+        received_at=NOW,
+    )
+
+    assert message.kind == "orderbook_snapshot"
+    assert message.yes_levels is not None
+    assert message.no_levels is not None
+    assert message.yes_levels[0].size == 1200
+    assert message.no_levels[0].size == 2500
+
+
 def test_orderbook_delta_updates_book_after_snapshot() -> None:
     state = OrderbookState("KXBTC15M-TEST")
     snapshot_message = parse_ws_payload(
@@ -201,6 +224,42 @@ def test_orderbook_delta_accepts_negative_fixed_point_size() -> None:
     assert message.delta_size == -54
 
 
+def test_orderbook_delta_accepts_comma_decimal_and_zero_sizes() -> None:
+    negative_message = parse_ws_payload(
+        {
+            "type": "orderbook_delta",
+            "seq": 2,
+            "msg": {
+                "market_ticker": "KXBTC15M-TEST",
+                "side": "yes",
+                "price_dollars": "0.9600",
+                "delta_fp": "-1,200.00",
+            },
+        },
+        target_market_ticker="KXBTC15M-TEST",
+        received_at=NOW,
+    )
+    zero_message = parse_ws_payload(
+        {
+            "type": "orderbook_delta",
+            "seq": 3,
+            "msg": {
+                "market_ticker": "KXBTC15M-TEST",
+                "side": "yes",
+                "price_dollars": "0.9600",
+                "delta_fp": "0.00",
+            },
+        },
+        target_market_ticker="KXBTC15M-TEST",
+        received_at=NOW,
+    )
+
+    assert negative_message.kind == "orderbook_delta"
+    assert negative_message.delta_size == -1200
+    assert zero_message.kind == "orderbook_delta"
+    assert zero_message.delta_size == 0
+
+
 def test_no_side_delta_uses_yes_price_scale() -> None:
     state = OrderbookState("KXBTC15M-TEST")
     snapshot_message = parse_ws_payload(
@@ -263,6 +322,25 @@ def test_malformed_snapshot_level_reports_precise_warning() -> None:
 
     assert message.kind == "invalid"
     assert message.reason == "invalid_orderbook_snapshot_yes_level_size"
+
+
+def test_malformed_snapshot_no_level_reports_precise_price_warning() -> None:
+    message = parse_ws_payload(
+        {
+            "type": "orderbook_snapshot",
+            "sid": 1,
+            "seq": 10,
+            "msg": {
+                "market_ticker": "KXBTC15M-TEST",
+                "no_dollars_fp": [[{"price": "0.7000"}, "12.00"]],
+            },
+        },
+        target_market_ticker="KXBTC15M-TEST",
+        received_at=NOW,
+    )
+
+    assert message.kind == "invalid"
+    assert message.reason == "invalid_orderbook_snapshot_no_level_price"
 
 
 def test_malformed_delta_reports_precise_warning() -> None:
@@ -389,3 +467,68 @@ def test_public_trade_parsing_allows_unknown_side_without_faking_it() -> None:
     assert message.trade.taker_side is None
     assert message.trade.side_inferred == "unknown"
     assert message.warning == "trade_side_not_inferred"
+
+
+def test_public_trade_parsing_accepts_comma_decimal_count() -> None:
+    message = parse_ws_payload(
+        {
+            "type": "trade",
+            "sid": 3,
+            "seq": 4,
+            "msg": {
+                "trade_id": "trade-1",
+                "market_ticker": "KXBTC15M-TEST",
+                "yes_price_dollars": "0.64",
+                "count_fp": "1,200.00",
+                "taker_side": "yes",
+            },
+        },
+        target_market_ticker="KXBTC15M-TEST",
+        received_at=NOW,
+    )
+
+    assert message.kind == "trade"
+    assert message.trade is not None
+    assert message.trade.count == 1200
+
+
+def test_public_trade_parsing_reports_precise_price_warning() -> None:
+    message = parse_ws_payload(
+        {
+            "type": "trade",
+            "sid": 3,
+            "seq": 4,
+            "msg": {
+                "trade_id": "trade-1",
+                "market_ticker": "KXBTC15M-TEST",
+                "yes_price_dollars": {"value": "0.64"},
+                "count_fp": "2.00",
+            },
+        },
+        target_market_ticker="KXBTC15M-TEST",
+        received_at=NOW,
+    )
+
+    assert message.kind == "invalid"
+    assert message.reason == "invalid_trade_price"
+
+
+def test_public_trade_parsing_reports_precise_count_warning() -> None:
+    message = parse_ws_payload(
+        {
+            "type": "trade",
+            "sid": 3,
+            "seq": 4,
+            "msg": {
+                "trade_id": "trade-1",
+                "market_ticker": "KXBTC15M-TEST",
+                "yes_price_dollars": "0.64",
+                "count_fp": "2.50",
+            },
+        },
+        target_market_ticker="KXBTC15M-TEST",
+        received_at=NOW,
+    )
+
+    assert message.kind == "invalid"
+    assert message.reason == "invalid_trade_count_fp"

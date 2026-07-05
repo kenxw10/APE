@@ -103,6 +103,7 @@ class KalshiWsStatusResponse(BaseModel):
     last_error_message: str | None
     warnings: list[str]
     blockers: list[str]
+    diagnostic_samples: list[dict[str, Any]]
     stale: bool
     checked_at: datetime
 
