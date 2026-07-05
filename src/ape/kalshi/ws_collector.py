@@ -215,6 +215,7 @@ class KalshiWsCollector:
                     resolver_result.market.close_time,
                     stop_event,
                 )
+                self.status.reconnect_count = 0
             finally:
                 await _close_websocket(websocket)
         except Exception as exc:
@@ -426,7 +427,7 @@ class KalshiWsCollector:
         elapsed = (
             heartbeat_at.astimezone(UTC) - self._last_heartbeat_at.astimezone(UTC)
         ).total_seconds()
-        return elapsed >= _heartbeat_interval_seconds(self.config)
+        return elapsed >= heartbeat_interval_seconds(self.config)
 
     def _set_error(self, error_type: str, exc: Exception) -> None:
         self.status.connection_state = "error"
@@ -496,7 +497,7 @@ def _seconds_until_market_close(now: datetime, close_time: datetime | None) -> f
     return max(0.0, (close_time.astimezone(UTC) - now.astimezone(UTC)).total_seconds())
 
 
-def _heartbeat_interval_seconds(config: AppConfig) -> float:
+def heartbeat_interval_seconds(config: AppConfig) -> float:
     return min(
         max(
             config.kalshi_ws_heartbeat_timeout_seconds / 3,

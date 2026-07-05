@@ -346,6 +346,60 @@ def test_collector_resubscribes_after_sequence_gap(tmp_path) -> None:
         engine.dispose()
 
 
+def test_collector_resets_backoff_after_successful_websocket_cycle(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_backoff_reset.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "0.01",
+            "KALSHI_WS_MAX_RECONNECT_SECONDS": "0.01",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket(
+        [
+            {
+                "type": "ticker",
+                "sid": 2,
+                "seq": 1,
+                "msg": {"market_ticker": "KXBTC15M-TEST"},
+            }
+        ]
+    )
+    websocket_factory_calls = 0
+
+    async def websocket_factory(*_args):
+        nonlocal websocket_factory_calls
+        websocket_factory_calls += 1
+        if websocket_factory_calls == 1:
+            raise RuntimeError("temporary websocket outage")
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=2))
+
+        assert websocket_factory_calls == 2
+        assert collector.status.reconnect_count == 0
+        assert collector.status.connection_state == "subscribed"
+    finally:
+        engine.dispose()
+
+
 def test_collector_resets_orderbook_on_buffer_overflow(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_buffer_overflow.sqlite'}"
     config = load_config(

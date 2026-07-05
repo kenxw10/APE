@@ -9,7 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from ape.config import AppConfig, ConfigError, load_config
 from ape.db.session import create_engine_from_config, create_session_factory
-from ape.kalshi.ws_collector import KalshiWsCollector
+from ape.kalshi.ws_collector import KalshiWsCollector, heartbeat_interval_seconds
 from ape.repositories.inputs import WorkerHeartbeatInput
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import SafetyError, assert_startup_safe, assess_startup_safety
@@ -62,10 +62,19 @@ def run_worker(
 
         LOGGER.info("APE worker running in OBSERVER mode; idle heartbeat only.")
         iterations = 0
+        last_idle_heartbeat_at: datetime | None = None
 
         while not event.is_set():
-            LOGGER.debug("APE worker heartbeat: observer idle.")
-            _record_idle_heartbeat(config, safety, session_factory, started_at)
+            heartbeat_at = datetime.now(UTC)
+            if _idle_heartbeat_due(config, last_idle_heartbeat_at, heartbeat_at):
+                LOGGER.debug("APE worker heartbeat: observer idle.")
+                last_idle_heartbeat_at = _record_idle_heartbeat(
+                    config,
+                    safety,
+                    session_factory,
+                    started_at,
+                    heartbeat_at,
+                )
             iterations += 1
 
             if max_iterations is not None and iterations >= max_iterations:
@@ -82,9 +91,10 @@ def _record_idle_heartbeat(
     safety,
     session_factory,
     started_at: datetime,
-) -> None:
+    heartbeat_at: datetime,
+) -> datetime:
     if session_factory is None:
-        return
+        return heartbeat_at
 
     try:
         with session_factory() as session:
@@ -92,7 +102,7 @@ def _record_idle_heartbeat(
                 WorkerHeartbeatInput(
                     service_name="ape-worker",
                     started_at=started_at,
-                    heartbeat_at=datetime.now(UTC),
+                    heartbeat_at=heartbeat_at,
                     app_mode=config.app_mode.value,
                     is_safe=safety.is_safe,
                     metadata={
@@ -109,6 +119,19 @@ def _record_idle_heartbeat(
             session.commit()
     except SQLAlchemyError:
         LOGGER.warning("Idle worker heartbeat persistence failed.", exc_info=True)
+
+    return heartbeat_at
+
+
+def _idle_heartbeat_due(
+    config: AppConfig,
+    last_heartbeat_at: datetime | None,
+    heartbeat_at: datetime,
+) -> bool:
+    if last_heartbeat_at is None:
+        return True
+    elapsed = (heartbeat_at.astimezone(UTC) - last_heartbeat_at.astimezone(UTC)).total_seconds()
+    return elapsed >= heartbeat_interval_seconds(config)
 
 
 def main() -> int:
