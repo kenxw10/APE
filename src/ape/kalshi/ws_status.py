@@ -131,6 +131,22 @@ def build_kalshi_ws_status(
     if stale:
         warnings.append("kalshi_ws_data_stale")
 
+    final_warnings = sorted(set(warnings))
+    final_blockers = sorted(set(blockers))
+    last_error_type = _str_or_none(heartbeat_metadata.get("last_error_type"))
+    last_error_message = _str_or_none(heartbeat_metadata.get("last_error_message"))
+    if _healthy_stream_recovered_error(
+        connection_state=connection_state,
+        stale=stale,
+        warnings=final_warnings,
+        blockers=final_blockers,
+        last_message_at=last_message_at,
+        latest_orderbook_at=latest_orderbook_at,
+        latest_trade_at=latest_trade_at,
+    ):
+        last_error_type = None
+        last_error_message = None
+
     return KalshiWsStatusSnapshot(
         configured=effective_configured,
         enabled=effective_enabled,
@@ -155,15 +171,37 @@ def build_kalshi_ws_status(
         latest_orderbook_received_at=latest_orderbook_at,
         latest_trade_received_at=latest_trade_at,
         reconnect_count=_int_or_zero(heartbeat_metadata.get("reconnect_count")),
-        last_error_type=_str_or_none(heartbeat_metadata.get("last_error_type")),
-        last_error_message=_str_or_none(heartbeat_metadata.get("last_error_message")),
-        warnings=sorted(set(warnings)),
-        blockers=sorted(set(blockers)),
+        last_error_type=last_error_type,
+        last_error_message=last_error_message,
+        warnings=final_warnings,
+        blockers=final_blockers,
         diagnostic_samples=_diagnostic_samples(
             heartbeat_metadata.get("diagnostic_samples")
         ),
         stale=stale,
         checked_at=checked_at,
+    )
+
+
+def _healthy_stream_recovered_error(
+    *,
+    connection_state: str,
+    stale: bool,
+    warnings: list[str],
+    blockers: list[str],
+    last_message_at: datetime | None,
+    latest_orderbook_at: datetime | None,
+    latest_trade_at: datetime | None,
+) -> bool:
+    latest_persisted_at = _latest_datetime(latest_orderbook_at, latest_trade_at)
+    return (
+        connection_state == "subscribed"
+        and not stale
+        and not warnings
+        and not blockers
+        and last_message_at is not None
+        and latest_persisted_at is not None
+        and latest_persisted_at >= _as_utc(last_message_at)
     )
 
 

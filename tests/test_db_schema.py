@@ -1,9 +1,15 @@
 from __future__ import annotations
 
-from sqlalchemy import inspect, select, text
+from sqlalchemy import func, inspect, select, text
 
 from ape.config import load_config
-from ape.db.migrations import CURRENT_SCHEMA_VERSION, run_migrations
+from ape.db.migrations import (
+    CURRENT_SCHEMA_VERSION,
+    POSTGRES_MIGRATION_LOCK_ID,
+    _acquire_migration_lock,
+    _disable_postgres_migration_statement_timeout,
+    run_migrations,
+)
 from ape.db.models import SchemaMigration
 from ape.db.session import create_engine_from_config, create_session_factory
 
@@ -32,6 +38,7 @@ def test_schema_can_be_created_in_local_sqlite_database(tmp_path) -> None:
                 select(SchemaMigration).where(SchemaMigration.version == CURRENT_SCHEMA_VERSION)
             )
             assert migration is not None
+            assert session.scalar(select(func.count()).select_from(SchemaMigration)) == 2
 
         orderbook_columns = {
             column["name"] for column in inspector.get_columns("orderbook_snapshots")
@@ -96,6 +103,7 @@ def test_migration_adds_fixed_point_quantity_columns_to_existing_tables(tmp_path
             )
 
         run_migrations(engine)
+        run_migrations(engine)
 
         inspector = inspect(engine)
         orderbook_columns = {
@@ -132,3 +140,28 @@ def test_migration_adds_fixed_point_quantity_columns_to_existing_tables(tmp_path
         assert trade_row.trade_count == 3
     finally:
         engine.dispose()
+
+
+def test_postgres_migrations_disable_statement_timeout_before_lock() -> None:
+    connection = _RecordingPostgresConnection()
+
+    _disable_postgres_migration_statement_timeout(connection)
+    _acquire_migration_lock(connection)
+
+    assert connection.executed == [
+        ("SET LOCAL statement_timeout = 0", None),
+        (
+            "SELECT pg_advisory_xact_lock(:lock_id)",
+            {"lock_id": POSTGRES_MIGRATION_LOCK_ID},
+        ),
+    ]
+
+
+class _RecordingPostgresConnection:
+    dialect = type("Dialect", (), {"name": "postgresql"})()
+
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, object]] = []
+
+    def execute(self, statement, parameters=None) -> None:
+        self.executed.append((str(statement), parameters))

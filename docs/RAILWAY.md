@@ -43,7 +43,7 @@ Set the API service start command:
 python -m scripts.railway_start_api
 ```
 
-The API helper is the automatic migration owner. It runs:
+The API helper runs database migrations before starting the API:
 
 ```text
 python -m ape.db.migrations
@@ -77,12 +77,17 @@ python -m scripts.railway_start_worker
 The helper runs:
 
 ```text
+python -m ape.db.migrations
 python -m ape.worker.main
 ```
 
-The worker helper does not run migrations. This avoids API and worker services racing each other on a fresh Railway Postgres database. The worker is an always-on observer process. Do not configure a Railway cron job for it.
+The API and worker helpers both run the same idempotent migrations before their service starts. The migration runner takes a PostgreSQL advisory transaction lock and uses idempotent schema/version writes so simultaneous API and worker restarts serialize safely. Prefer redeploying the API first for schema-changing PRs, but the worker is protected if it starts first or restarts during a deploy. If migrations fail, the worker does not start.
+
+The worker is an always-on observer process. Do not configure a Railway cron job for it.
 
 When `KALSHI_WS_ENABLED=false`, the worker records heartbeat-only diagnostics. When `KALSHI_WS_ENABLED=true`, the worker owns the observer-only Kalshi WebSocket collector for the active BTC15 market.
+
+For `/ws/status`, `last_error_type` and `last_error_message` describe a current unresolved worker error. A successful current orderbook or trade database write clears old recovered errors so stale startup failures do not keep the status page red.
 
 If a manual migration is needed outside API startup, run:
 

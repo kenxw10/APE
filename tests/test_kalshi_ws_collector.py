@@ -18,6 +18,7 @@ from ape.db.models import WorkerHeartbeat
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.kalshi.resolver import ResolverResult, ResolverState
 from ape.kalshi.ws_collector import KalshiWsCollector
+from ape.kalshi.ws_status import build_kalshi_ws_status
 from ape.repositories.inputs import MarketInput
 from ape.repositories.orderbook import OrderbookRepository
 from ape.repositories.public_trades import PublicTradesRepository
@@ -405,6 +406,338 @@ def test_collector_persists_valid_snapshot_after_invalid_live_like_snapshot(tmp_
                 not in heartbeat.metadata_["ws"]["warnings"]
             )
             assert heartbeat.metadata_["ws"]["last_orderbook_at"] == "2026-07-05T14:35:00Z"
+    finally:
+        engine.dispose()
+
+
+def test_collector_clears_stale_error_after_successful_orderbook_persist(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_orderbook_error_clear.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket(
+        [
+            {
+                "type": "orderbook_snapshot",
+                "sid": 1,
+                "seq": 1,
+                "msg": {
+                    "market_ticker": "KXBTC15M-TEST",
+                    "yes_dollars_fp": [["0.60", "10"]],
+                    "no_dollars_fp": [["0.65", "8"]],
+                },
+            },
+        ]
+    )
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector.status.last_error_type = "ProgrammingError"
+    collector.status.last_error_message = "UndefinedColumn: orderbook_snapshots.yes_bid_count"
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            latest_book = OrderbookRepository(session).get_latest_snapshot("KXBTC15M-TEST")
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert latest_book is not None
+            assert heartbeat is not None
+            ws_metadata = heartbeat.metadata_["ws"]
+            assert ws_metadata["last_error_type"] is None
+            assert ws_metadata["last_error_message"] is None
+            assert ws_metadata["warnings"] == []
+            assert ws_metadata["blockers"] == []
+
+        status = build_kalshi_ws_status(config, now=NOW)
+        assert status.last_error_type is None
+        assert status.last_error_message is None
+    finally:
+        engine.dispose()
+
+
+def test_collector_clears_stale_error_after_successful_trade_persist(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_trade_error_clear.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket(
+        [
+            {
+                "type": "trade",
+                "sid": 2,
+                "seq": 1,
+                "msg": {
+                    "trade_id": "trade-1",
+                    "market_ticker": "KXBTC15M-TEST",
+                    "yes_price_dollars": "0.61",
+                    "count_fp": "2.50",
+                    "taker_side": "yes",
+                },
+            },
+        ]
+    )
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector.status.last_error_type = "ProgrammingError"
+    collector.status.last_error_message = "UndefinedColumn: orderbook_snapshots.yes_bid_count"
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            latest_trade = PublicTradesRepository(session).get_latest_trade("KXBTC15M-TEST")
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert latest_trade is not None
+            assert heartbeat is not None
+            ws_metadata = heartbeat.metadata_["ws"]
+            assert ws_metadata["last_error_type"] is None
+            assert ws_metadata["last_error_message"] is None
+            assert ws_metadata["warnings"] == []
+            assert ws_metadata["blockers"] == []
+    finally:
+        engine.dispose()
+
+
+def test_collector_does_not_clear_db_error_on_ticker_only_message(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_ticker_no_clear.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket(
+        [
+            {
+                "type": "ticker",
+                "sid": 2,
+                "seq": 1,
+                "msg": {"market_ticker": "KXBTC15M-TEST"},
+            },
+        ]
+    )
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector.status.last_error_type = "ProgrammingError"
+    collector.status.last_error_message = "UndefinedColumn: orderbook_snapshots.yes_bid_count"
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        assert collector.status.last_error_type == "ProgrammingError"
+        assert collector.status.last_error_message is not None
+    finally:
+        engine.dispose()
+
+
+def test_collector_records_orderbook_persistence_failure(monkeypatch, tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_orderbook_failure.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket(
+        [
+            {
+                "type": "orderbook_snapshot",
+                "sid": 1,
+                "seq": 1,
+                "msg": {
+                    "market_ticker": "KXBTC15M-TEST",
+                    "yes_dollars_fp": [["0.60", "10"]],
+                    "no_dollars_fp": [["0.65", "8"]],
+                },
+            },
+        ]
+    )
+
+    def fail_insert(self, snapshot) -> None:
+        raise SQLAlchemyError("orderbook insert failed")
+
+    monkeypatch.setattr(OrderbookRepository, "insert_snapshot", fail_insert)
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            latest_book = OrderbookRepository(session).get_latest_snapshot("KXBTC15M-TEST")
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert latest_book is None
+            assert heartbeat is not None
+            ws_metadata = heartbeat.metadata_["ws"]
+            assert ws_metadata["connection_state"] == "error"
+            assert ws_metadata["last_error_type"] == "SQLAlchemyError"
+            assert "orderbook_persistence_failed" in ws_metadata["warnings"]
+            assert "orderbook_persistence_failed" in ws_metadata["blockers"]
+            assert ws_metadata["last_orderbook_at"] is None
+    finally:
+        engine.dispose()
+
+
+def test_collector_clears_orderbook_persistence_failure_after_success(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_orderbook_recovery.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket(
+        [
+            {
+                "type": "orderbook_snapshot",
+                "sid": 1,
+                "seq": 1,
+                "msg": {
+                    "market_ticker": "KXBTC15M-TEST",
+                    "yes_dollars_fp": [["0.60", "10"]],
+                    "no_dollars_fp": [["0.65", "8"]],
+                },
+            },
+            {
+                "type": "orderbook_snapshot",
+                "sid": 1,
+                "seq": 2,
+                "msg": {
+                    "market_ticker": "KXBTC15M-TEST",
+                    "yes_dollars_fp": [["0.62", "11"]],
+                    "no_dollars_fp": [["0.67", "9"]],
+                },
+            },
+        ]
+    )
+    original_insert = OrderbookRepository.insert_snapshot
+    attempts = 0
+
+    def flaky_insert(self, snapshot):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise SQLAlchemyError("temporary orderbook insert failure")
+        return original_insert(self, snapshot)
+
+    monkeypatch.setattr(OrderbookRepository, "insert_snapshot", flaky_insert)
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            latest_book = OrderbookRepository(session).get_latest_snapshot("KXBTC15M-TEST")
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert attempts == 2
+            assert latest_book is not None
+            assert latest_book.sequence_number == 2
+            assert heartbeat is not None
+            ws_metadata = heartbeat.metadata_["ws"]
+            assert ws_metadata["connection_state"] == "subscribed"
+            assert ws_metadata["last_error_type"] is None
+            assert ws_metadata["last_error_message"] is None
+            assert "orderbook_persistence_failed" not in ws_metadata["warnings"]
+            assert "orderbook_persistence_failed" not in ws_metadata["blockers"]
     finally:
         engine.dispose()
 

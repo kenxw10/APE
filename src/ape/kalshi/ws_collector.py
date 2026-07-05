@@ -338,7 +338,8 @@ class KalshiWsCollector:
                 raw_payload_hash=message.raw_payload_hash,
                 raw_payload=message.raw_payload,
             )
-            self._persist_orderbook(snapshot)
+            if not self._persist_orderbook(snapshot):
+                return None
             self.status.last_orderbook_at = received_at
             warnings_cleared = self._clear_warning_prefixes(
                 "invalid_orderbook_snapshot_"
@@ -365,7 +366,8 @@ class KalshiWsCollector:
                 raw_payload_hash=message.raw_payload_hash,
                 raw_payload=message.raw_payload,
             )
-            self._persist_orderbook(snapshot)
+            if not self._persist_orderbook(snapshot):
+                return None
             self.status.last_orderbook_at = received_at
             warnings_cleared = self._clear_warning_prefixes("invalid_orderbook_delta_")
             warnings_cleared = (
@@ -376,7 +378,8 @@ class KalshiWsCollector:
             return None
 
         if message.kind == "trade" and message.trade is not None:
-            self._persist_trade(message.trade)
+            if not self._persist_trade(message.trade):
+                return None
             self.status.last_trade_at = received_at
             warnings_cleared = self._clear_warning_prefixes("invalid_trade_")
             warnings_cleared = (
@@ -401,23 +404,47 @@ class KalshiWsCollector:
 
         return None
 
-    def _persist_orderbook(self, snapshot) -> None:
+    def _persist_orderbook(self, snapshot) -> bool:
         if self.session_factory is None:
             self._add_warning("database_not_configured_for_orderbook")
-            return
+            return False
 
-        with self.session_factory() as session:
-            OrderbookRepository(session).insert_snapshot(snapshot)
-            session.commit()
+        try:
+            with self.session_factory() as session:
+                OrderbookRepository(session).insert_snapshot(snapshot)
+                session.commit()
+        except SQLAlchemyError as exc:
+            LOGGER.warning("Kalshi WS orderbook persistence failed.", exc_info=True)
+            self._set_error(exc.__class__.__name__, exc)
+            self._add_warning("orderbook_persistence_failed")
+            self._add_blocker("orderbook_persistence_failed")
+            self.record_heartbeat()
+            return False
 
-    def _persist_trade(self, trade) -> None:
+        self._mark_persistence_success(
+            warning="orderbook_persistence_failed",
+            blockers=("orderbook_persistence_failed",),
+        )
+        return True
+
+    def _persist_trade(self, trade) -> bool:
         if self.session_factory is None:
             self._add_warning("database_not_configured_for_trades")
-            return
+            return False
 
-        with self.session_factory() as session:
-            PublicTradesRepository(session).insert_trade(trade)
-            session.commit()
+        try:
+            with self.session_factory() as session:
+                PublicTradesRepository(session).insert_trade(trade)
+                session.commit()
+        except SQLAlchemyError as exc:
+            LOGGER.warning("Kalshi WS trade persistence failed.", exc_info=True)
+            self._set_error(exc.__class__.__name__, exc)
+            self._add_warning("trade_persistence_failed")
+            self.record_heartbeat()
+            return False
+
+        self._mark_persistence_success(warning="trade_persistence_failed")
+        return True
 
     def record_heartbeat(self, *, force: bool = True) -> None:
         if self.session_factory is None:
@@ -462,9 +489,19 @@ class KalshiWsCollector:
         self.status.last_error_type = error_type
         self.status.last_error_message = _redacted_error_message(exc, self.config)
 
+    def _clear_error(self) -> bool:
+        existing = self.status.last_error_type or self.status.last_error_message
+        self.status.last_error_type = None
+        self.status.last_error_message = None
+        return bool(existing)
+
     def _add_warning(self, warning: str) -> None:
         if warning not in self.status.warnings:
             self.status.warnings.append(warning)
+
+    def _add_blocker(self, blocker: str) -> None:
+        if blocker not in self.status.blockers:
+            self.status.blockers.append(blocker)
 
     def _clear_warnings(self, *warnings: str) -> bool:
         if not warnings:
@@ -486,6 +523,42 @@ class KalshiWsCollector:
             if not any(warning.startswith(prefix) for prefix in prefixes)
         ]
         return self.status.warnings != existing
+
+    def _clear_blockers(self, *blockers: str) -> bool:
+        if not blockers:
+            return False
+        blocker_set = set(blockers)
+        existing = self.status.blockers
+        self.status.blockers = [
+            blocker for blocker in self.status.blockers if blocker not in blocker_set
+        ]
+        return self.status.blockers != existing
+
+    def _mark_persistence_success(
+        self,
+        *,
+        warning: str,
+        blockers: tuple[str, ...] = (),
+    ) -> None:
+        warnings_cleared = self._clear_warnings(warning)
+        blockers_cleared = self._clear_blockers(*blockers)
+        error_cleared = False
+        if not self._has_persistence_failure():
+            error_cleared = self._clear_error()
+
+        if warnings_cleared or blockers_cleared or error_cleared:
+            self.status.connection_state = "subscribed"
+            self._force_next_heartbeat = True
+
+    def _has_persistence_failure(self) -> bool:
+        persistence_failures = {
+            "orderbook_persistence_failed",
+            "trade_persistence_failed",
+        }
+        return bool(
+            persistence_failures.intersection(self.status.warnings)
+            or persistence_failures.intersection(self.status.blockers)
+        )
 
     def _record_parse_diagnostic(self, message: ParsedWsMessage) -> bool:
         sample = _invalid_message_diagnostic_sample(message)
