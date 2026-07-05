@@ -3,15 +3,18 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 
 from ape.config import load_config
 from ape.db.migrations import run_migrations
+from ape.db.models import WorkerHeartbeat
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.kalshi.resolver import ResolverResult, ResolverState
 from ape.kalshi.ws_collector import KalshiWsCollector
@@ -43,6 +46,16 @@ class FakeWebSocket:
         if not self.messages:
             raise StopAsyncIteration
         return self.messages.pop(0)
+
+
+class AdvancingFakeWebSocket(FakeWebSocket):
+    def __init__(self, messages: list[dict[str, Any]], advance_time) -> None:
+        super().__init__(messages)
+        self.advance_time = advance_time
+
+    async def __anext__(self) -> str:
+        self.advance_time()
+        return await super().__anext__()
 
 
 def test_collector_subscribes_and_persists_mock_messages(tmp_path) -> None:
@@ -139,6 +152,108 @@ def test_collector_subscribes_and_persists_mock_messages(tmp_path) -> None:
                 },
             },
         ]
+    finally:
+        engine.dispose()
+
+
+def test_collector_catches_database_error_while_resolving_market(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_resolver_db_error.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+
+    def resolver(**_kwargs) -> ResolverResult:
+        raise SQLAlchemyError("database restart")
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        resolver=resolver,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert heartbeat is not None
+            ws_metadata = heartbeat.metadata_["ws"]
+            assert ws_metadata["connection_state"] == "error"
+            assert ws_metadata["last_error_type"] == "resolver_database_error"
+            assert "market_resolver_database_error" in ws_metadata["blockers"]
+    finally:
+        engine.dispose()
+
+
+def test_collector_throttles_heartbeats_for_live_websocket_traffic(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_throttled_heartbeats.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    current_time = NOW
+
+    def advance_time() -> None:
+        nonlocal current_time
+        current_time = current_time + timedelta(seconds=1)
+
+    websocket = AdvancingFakeWebSocket(
+        [
+            {
+                "type": "ticker",
+                "sid": 2,
+                "seq": index,
+                "msg": {"market_ticker": "KXBTC15M-TEST"},
+            }
+            for index in range(1, 51)
+        ],
+        advance_time,
+    )
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: current_time,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            heartbeat_count = session.scalar(select(func.count()).select_from(WorkerHeartbeat))
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert heartbeat_count == 7
+            assert heartbeat is not None
+            assert heartbeat.metadata_["ws"]["last_message_at"] == "2026-07-05T14:35:50Z"
     finally:
         engine.dispose()
 

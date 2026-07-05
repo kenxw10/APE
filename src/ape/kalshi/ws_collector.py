@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from inspect import isawaitable
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from ape.config import AppConfig
@@ -31,6 +32,8 @@ from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import SafetyAssessment
 
 LOGGER = logging.getLogger(__name__)
+MAX_HEARTBEAT_INTERVAL_SECONDS = 10.0
+MIN_HEARTBEAT_INTERVAL_SECONDS = 1.0
 
 WebSocketFactory = Callable[
     [str, dict[str, str], float, float],
@@ -101,6 +104,7 @@ class KalshiWsCollector:
         self.resolver = resolver
         self.now = now or (lambda: datetime.now(UTC))
         self.status = KalshiWsCollectorStatus(enabled=config.kalshi_ws_enabled)
+        self._last_heartbeat_at: datetime | None = None
 
     async def run(
         self,
@@ -157,6 +161,11 @@ class KalshiWsCollector:
                 )
         except KalshiError as exc:
             self._set_error("resolver_error", exc)
+            self.record_heartbeat()
+            return
+        except SQLAlchemyError as exc:
+            self._set_error("resolver_database_error", exc)
+            self.status.blockers = ["market_resolver_database_error"]
             self.record_heartbeat()
             return
 
@@ -284,7 +293,7 @@ class KalshiWsCollector:
             parsed_json = _json_or_none(raw_message)
             if parsed_json is None:
                 self._add_warning("invalid_websocket_json")
-                self.record_heartbeat()
+                self.record_heartbeat(force=False)
                 continue
 
             message = parse_ws_payload(
@@ -299,7 +308,7 @@ class KalshiWsCollector:
                 self._add_warning("kalshi_ws_resubscribe_requested")
                 self.record_heartbeat()
                 return
-            self.record_heartbeat()
+            self.record_heartbeat(force=False)
 
     def _handle_message(
         self,
@@ -381,25 +390,43 @@ class KalshiWsCollector:
             PublicTradesRepository(session).insert_trade(trade)
             session.commit()
 
-    def record_heartbeat(self) -> None:
+    def record_heartbeat(self, *, force: bool = True) -> None:
         if self.session_factory is None:
             return
 
-        with self.session_factory() as session:
-            WorkerHeartbeatRepository(session).record_heartbeat(
-                WorkerHeartbeatInput(
-                    service_name="ape-worker",
-                    started_at=self.started_at,
-                    heartbeat_at=self.now(),
-                    app_mode=self.config.app_mode.value,
-                    is_safe=self.safety.is_safe,
-                    metadata={
-                        "mode": "kalshi_ws" if self.config.kalshi_ws_enabled else "idle",
-                        "ws": self.status.as_metadata(),
-                    },
+        heartbeat_at = self.now()
+        if not force and not self._heartbeat_due(heartbeat_at):
+            return
+
+        try:
+            with self.session_factory() as session:
+                WorkerHeartbeatRepository(session).record_heartbeat(
+                    WorkerHeartbeatInput(
+                        service_name="ape-worker",
+                        started_at=self.started_at,
+                        heartbeat_at=heartbeat_at,
+                        app_mode=self.config.app_mode.value,
+                        is_safe=self.safety.is_safe,
+                        metadata={
+                            "mode": "kalshi_ws" if self.config.kalshi_ws_enabled else "idle",
+                            "ws": self.status.as_metadata(),
+                        },
+                    )
                 )
-            )
-            session.commit()
+                session.commit()
+        except SQLAlchemyError:
+            LOGGER.warning("Kalshi worker heartbeat persistence failed.", exc_info=True)
+            return
+
+        self._last_heartbeat_at = heartbeat_at
+
+    def _heartbeat_due(self, heartbeat_at: datetime) -> bool:
+        if self._last_heartbeat_at is None:
+            return True
+        elapsed = (
+            heartbeat_at.astimezone(UTC) - self._last_heartbeat_at.astimezone(UTC)
+        ).total_seconds()
+        return elapsed >= _heartbeat_interval_seconds(self.config)
 
     def _set_error(self, error_type: str, exc: Exception) -> None:
         self.status.connection_state = "error"
@@ -467,6 +494,16 @@ def _seconds_until_market_close(now: datetime, close_time: datetime | None) -> f
     if close_time is None:
         return None
     return max(0.0, (close_time.astimezone(UTC) - now.astimezone(UTC)).total_seconds())
+
+
+def _heartbeat_interval_seconds(config: AppConfig) -> float:
+    return min(
+        max(
+            config.kalshi_ws_heartbeat_timeout_seconds / 3,
+            MIN_HEARTBEAT_INTERVAL_SECONDS,
+        ),
+        MAX_HEARTBEAT_INTERVAL_SECONDS,
+    )
 
 
 async def _close_websocket(websocket: Any) -> None:
