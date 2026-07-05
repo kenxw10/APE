@@ -23,7 +23,7 @@ ENV=railway
 LOG_LEVEL=INFO
 ```
 
-Do not add Kalshi credentials yet. Do not enable trading. Do not configure cron. Vercel is not part of PR 3.
+After PR 5 merges, Kalshi credentials may be added to Railway API and worker env only. Do not enable trading. Do not configure cron. Vercel must not receive Kalshi credentials.
 
 ## Create Railway Project
 
@@ -57,6 +57,8 @@ Useful API endpoints:
 /safety
 /db/status
 /ready
+/kalshi/status
+/markets/active
 ```
 
 `/ready` should return `ready` only when safety is safe and database connectivity works.
@@ -107,14 +109,42 @@ DB_MAX_OVERFLOW=10
 DB_STATEMENT_TIMEOUT_MS=5000
 ```
 
+## Kalshi Credential Checkpoint After PR 5
+
+Only after PR 5 is merged, add these to Railway API and worker services:
+
+```text
+KALSHI_API_KEY_ID=<Railway secret>
+KALSHI_PRIVATE_KEY=<Railway secret>
+KALSHI_API_BASE_URL=https://external-api.kalshi.com/trade-api/v2
+KALSHI_ENV=prod
+KALSHI_BTC15_SERIES_TICKER=KXBTC15M
+KALSHI_REST_TIMEOUT_SECONDS=10
+KALSHI_RESOLVER_PARSER_VERSION=btc15_resolver_v1
+```
+
+If Railway stores the private key as one line with escaped `\n` characters, APE normalizes it before signing. Do not paste the private key into logs, docs, GitHub, Vercel, or local screenshots.
+
+After setting Railway credentials, redeploy API and worker and validate:
+
+```powershell
+Invoke-RestMethod https://ape-api-production.up.railway.app/kalshi/status
+Invoke-RestMethod https://ape-api-production.up.railway.app/markets/active
+Invoke-RestMethod https://ape-api-production.up.railway.app/health
+Invoke-RestMethod https://ape-api-production.up.railway.app/safety
+Invoke-RestMethod https://ape-api-production.up.railway.app/db/status
+Invoke-RestMethod https://ape-api-production.up.railway.app/ready
+```
+
+Expected behavior: safety remains observer-only, `/kalshi/status` reports configured booleans without secrets, and `/markets/active` resolves or returns a safe diagnostic state without placing orders.
+
 ## Explicitly Not Included
 
-- Kalshi credentials
 - Live trading
 - Paper trading
 - Order placement
 - Strategy execution
-- Market ingestion
+- Market ingestion loops
 - BRTI ingestion
 - Websocket collectors
 - Vercel dashboard
