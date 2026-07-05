@@ -179,7 +179,9 @@ Expected behavior:
 - `/ws/status` shows `enabled=true` from worker metadata, recent orderbook data, or a safe diagnostic state.
 - `orderbook_snapshots` rows are written when Kalshi sends snapshots/deltas.
 - `public_trades` rows may be sparse, but trade messages persist when received.
-- Dashboard remains read-only.
+- Dashboard remains read-only. Dashboard validation may identify the WebSocket panels as
+  `Kalshi WS` and `WS Channels`; direct API `/ws/status` success is also an acceptable
+  validation signal.
 
 ## Explicitly Not Included
 

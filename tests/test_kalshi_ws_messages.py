@@ -17,14 +17,16 @@ def test_orderbook_snapshot_normalizes_yes_price_top_of_book() -> None:
             "seq": 10,
             "msg": {
                 "market_ticker": "KXBTC15M-TEST",
-                "yes_dollars_fp": [["0.63", "12"], ["0.61", "9"]],
-                "no_dollars_fp": [["0.70", "5"], ["0.72", "3"]],
+                "yes_dollars_fp": [["0.6300", "12.00"], ["0.6100", "9.00"]],
+                "no_dollars_fp": [["0.7000", "5.00"], ["0.7200", "3.00"]],
                 "ts_ms": 1780000000000,
             },
         },
         target_market_ticker="KXBTC15M-TEST",
         received_at=NOW,
     )
+
+    assert message.kind == "orderbook_snapshot"
     state = OrderbookState("KXBTC15M-TEST")
     state.apply_snapshot(message)
 
@@ -46,6 +48,71 @@ def test_orderbook_snapshot_normalizes_yes_price_top_of_book() -> None:
     assert snapshot.book_status == "ok"
 
 
+def test_orderbook_snapshot_allows_missing_yes_side() -> None:
+    message = parse_ws_payload(
+        {
+            "type": "orderbook_snapshot",
+            "sid": 1,
+            "seq": 10,
+            "msg": {
+                "market_ticker": "KXBTC15M-TEST",
+                "no_dollars_fp": [["0.7000", "5.00"]],
+            },
+        },
+        target_market_ticker="KXBTC15M-TEST",
+        received_at=NOW,
+    )
+
+    assert message.kind == "orderbook_snapshot"
+    assert message.yes_levels == []
+    assert message.no_levels is not None
+    assert message.no_levels[0].price == Decimal("0.7000")
+    assert message.no_levels[0].size == 5
+
+
+def test_orderbook_snapshot_allows_missing_no_side() -> None:
+    message = parse_ws_payload(
+        {
+            "type": "orderbook_snapshot",
+            "sid": 1,
+            "seq": 10,
+            "msg": {
+                "market_ticker": "KXBTC15M-TEST",
+                "yes_dollars_fp": [[0.63, 12.0]],
+            },
+        },
+        target_market_ticker="KXBTC15M-TEST",
+        received_at=NOW,
+    )
+
+    assert message.kind == "orderbook_snapshot"
+    assert message.yes_levels is not None
+    assert message.yes_levels[0].price == Decimal("0.63")
+    assert message.yes_levels[0].size == 12
+    assert message.no_levels == []
+
+
+def test_orderbook_snapshot_allows_empty_sides() -> None:
+    message = parse_ws_payload(
+        {
+            "type": "orderbook_snapshot",
+            "sid": 1,
+            "seq": 10,
+            "msg": {
+                "market_ticker": "KXBTC15M-TEST",
+                "yes_dollars_fp": [],
+                "no_dollars_fp": [],
+            },
+        },
+        target_market_ticker="KXBTC15M-TEST",
+        received_at=NOW,
+    )
+
+    assert message.kind == "orderbook_snapshot"
+    assert message.yes_levels == []
+    assert message.no_levels == []
+
+
 def test_orderbook_delta_updates_book_after_snapshot() -> None:
     state = OrderbookState("KXBTC15M-TEST")
     snapshot_message = parse_ws_payload(
@@ -54,8 +121,8 @@ def test_orderbook_delta_updates_book_after_snapshot() -> None:
             "seq": 1,
             "msg": {
                 "market_ticker": "KXBTC15M-TEST",
-                "yes_dollars_fp": [["0.60", "10"]],
-                "no_dollars_fp": [["0.65", "8"]],
+                "yes_dollars_fp": [["0.60", "10.00"]],
+                "no_dollars_fp": [["0.65", "8.00"]],
             },
         },
         target_market_ticker="KXBTC15M-TEST",
@@ -70,13 +137,14 @@ def test_orderbook_delta_updates_book_after_snapshot() -> None:
                 "market_ticker": "KXBTC15M-TEST",
                 "side": "yes",
                 "price_dollars": "0.60",
-                "delta_fp": "-4",
+                "delta_fp": "-4.00",
             },
         },
         target_market_ticker="KXBTC15M-TEST",
         received_at=NOW,
     )
 
+    assert delta_message.kind == "orderbook_delta"
     state.apply_delta(delta_message)
     snapshot = state.snapshot_input(
         received_at=NOW,
@@ -91,6 +159,48 @@ def test_orderbook_delta_updates_book_after_snapshot() -> None:
     assert snapshot.no_bid == Decimal("0.35")
 
 
+def test_orderbook_delta_accepts_positive_fixed_point_size() -> None:
+    message = parse_ws_payload(
+        {
+            "type": "orderbook_delta",
+            "seq": 2,
+            "msg": {
+                "market_ticker": "KXBTC15M-TEST",
+                "side": "yes",
+                "price_dollars": "0.9600",
+                "delta_fp": "54.00",
+            },
+        },
+        target_market_ticker="KXBTC15M-TEST",
+        received_at=NOW,
+    )
+
+    assert message.kind == "orderbook_delta"
+    assert message.delta_price == Decimal("0.9600")
+    assert message.delta_size == 54
+
+
+def test_orderbook_delta_accepts_negative_fixed_point_size() -> None:
+    message = parse_ws_payload(
+        {
+            "type": "orderbook_delta",
+            "seq": 2,
+            "msg": {
+                "market_ticker": "KXBTC15M-TEST",
+                "side": "yes",
+                "price_dollars": 0.96,
+                "delta_fp": -54.0,
+            },
+        },
+        target_market_ticker="KXBTC15M-TEST",
+        received_at=NOW,
+    )
+
+    assert message.kind == "orderbook_delta"
+    assert message.delta_price == Decimal("0.96")
+    assert message.delta_size == -54
+
+
 def test_no_side_delta_uses_yes_price_scale() -> None:
     state = OrderbookState("KXBTC15M-TEST")
     snapshot_message = parse_ws_payload(
@@ -99,8 +209,8 @@ def test_no_side_delta_uses_yes_price_scale() -> None:
             "seq": 1,
             "msg": {
                 "market_ticker": "KXBTC15M-TEST",
-                "yes_dollars_fp": [["0.60", "10"]],
-                "no_dollars_fp": [["0.70", "8"]],
+                "yes_dollars_fp": [["0.60", "10.00"]],
+                "no_dollars_fp": [["0.70", "8.00"]],
             },
         },
         target_market_ticker="KXBTC15M-TEST",
@@ -115,7 +225,7 @@ def test_no_side_delta_uses_yes_price_scale() -> None:
                 "market_ticker": "KXBTC15M-TEST",
                 "side": "no",
                 "price_dollars": "0.64",
-                "delta_fp": "4",
+                "delta_fp": "4.00",
             },
         },
         target_market_ticker="KXBTC15M-TEST",
@@ -136,6 +246,45 @@ def test_no_side_delta_uses_yes_price_scale() -> None:
     assert snapshot.no_bid_size == 4
 
 
+def test_malformed_snapshot_level_reports_precise_warning() -> None:
+    message = parse_ws_payload(
+        {
+            "type": "orderbook_snapshot",
+            "sid": 1,
+            "seq": 10,
+            "msg": {
+                "market_ticker": "KXBTC15M-TEST",
+                "yes_dollars_fp": [["0.6300", "12.50"]],
+            },
+        },
+        target_market_ticker="KXBTC15M-TEST",
+        received_at=NOW,
+    )
+
+    assert message.kind == "invalid"
+    assert message.reason == "invalid_orderbook_snapshot_yes_level_size"
+
+
+def test_malformed_delta_reports_precise_warning() -> None:
+    message = parse_ws_payload(
+        {
+            "type": "orderbook_delta",
+            "seq": 2,
+            "msg": {
+                "market_ticker": "KXBTC15M-TEST",
+                "side": "yes",
+                "price_dollars": "0.9600",
+                "delta_fp": "1.25",
+            },
+        },
+        target_market_ticker="KXBTC15M-TEST",
+        received_at=NOW,
+    )
+
+    assert message.kind == "invalid"
+    assert message.reason == "invalid_orderbook_delta_delta_fp"
+
+
 def test_orderbook_sequence_gap_detection_resets_state() -> None:
     state = OrderbookState("KXBTC15M-TEST")
     snapshot_message = parse_ws_payload(
@@ -144,8 +293,8 @@ def test_orderbook_sequence_gap_detection_resets_state() -> None:
             "seq": 1,
             "msg": {
                 "market_ticker": "KXBTC15M-TEST",
-                "yes_dollars_fp": [["0.60", "10"]],
-                "no_dollars_fp": [["0.65", "8"]],
+                "yes_dollars_fp": [["0.60", "10.00"]],
+                "no_dollars_fp": [["0.65", "8.00"]],
             },
         },
         target_market_ticker="KXBTC15M-TEST",
@@ -192,6 +341,29 @@ def test_crossed_and_missing_book_warnings() -> None:
     assert snapshot.book_status == "missing_or_null_book"
 
 
+def test_ticker_parsing_accepts_live_shape() -> None:
+    message = parse_ws_payload(
+        {
+            "type": "ticker",
+            "sid": 2,
+            "seq": 3,
+            "msg": {
+                "market_ticker": "KXBTC15M-TEST",
+                "yes_bid_dollars": "0.6100",
+                "yes_ask_dollars": "0.6400",
+                "yes_bid_size_fp": "25.00",
+                "yes_ask_size_fp": "30.00",
+                "ts_ms": 1780000000123,
+            },
+        },
+        target_market_ticker="KXBTC15M-TEST",
+        received_at=NOW,
+    )
+
+    assert message.kind == "ticker"
+    assert message.source_ts is not None
+
+
 def test_public_trade_parsing_allows_unknown_side_without_faking_it() -> None:
     message = parse_ws_payload(
         {
@@ -202,7 +374,7 @@ def test_public_trade_parsing_allows_unknown_side_without_faking_it() -> None:
                 "trade_id": "trade-1",
                 "market_ticker": "KXBTC15M-TEST",
                 "yes_price_dollars": "0.64",
-                "count_fp": "2",
+                "count_fp": "2.00",
                 "ts_ms": 1780000000123,
             },
         },
