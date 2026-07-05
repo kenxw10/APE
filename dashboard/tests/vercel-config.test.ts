@@ -7,7 +7,7 @@ type VercelConfig = {
   framework?: string;
   buildCommand?: string;
   installCommand?: string;
-  outputDirectory?: string;
+  outputDirectory?: string | null;
 };
 
 function readVercelConfig(): VercelConfig {
@@ -22,5 +22,6 @@ test("Vercel config forces the dashboard Next.js build path", () => {
   assert.equal(config.buildCommand, "npm run build");
   assert.equal(config.installCommand, "npm install");
   assert.notEqual(config.outputDirectory, "public");
-  assert.equal(Object.hasOwn(config, "outputDirectory"), false);
+  assert.equal(config.outputDirectory, null);
+  assert.equal(Object.hasOwn(config, "outputDirectory"), true);
 });

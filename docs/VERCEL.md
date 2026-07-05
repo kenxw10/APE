@@ -2,7 +2,7 @@
 
 PR 4 adds a Vercel-ready Next.js dashboard under `dashboard/`.
 
-PR 4a adds `dashboard/vercel.json` so Vercel has repository-controlled instructions for the dashboard build path.
+PR 4a adds `dashboard/vercel.json` so Vercel has repository-controlled instructions for the dashboard build path and clears stale static output-directory overrides.
 
 ## Create the Vercel Project
 
@@ -11,7 +11,7 @@ PR 4a adds `dashboard/vercel.json` so Vercel has repository-controlled instructi
 3. Framework Preset should be `Next.js`.
 4. Build Command should be `npm run build`.
 5. Install Command should be `npm install`.
-6. Output Directory should stay blank / Next.js default. Do not set it to `public`.
+6. Output Directory should stay blank / Next.js default in the Vercel UI. The repo config sets `outputDirectory` to `null` so Vercel auto-detects the Next.js output instead of using any stale static folder override.
 7. Set this environment variable:
 
 ```text
@@ -48,7 +48,7 @@ If logs show this without `npm install`, `APE_DASHBOARD_BUILD_PATH_CONFIRMED`, o
 Build Completed in /vercel/output [70ms]
 ```
 
-In that case, re-check that the Vercel project Root Directory is `dashboard` and that the Output Directory is blank / Next.js default.
+In that case, re-check that the Vercel project Root Directory is `dashboard`. Also confirm the deployed commit includes `dashboard/vercel.json` with `outputDirectory` set to `null`.
 
 ## CORS
 
