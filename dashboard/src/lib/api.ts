@@ -32,6 +32,32 @@ export interface ReadinessResponse {
   database: DatabaseStatusResponse;
 }
 
+export interface WebSocketStatusResponse {
+  configured: boolean;
+  enabled: boolean;
+  signer_ready: boolean;
+  endpoint_host: string;
+  endpoint_path: string;
+  connection_state: string;
+  active_market_ticker: string | null;
+  subscribed_channels: string[];
+  subscription_ids: Record<string, number>;
+  last_connected_at: string | null;
+  last_message_at: string | null;
+  last_ticker_at: string | null;
+  last_orderbook_at: string | null;
+  last_trade_at: string | null;
+  latest_orderbook_received_at: string | null;
+  latest_trade_received_at: string | null;
+  reconnect_count: number;
+  last_error_type: string | null;
+  last_error_message: string | null;
+  warnings: string[];
+  blockers: string[];
+  stale: boolean;
+  checked_at: string;
+}
+
 export interface EndpointResult<T> {
   path: string;
   ok: boolean;
@@ -47,6 +73,7 @@ export interface OperationalSnapshot {
   safety: EndpointResult<SafetyResponse>;
   database: EndpointResult<DatabaseStatusResponse>;
   readiness: EndpointResult<ReadinessResponse>;
+  wsStatus: EndpointResult<WebSocketStatusResponse>;
 }
 
 export function getApiBaseUrl(): string {
@@ -85,11 +112,12 @@ async function fetchEndpoint<T>(apiBaseUrl: string, path: string): Promise<Endpo
 
 export async function fetchOperationalSnapshot(): Promise<OperationalSnapshot> {
   const apiBaseUrl = getApiBaseUrl();
-  const [health, safety, database, readiness] = await Promise.all([
+  const [health, safety, database, readiness, wsStatus] = await Promise.all([
     fetchEndpoint<HealthResponse>(apiBaseUrl, "/health"),
     fetchEndpoint<SafetyResponse>(apiBaseUrl, "/safety"),
     fetchEndpoint<DatabaseStatusResponse>(apiBaseUrl, "/db/status"),
-    fetchEndpoint<ReadinessResponse>(apiBaseUrl, "/ready")
+    fetchEndpoint<ReadinessResponse>(apiBaseUrl, "/ready"),
+    fetchEndpoint<WebSocketStatusResponse>(apiBaseUrl, "/ws/status")
   ]);
 
   return {
@@ -99,6 +127,7 @@ export async function fetchOperationalSnapshot(): Promise<OperationalSnapshot> {
     health,
     safety,
     database,
-    readiness
+    readiness,
+    wsStatus
   };
 }

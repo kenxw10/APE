@@ -14,6 +14,8 @@ PR 4 adds a Vercel-ready read-only dashboard scaffold under `dashboard/`. The da
 
 PR 5 adds observer-only Kalshi REST authentication diagnostics and an active BTC15 market resolver. It can authenticate to Kalshi REST when Railway credentials are configured, resolve the currently active `KXBTC15M` market, store market metadata in the existing `markets` table, and expose safe read-only diagnostics.
 
+PR 6 adds an observer-only Kalshi WebSocket market-data intake foundation for the Railway worker. It is disabled by default, subscribes only to public `ticker`, `orderbook_delta`, and `trade` channels for the active BTC15 market when enabled, stores normalized orderbook/trade data in existing tables, and exposes `/ws/status` diagnostics. It does not add BRTI/CF Benchmarks intake, strategy decisions, paper trading, live trading, or order placement.
+
 ## Safety Defaults
 
 The default configuration is intentionally non-trading:
@@ -35,6 +37,8 @@ Kalshi credentials are not required for local health checks or tests.
 `DATABASE_URL` is optional. If it is unset, the API and worker still start in observer-only mode.
 
 If Kalshi credentials are missing, `/kalshi/status` and `/markets/active` return safe `not_configured` diagnostics instead of crashing.
+
+`KALSHI_WS_ENABLED=false` by default. The worker only connects to Kalshi WebSocket when this is set to `true` on the Railway worker service.
 
 ## Local Setup
 
@@ -80,6 +84,7 @@ Invoke-RestMethod http://127.0.0.1:8000/db/status
 Invoke-RestMethod http://127.0.0.1:8000/ready
 Invoke-RestMethod http://127.0.0.1:8000/kalshi/status
 Invoke-RestMethod http://127.0.0.1:8000/markets/active
+Invoke-RestMethod http://127.0.0.1:8000/ws/status
 ```
 
 Successful health output should report `status` as `ok`, `app_mode` as `OBSERVER`, and `is_safe` as `True`.
@@ -89,6 +94,8 @@ When `DATABASE_URL` is unset, `/db/status` should report `status` as `not_config
 When `DATABASE_URL` is unset, `/ready` should report `status` as `not_ready`. This is expected locally unless you configure a database.
 
 When Kalshi credentials are unset, `/kalshi/status` should report `configured` as `False`, and `/markets/active` should report `state` as `not_configured`.
+
+When `KALSHI_WS_ENABLED=false`, `/ws/status` should report `connection_state` as `disabled` and `stale` as `False`.
 
 ## Kalshi REST Resolver
 
@@ -107,6 +114,26 @@ KALSHI_RESOLVER_PARSER_VERSION=btc15_resolver_v1
 ```
 
 Never put `KALSHI_API_KEY_ID` or `KALSHI_PRIVATE_KEY` in Vercel. The dashboard only needs the public Railway API URL.
+
+## Kalshi WebSocket Collector
+
+PR 6 is observer-only. The collector is owned by the Railway worker and remains disabled unless `KALSHI_WS_ENABLED=true`.
+
+Optional Railway worker settings:
+
+```text
+KALSHI_WS_BASE_URL=wss://external-api-ws.kalshi.com/trade-api/ws/v2
+KALSHI_WS_ENABLED=false
+KALSHI_WS_CONNECT_TIMEOUT_SECONDS=10
+KALSHI_WS_HEARTBEAT_TIMEOUT_SECONDS=30
+KALSHI_WS_RECONNECT_SECONDS=5
+KALSHI_WS_MAX_RECONNECT_SECONDS=60
+KALSHI_WS_SUBSCRIBE_ORDERBOOK=true
+KALSHI_WS_SUBSCRIBE_TICKER=true
+KALSHI_WS_SUBSCRIBE_TRADES=true
+```
+
+After PR 6 is merged, enable the collector only on the Railway worker by setting `KALSHI_WS_ENABLED=true`. The API service may keep `KALSHI_WS_ENABLED=false`; `/ws/status` is derived from database rows and worker heartbeat metadata. Do not add these variables or Kalshi credentials to Vercel.
 
 ## Database Setup
 
@@ -168,9 +195,9 @@ Successful startup should log that the worker is running in observer mode. Stop 
 - Kalshi order placement
 - Order executor
 - Strategy decision engine
-- Kalshi WebSocket ingestion
+- Kalshi WebSocket ingestion beyond observer-only public ticker/orderbook/trade capture
 - BRTI/reference ingestion
-- Websocket collectors
+- CF Benchmarks/BRTI WebSocket or REST intake
 - Real dashboard portfolio/ledger endpoints
 - Real CF/BRTI reference data endpoint
 - Railway cron

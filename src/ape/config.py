@@ -10,6 +10,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
 DEFAULT_KALSHI_API_BASE_URL = "https://external-api.kalshi.com/trade-api/v2"
+DEFAULT_KALSHI_WS_BASE_URL = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
 DEFAULT_KALSHI_BTC15_SERIES_TICKER = "KXBTC15M"
 DEFAULT_KALSHI_RESOLVER_PARSER_VERSION = "btc15_resolver_v1"
 
@@ -47,6 +48,15 @@ class AppConfig:
     kalshi_btc15_series_ticker: str = DEFAULT_KALSHI_BTC15_SERIES_TICKER
     kalshi_rest_timeout_seconds: float = 10.0
     kalshi_resolver_parser_version: str = DEFAULT_KALSHI_RESOLVER_PARSER_VERSION
+    kalshi_ws_base_url: str = DEFAULT_KALSHI_WS_BASE_URL
+    kalshi_ws_enabled: bool = False
+    kalshi_ws_connect_timeout_seconds: float = 10.0
+    kalshi_ws_heartbeat_timeout_seconds: float = 30.0
+    kalshi_ws_reconnect_seconds: float = 5.0
+    kalshi_ws_max_reconnect_seconds: float = 60.0
+    kalshi_ws_subscribe_orderbook: bool = True
+    kalshi_ws_subscribe_ticker: bool = True
+    kalshi_ws_subscribe_trades: bool = True
 
 
 TRUE_VALUES = {"1", "true", "t", "yes", "y", "on"}
@@ -102,6 +112,42 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
             DEFAULT_KALSHI_RESOLVER_PARSER_VERSION,
         ).strip()
         or DEFAULT_KALSHI_RESOLVER_PARSER_VERSION,
+        kalshi_ws_base_url=_parse_ws_url(
+            "KALSHI_WS_BASE_URL",
+            _get(source, "KALSHI_WS_BASE_URL", DEFAULT_KALSHI_WS_BASE_URL),
+        ),
+        kalshi_ws_enabled=_parse_bool(
+            "KALSHI_WS_ENABLED",
+            _get(source, "KALSHI_WS_ENABLED", "false"),
+        ),
+        kalshi_ws_connect_timeout_seconds=_parse_float(
+            "KALSHI_WS_CONNECT_TIMEOUT_SECONDS",
+            _get(source, "KALSHI_WS_CONNECT_TIMEOUT_SECONDS", "10"),
+        ),
+        kalshi_ws_heartbeat_timeout_seconds=_parse_float(
+            "KALSHI_WS_HEARTBEAT_TIMEOUT_SECONDS",
+            _get(source, "KALSHI_WS_HEARTBEAT_TIMEOUT_SECONDS", "30"),
+        ),
+        kalshi_ws_reconnect_seconds=_parse_float(
+            "KALSHI_WS_RECONNECT_SECONDS",
+            _get(source, "KALSHI_WS_RECONNECT_SECONDS", "5"),
+        ),
+        kalshi_ws_max_reconnect_seconds=_parse_float(
+            "KALSHI_WS_MAX_RECONNECT_SECONDS",
+            _get(source, "KALSHI_WS_MAX_RECONNECT_SECONDS", "60"),
+        ),
+        kalshi_ws_subscribe_orderbook=_parse_bool(
+            "KALSHI_WS_SUBSCRIBE_ORDERBOOK",
+            _get(source, "KALSHI_WS_SUBSCRIBE_ORDERBOOK", "true"),
+        ),
+        kalshi_ws_subscribe_ticker=_parse_bool(
+            "KALSHI_WS_SUBSCRIBE_TICKER",
+            _get(source, "KALSHI_WS_SUBSCRIBE_TICKER", "true"),
+        ),
+        kalshi_ws_subscribe_trades=_parse_bool(
+            "KALSHI_WS_SUBSCRIBE_TRADES",
+            _get(source, "KALSHI_WS_SUBSCRIBE_TRADES", "true"),
+        ),
     )
 
 
@@ -136,6 +182,15 @@ def _parse_url(name: str, raw_value: str) -> str:
     parsed = urlsplit(value)
     if parsed.scheme != "https" or not parsed.netloc:
         raise ConfigError(f"{name} must use https.")
+
+    return value
+
+
+def _parse_ws_url(name: str, raw_value: str) -> str:
+    value = raw_value.strip().rstrip("/")
+    parsed = urlsplit(value)
+    if parsed.scheme != "wss" or not parsed.netloc:
+        raise ConfigError(f"{name} must use wss.")
 
     return value
 

@@ -12,6 +12,7 @@ from ape.config import AppConfig, load_config
 from ape.db.session import check_database_connection, create_engine_from_config
 from ape.kalshi.diagnostics import build_kalshi_config_diagnostic
 from ape.kalshi.resolver import resolve_active_btc15_market
+from ape.kalshi.ws_status import build_kalshi_ws_status
 from ape.models.health import (
     DatabaseStatusResponse,
     HealthResponse,
@@ -21,8 +22,10 @@ from ape.models.health import (
 from ape.models.kalshi import (
     ActiveMarketResponse,
     KalshiStatusResponse,
+    KalshiWsStatusResponse,
     active_market_response,
     kalshi_status_response,
+    kalshi_ws_status_response,
 )
 from ape.safety import SafetyAssessment, assert_startup_safe, assess_startup_safety
 
@@ -77,6 +80,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         client = client_factory(settings) if client_factory else None
         result = resolve_active_btc15_market(config=settings, client=client)
         return active_market_response(result)
+
+    @app.get("/ws/status", response_model=KalshiWsStatusResponse)
+    def websocket_status() -> KalshiWsStatusResponse:
+        return kalshi_ws_status_response(build_kalshi_ws_status(settings))
 
     @app.get("/ready", response_model=ReadinessResponse)
     def readiness() -> ReadinessResponse:

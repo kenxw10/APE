@@ -16,6 +16,7 @@ Rules:
 - Do not move to the next PR until the current PR has been reviewed, merged, and validated.
 - Do not introduce live trading, paper trading, execution, secrets, external market data calls, or deployment behavior unless that PR explicitly authorizes it.
 - Kalshi REST resolver PRs may add read-only authenticated diagnostics only when explicitly scoped; they must not add order placement, paper trading, strategy decisions, WebSocket ingestion, or BRTI ingestion.
+- Kalshi WebSocket PRs may add observer-only public ticker/orderbook/trade capture only when explicitly scoped; they must not add BRTI/CF Benchmarks, private user channels, order placement, paper trading, strategy decisions, or execution.
 - Database schema/repository changes are allowed only in PRs that explicitly authorize storage work.
 - Railway worker services should be always-on processes, not cron jobs, unless a later PR explicitly changes that decision.
 
@@ -26,3 +27,12 @@ PR 5 post-merge checkpoint:
 - Keep `APP_MODE=OBSERVER`, `TRADING_ENABLED=false`, and `EXECUTE=false`.
 - Redeploy Railway API and worker.
 - Validate `/kalshi/status`, `/markets/active`, `/health`, `/safety`, `/db/status`, and `/ready`.
+
+PR 6 post-merge checkpoint:
+
+- Set `KALSHI_WS_ENABLED=true` on the Railway worker only.
+- Keep API and worker `APP_MODE=OBSERVER`, `TRADING_ENABLED=false`, and `EXECUTE=false`.
+- Do not add Kalshi credentials or WebSocket settings to Vercel.
+- Redeploy the Railway worker.
+- Validate worker logs, `/ws/status`, `/health`, `/safety`, `/db/status`, `/ready`, `/kalshi/status`, and `/markets/active`.
+- Confirm `orderbook_snapshots` rows are being written. `public_trades` may be sparse.

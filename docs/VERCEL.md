@@ -32,6 +32,8 @@ The dashboard is read-only and only needs the public Railway API base URL.
 
 PR 5 Kalshi REST credentials are Railway-only. Do not add `KALSHI_API_KEY_ID`, `KALSHI_PRIVATE_KEY`, or `KALSHI_API_BASE_URL` to Vercel.
 
+PR 6 Kalshi WebSocket intake is Railway-worker-only. Do not add `KALSHI_WS_ENABLED`, `KALSHI_WS_BASE_URL`, Kalshi credentials, or any WebSocket secrets/settings to Vercel. The dashboard only reads the public Railway API `/ws/status` response.
+
 ## Expected Build Logs
 
 The dashboard build includes a marker that proves Vercel is running from the `dashboard` app:
@@ -64,6 +66,7 @@ Open the Vercel dashboard and confirm:
 
 - Header shows API connected when Railway is reachable.
 - Header shows DB ready when `/db/status` is `ok`.
+- Source/Data panels show Kalshi WebSocket status from `/ws/status` when the Railway API is reachable.
 - Safety panel shows `Mode: OBSERVER`.
 - Safety panel shows `Trading: DISABLED`.
 - Safety panel shows `Execute: FALSE`.

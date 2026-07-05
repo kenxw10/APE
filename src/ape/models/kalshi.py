@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from ape.kalshi.diagnostics import KalshiConfigDiagnostic
 from ape.kalshi.resolver import ResolverResult
+from ape.kalshi.ws_status import KalshiWsStatusSnapshot
 from ape.repositories.inputs import JsonPayload, MarketInput
 
 
@@ -80,6 +81,32 @@ class ActiveMarketResponse(BaseModel):
     resolved_at: datetime
 
 
+class KalshiWsStatusResponse(BaseModel):
+    configured: bool
+    enabled: bool
+    signer_ready: bool
+    endpoint_host: str
+    endpoint_path: str
+    connection_state: str
+    active_market_ticker: str | None
+    subscribed_channels: list[str]
+    subscription_ids: dict[str, int]
+    last_connected_at: datetime | None
+    last_message_at: datetime | None
+    last_ticker_at: datetime | None
+    last_orderbook_at: datetime | None
+    last_trade_at: datetime | None
+    latest_orderbook_received_at: datetime | None
+    latest_trade_received_at: datetime | None
+    reconnect_count: int
+    last_error_type: str | None
+    last_error_message: str | None
+    warnings: list[str]
+    blockers: list[str]
+    stale: bool
+    checked_at: datetime
+
+
 def kalshi_status_response(diagnostic: KalshiConfigDiagnostic) -> KalshiStatusResponse:
     return KalshiStatusResponse(**diagnostic.__dict__)
 
@@ -101,6 +128,10 @@ def active_market_response(result: ResolverResult) -> ActiveMarketResponse:
         persisted=result.persisted,
         resolved_at=result.resolved_at,
     )
+
+
+def kalshi_ws_status_response(snapshot: KalshiWsStatusSnapshot) -> KalshiWsStatusResponse:
+    return KalshiWsStatusResponse(**snapshot.__dict__)
 
 
 def _boundary_response(boundary) -> MarketBoundaryResponse | None:

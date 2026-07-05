@@ -25,3 +25,9 @@ class OrderbookRepository:
             .limit(1)
         )
 
+    def get_latest_snapshot_any(self) -> OrderbookSnapshot | None:
+        return self.session.scalar(
+            select(OrderbookSnapshot)
+            .order_by(desc(OrderbookSnapshot.received_at), desc(OrderbookSnapshot.id))
+            .limit(1)
+        )

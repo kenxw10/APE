@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
+from datetime import UTC, datetime
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from ape.config import AppConfig, ConfigError, load_config
+from ape.db.session import create_engine_from_config, create_session_factory
+from ape.kalshi.ws_collector import KalshiWsCollector, heartbeat_interval_seconds
+from ape.repositories.inputs import WorkerHeartbeatInput
+from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import SafetyError, assert_startup_safe, assess_startup_safety
 
 LOGGER = logging.getLogger(__name__)
@@ -24,27 +32,106 @@ def run_worker(
 ) -> None:
     safety = assess_startup_safety(config)
     assert_startup_safe(safety)
+    started_at = datetime.now(UTC)
+    session_factory = None
+    engine = create_engine_from_config(config) if config.database_url else None
+    if engine is not None:
+        session_factory = create_session_factory(engine)
 
-    LOGGER.info(
-        "Starting ape-worker env=%s app_mode=%s safety=%s db_configured=%s",
-        config.env,
-        config.app_mode.value,
-        "safe" if safety.is_safe else "blocked",
-        bool(config.database_url),
-    )
-    LOGGER.info("APE worker running in OBSERVER mode; idle heartbeat only.")
+    try:
+        LOGGER.info(
+            "Starting ape-worker env=%s app_mode=%s safety=%s db_configured=%s ws_enabled=%s",
+            config.env,
+            config.app_mode.value,
+            "safe" if safety.is_safe else "blocked",
+            bool(config.database_url),
+            config.kalshi_ws_enabled,
+        )
 
-    event = stop_event or threading.Event()
-    iterations = 0
-
-    while not event.is_set():
-        LOGGER.debug("APE worker heartbeat: observer idle.")
-        iterations += 1
-
-        if max_iterations is not None and iterations >= max_iterations:
+        event = stop_event or threading.Event()
+        if config.kalshi_ws_enabled:
+            LOGGER.info("APE worker running Kalshi WebSocket collector in OBSERVER mode.")
+            collector = KalshiWsCollector(
+                config=config,
+                safety=safety,
+                session_factory=session_factory,
+                started_at=started_at,
+            )
+            asyncio.run(collector.run(stop_event=event, max_cycles=max_iterations))
             return
 
-        event.wait(config.worker_poll_seconds)
+        LOGGER.info("APE worker running in OBSERVER mode; idle heartbeat only.")
+        iterations = 0
+        last_idle_heartbeat_at: datetime | None = None
+
+        while not event.is_set():
+            heartbeat_at = datetime.now(UTC)
+            if _idle_heartbeat_due(config, last_idle_heartbeat_at, heartbeat_at):
+                LOGGER.debug("APE worker heartbeat: observer idle.")
+                last_idle_heartbeat_at = _record_idle_heartbeat(
+                    config,
+                    safety,
+                    session_factory,
+                    started_at,
+                    heartbeat_at,
+                )
+            iterations += 1
+
+            if max_iterations is not None and iterations >= max_iterations:
+                return
+
+            event.wait(config.worker_poll_seconds)
+    finally:
+        if engine is not None:
+            engine.dispose()
+
+
+def _record_idle_heartbeat(
+    config: AppConfig,
+    safety,
+    session_factory,
+    started_at: datetime,
+    heartbeat_at: datetime,
+) -> datetime:
+    if session_factory is None:
+        return heartbeat_at
+
+    try:
+        with session_factory() as session:
+            WorkerHeartbeatRepository(session).record_heartbeat(
+                WorkerHeartbeatInput(
+                    service_name="ape-worker",
+                    started_at=started_at,
+                    heartbeat_at=heartbeat_at,
+                    app_mode=config.app_mode.value,
+                    is_safe=safety.is_safe,
+                    metadata={
+                        "mode": "idle",
+                        "ws": {
+                            "enabled": False,
+                            "connection_state": "disabled",
+                            "warnings": ["kalshi_ws_disabled"],
+                            "blockers": [],
+                        },
+                    },
+                )
+            )
+            session.commit()
+    except SQLAlchemyError:
+        LOGGER.warning("Idle worker heartbeat persistence failed.", exc_info=True)
+
+    return heartbeat_at
+
+
+def _idle_heartbeat_due(
+    config: AppConfig,
+    last_heartbeat_at: datetime | None,
+    heartbeat_at: datetime,
+) -> bool:
+    if last_heartbeat_at is None:
+        return True
+    elapsed = (heartbeat_at.astimezone(UTC) - last_heartbeat_at.astimezone(UTC)).total_seconds()
+    return elapsed >= heartbeat_interval_seconds(config)
 
 
 def main() -> int:

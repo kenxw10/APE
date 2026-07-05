@@ -179,10 +179,26 @@ function createStatusSections(
   dbReady: boolean
 ): Record<"source" | "system" | "streaming" | "engine" | "safety", StatusRow[]> {
   const safety = snapshot.safety.data ?? snapshot.health.data?.safety ?? snapshot.readiness.data?.safety ?? null;
+  const wsStatus = snapshot.wsStatus.data;
+  const wsConnected = wsStatus?.connection_state === "subscribed" && !wsStatus.stale;
+  const wsTone = !snapshot.wsStatus.ok
+    ? "red"
+    : !wsStatus?.enabled
+      ? "amber"
+      : wsConnected
+        ? "green"
+        : wsStatus.connection_state === "error"
+          ? "red"
+          : "amber";
 
   return {
     source: [
       { label: "CF/BRTI", value: "NOT IMPLEMENTED", tone: "amber" },
+      {
+        label: "Kalshi WS",
+        value: wsStatus ? wsStatus.connection_state.toUpperCase() : "UNREACHABLE",
+        tone: wsTone
+      },
       { label: "Age", value: "--", tone: "muted" },
       { label: "Latency", value: "--", tone: "muted" },
       { label: "Provenance", value: scaffold.reference.series.provenance.toUpperCase(), tone: "amber" }
@@ -197,8 +213,21 @@ function createStatusSections(
       }
     ],
     streaming: [
-      { label: "SSE Connection", value: "NOT IMPLEMENTED", tone: "amber" },
-      { label: "Updates / Min", value: "--", tone: "muted" },
+      {
+        label: "WS Channels",
+        value: wsStatus?.subscribed_channels.length ? `${wsStatus.subscribed_channels.length} ACTIVE` : "--",
+        tone: wsConnected ? "green" : "muted"
+      },
+      {
+        label: "Orderbook Age",
+        value: formatAge(snapshot.fetchedAt, wsStatus?.last_orderbook_at ?? null),
+        tone: wsStatus?.last_orderbook_at && !wsStatus.stale ? "green" : "muted"
+      },
+      {
+        label: "Trade Age",
+        value: formatAge(snapshot.fetchedAt, wsStatus?.last_trade_at ?? null),
+        tone: wsStatus?.last_trade_at ? "green" : "muted"
+      },
       { label: "Chart Points", value: `${scaffold.reference.series.points.length} / 600 max`, tone: "green" }
     ],
     engine: [
@@ -229,4 +258,20 @@ function formatUsd(value: number): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
   }).format(value);
+}
+
+function formatAge(fetchedAt: string, value: string | null): string {
+  if (!value) {
+    return "--";
+  }
+
+  const ageSeconds = Math.max(0, Math.round((Date.parse(fetchedAt) - Date.parse(value)) / 1000));
+  if (!Number.isFinite(ageSeconds)) {
+    return "--";
+  }
+  if (ageSeconds < 60) {
+    return `${ageSeconds}s`;
+  }
+
+  return `${Math.round(ageSeconds / 60)}m`;
 }

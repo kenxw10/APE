@@ -8,6 +8,7 @@ It reads the live Railway observer API for operational status:
 - `/safety`
 - `/db/status`
 - `/ready`
+- `/ws/status`
 
 Portfolio, CF/BRTI reference, and position sections are scaffold placeholders until backend endpoints exist. They are labeled in the UI and are not live trading data.
 
@@ -49,6 +50,7 @@ NEXT_PUBLIC_API_BASE_URL=https://ape-api-production.up.railway.app
 ```
 
 Do not add secrets to the dashboard. Do not add `DATABASE_URL`, Kalshi credentials, or private keys.
+Kalshi WebSocket collection is Railway-worker-only; the dashboard only reads `/ws/status`.
 
 ## Current Scaffold Limits
 

@@ -24,6 +24,19 @@ class PublicTradesRepository:
             )
         )
 
+    def get_latest_trade(self, market_ticker: str | None = None) -> PublicTrade | None:
+        statement = select(PublicTrade)
+        if market_ticker is not None:
+            statement = statement.where(PublicTrade.market_ticker == market_ticker)
+
+        return self.session.scalar(
+            statement.order_by(
+                desc(PublicTrade.executed_at).nulls_last(),
+                desc(PublicTrade.received_at),
+                desc(PublicTrade.id),
+            ).limit(1)
+        )
+
 
 def _recent_trades_statement(market_ticker: str, limit: int):
     return (
