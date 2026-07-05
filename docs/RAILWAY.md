@@ -9,6 +9,8 @@ APE should be deployed as two Railway services from the same GitHub repo:
 
 Railway Postgres should be attached to the project and should provide `DATABASE_URL`.
 
+Railway/Railpack installs Python runtime dependencies from the root `requirements.txt`. If deploy logs show missing Python modules such as `sqlalchemy`, confirm `requirements.txt` exists and includes the runtime dependencies from `pyproject.toml`.
+
 ## Safety Defaults
 
 Set these environment variables for both Railway services:
