@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -9,8 +10,15 @@ from fastapi import FastAPI
 from ape import __version__
 from ape.config import AppConfig, load_config
 from ape.db.session import check_database_connection, create_engine_from_config
-from ape.models.health import DatabaseStatusResponse, HealthResponse, SafetyResponse
+from ape.models.health import (
+    DatabaseStatusResponse,
+    HealthResponse,
+    ReadinessResponse,
+    SafetyResponse,
+)
 from ape.safety import SafetyAssessment, assert_startup_safe, assess_startup_safety
+
+LOGGER = logging.getLogger(__name__)
 
 
 def create_app(config: AppConfig | None = None) -> FastAPI:
@@ -48,19 +56,26 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.get("/db/status", response_model=DatabaseStatusResponse)
     def database_status() -> DatabaseStatusResponse:
-        if not settings.database_url:
-            return DatabaseStatusResponse(status="not_configured", configured=False)
+        return _database_status(settings)
 
-        try:
-            engine = create_engine_from_config(settings)
-            try:
-                check_database_connection(engine)
-            finally:
-                engine.dispose()
-        except Exception:
-            return DatabaseStatusResponse(status="error", configured=True)
+    @app.get("/ready", response_model=ReadinessResponse)
+    def readiness() -> ReadinessResponse:
+        current_safety: SafetyAssessment = app.state.safety
+        current_database_status = _database_status(settings)
 
-        return DatabaseStatusResponse(status="ok", configured=True)
+        if not current_safety.is_safe:
+            status = "blocked"
+        elif current_database_status.status == "ok":
+            status = "ready"
+        else:
+            status = "not_ready"
+
+        return ReadinessResponse(
+            status=status,
+            ready=status == "ready",
+            safety=_safety_response(current_safety),
+            database=current_database_status,
+        )
 
     return app
 
@@ -69,8 +84,41 @@ def _safety_response(assessment: SafetyAssessment) -> SafetyResponse:
     return SafetyResponse(**assessment.to_dict())
 
 
+def _database_status(settings: AppConfig) -> DatabaseStatusResponse:
+    if not settings.database_url:
+        return DatabaseStatusResponse(status="not_configured", configured=False)
+
+    try:
+        engine = create_engine_from_config(settings)
+        try:
+            check_database_connection(engine)
+        finally:
+            engine.dispose()
+    except Exception:
+        return DatabaseStatusResponse(status="error", configured=True)
+
+    return DatabaseStatusResponse(status="ok", configured=True)
+
+
+def configure_logging(log_level: str) -> None:
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+        force=True,
+    )
+
+
 def main() -> None:
     settings = load_config()
+    configure_logging(settings.log_level)
+    safety = assess_startup_safety(settings)
+    LOGGER.info(
+        "Starting ape-api env=%s app_mode=%s safety=%s db_configured=%s",
+        settings.env,
+        settings.app_mode.value,
+        "safe" if safety.is_safe else "blocked",
+        bool(settings.database_url),
+    )
     app = create_app(settings)
     uvicorn.run(
         app,

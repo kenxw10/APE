@@ -53,7 +53,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         log_level=_get(source, "LOG_LEVEL", "INFO").upper(),
         env=_get(source, "ENV", "local"),
         api_host=_get(source, "API_HOST", "0.0.0.0"),
-        api_port=_parse_int("API_PORT", _get(source, "API_PORT", "8000")),
+        api_port=_parse_api_port(source),
         worker_poll_seconds=_parse_float(
             "WORKER_POLL_SECONDS",
             _get(source, "WORKER_POLL_SECONDS", "1.0"),
@@ -98,6 +98,18 @@ def _optional_database_url(value: str | None) -> str | None:
         raise ConfigError("Invalid DATABASE_URL. Expected a SQLAlchemy database URL.") from exc
 
     return database_url
+
+
+def _parse_api_port(env: Mapping[str, str]) -> int:
+    explicit_api_port = _optional(env.get("API_PORT"))
+    if explicit_api_port is not None:
+        return _parse_int("API_PORT", explicit_api_port)
+
+    railway_port = _optional(env.get("PORT"))
+    if railway_port is not None:
+        return _parse_int("PORT", railway_port)
+
+    return 8000
 
 
 def _parse_mode(raw_value: str) -> AppMode:

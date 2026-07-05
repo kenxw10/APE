@@ -25,7 +25,14 @@ def run_worker(
     safety = assess_startup_safety(config)
     assert_startup_safe(safety)
 
-    LOGGER.info("APE worker started in OBSERVER mode; idle heartbeat only.")
+    LOGGER.info(
+        "Starting ape-worker env=%s app_mode=%s safety=%s db_configured=%s",
+        config.env,
+        config.app_mode.value,
+        "safe" if safety.is_safe else "blocked",
+        bool(config.database_url),
+    )
+    LOGGER.info("APE worker running in OBSERVER mode; idle heartbeat only.")
 
     event = stop_event or threading.Event()
     iterations = 0
