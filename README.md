@@ -2,7 +2,9 @@
 
 APE is a standalone BTC15 Kalshi Momentum Bot project. It is separate from BULL.
 
-PR 1 creates an observer-only Python foundation: configuration, startup safety checks, a FastAPI health API, an idle worker skeleton, tests, and project documentation. It does not implement trading, paper trading, strategy execution, database persistence, dashboard code, or production deployment.
+PR 1 created an observer-only Python foundation: configuration, startup safety checks, a FastAPI health API, an idle worker skeleton, tests, and project documentation.
+
+PR 2 adds the database schema and repository foundation for future observer ingestion and dry-run decision storage. It does not ingest Kalshi/BRTI data, execute strategy logic, place orders, add dashboard code, or configure production deployment.
 
 ## Safety Defaults
 
@@ -14,13 +16,15 @@ TRADING_ENABLED=false
 EXECUTE=false
 ```
 
-In PR 1, startup is blocked if:
+Startup is blocked if:
 
 - `APP_MODE` is anything other than `OBSERVER`
 - `TRADING_ENABLED=true`
 - `EXECUTE=true`
 
 Kalshi credentials are not required for local health checks or tests.
+
+`DATABASE_URL` is optional. If it is unset, the API and worker still start in observer-only mode.
 
 ## Local Setup
 
@@ -62,9 +66,25 @@ Then, in a second PowerShell window:
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8000/health
 Invoke-RestMethod http://127.0.0.1:8000/safety
+Invoke-RestMethod http://127.0.0.1:8000/db/status
 ```
 
 Successful health output should report `status` as `ok`, `app_mode` as `OBSERVER`, and `is_safe` as `True`.
+
+When `DATABASE_URL` is unset, `/db/status` should report `status` as `not_configured`.
+
+## Database Setup
+
+PR 2 uses SQLAlchemy for the schema and repository layer. Railway Postgres is the production direction for a later PR, but local tests use SQLite so you do not need to install Postgres manually.
+
+To create a local SQLite database for development:
+
+```powershell
+$env:DATABASE_URL="sqlite+pysqlite:///./local-ape.sqlite"
+python -m ape.db.migrations
+```
+
+Successful output should say the database schema is current. The command does not print the database URL.
 
 ## Run Worker Locally
 
@@ -81,7 +101,9 @@ Successful startup should log that the worker is running in observer mode. Stop 
 - Kalshi order placement
 - Order executor
 - Strategy decision engine
-- Database schema or repositories
+- Kalshi ingestion
+- BRTI/reference ingestion
+- Websocket collectors
 - Vercel dashboard
 - Railway deployment config
 - GitHub Actions

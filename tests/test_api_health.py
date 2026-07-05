@@ -36,3 +36,27 @@ def test_safety_works_without_secrets() -> None:
     assert body["is_safe"] is True
     assert body["blockers"] == []
 
+
+def test_db_status_is_not_configured_without_database_url() -> None:
+    app = create_app(load_config({}))
+
+    with TestClient(app) as client:
+        response = client.get("/db/status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "not_configured"
+    assert body["configured"] is False
+
+
+def test_db_status_checks_configured_database(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_status.sqlite'}"
+    app = create_app(load_config({"DATABASE_URL": database_url}))
+
+    with TestClient(app) as client:
+        response = client.get("/db/status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["configured"] is True

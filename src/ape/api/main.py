@@ -8,7 +8,8 @@ from fastapi import FastAPI
 
 from ape import __version__
 from ape.config import AppConfig, load_config
-from ape.models.health import HealthResponse, SafetyResponse
+from ape.db.session import check_database_connection, create_engine_from_config
+from ape.models.health import DatabaseStatusResponse, HealthResponse, SafetyResponse
 from ape.safety import SafetyAssessment, assert_startup_safe, assess_startup_safety
 
 
@@ -44,6 +45,22 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.get("/safety", response_model=SafetyResponse)
     def safety_status() -> SafetyResponse:
         return _safety_response(app.state.safety)
+
+    @app.get("/db/status", response_model=DatabaseStatusResponse)
+    def database_status() -> DatabaseStatusResponse:
+        if not settings.database_url:
+            return DatabaseStatusResponse(status="not_configured", configured=False)
+
+        try:
+            engine = create_engine_from_config(settings)
+            try:
+                check_database_connection(engine)
+            finally:
+                engine.dispose()
+        except Exception:
+            return DatabaseStatusResponse(status="error", configured=True)
+
+        return DatabaseStatusResponse(status="ok", configured=True)
 
     return app
 
