@@ -98,7 +98,7 @@ PR 3 adds Railway deployment helper scripts and documentation for two Railway se
 - API service: `python -m scripts.railway_start_api`
 - Worker service: `python -m scripts.railway_start_worker`
 
-Both commands run database migrations first, then start the service. Railway Postgres should provide `DATABASE_URL` in deployment. See [docs/RAILWAY.md](docs/RAILWAY.md) before configuring Railway.
+The API command runs database migrations before API startup. The worker command starts the always-on observer worker directly so both services do not race on migrations. Railway Postgres should provide `DATABASE_URL` in deployment. See [docs/RAILWAY.md](docs/RAILWAY.md) before configuring Railway.
 
 ## Run Worker Locally
 

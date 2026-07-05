@@ -39,7 +39,7 @@ Set the API service start command:
 python -m scripts.railway_start_api
 ```
 
-The helper runs:
+The API helper is the automatic migration owner. It runs:
 
 ```text
 python -m ape.db.migrations
@@ -70,11 +70,16 @@ python -m scripts.railway_start_worker
 The helper runs:
 
 ```text
-python -m ape.db.migrations
 python -m ape.worker.main
 ```
 
-The worker is an always-on observer process. Do not configure a Railway cron job for it.
+The worker helper does not run migrations. This avoids API and worker services racing each other on a fresh Railway Postgres database. The worker is an always-on observer process. Do not configure a Railway cron job for it.
+
+If a manual migration is needed outside API startup, run:
+
+```text
+python -m scripts.railway_migrate
+```
 
 ## Required Environment Variables
 
@@ -114,4 +119,3 @@ DB_STATEMENT_TIMEOUT_MS=5000
 - Railway cron
 
 Railway production validation should happen after merge using GPT-provided commands.
-
