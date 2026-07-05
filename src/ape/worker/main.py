@@ -5,6 +5,8 @@ import logging
 import threading
 from datetime import UTC, datetime
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from ape.config import AppConfig, ConfigError, load_config
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.kalshi.ws_collector import KalshiWsCollector
@@ -84,26 +86,29 @@ def _record_idle_heartbeat(
     if session_factory is None:
         return
 
-    with session_factory() as session:
-        WorkerHeartbeatRepository(session).record_heartbeat(
-            WorkerHeartbeatInput(
-                service_name="ape-worker",
-                started_at=started_at,
-                heartbeat_at=datetime.now(UTC),
-                app_mode=config.app_mode.value,
-                is_safe=safety.is_safe,
-                metadata={
-                    "mode": "idle",
-                    "ws": {
-                        "enabled": False,
-                        "connection_state": "disabled",
-                        "warnings": ["kalshi_ws_disabled"],
-                        "blockers": [],
+    try:
+        with session_factory() as session:
+            WorkerHeartbeatRepository(session).record_heartbeat(
+                WorkerHeartbeatInput(
+                    service_name="ape-worker",
+                    started_at=started_at,
+                    heartbeat_at=datetime.now(UTC),
+                    app_mode=config.app_mode.value,
+                    is_safe=safety.is_safe,
+                    metadata={
+                        "mode": "idle",
+                        "ws": {
+                            "enabled": False,
+                            "connection_state": "disabled",
+                            "warnings": ["kalshi_ws_disabled"],
+                            "blockers": [],
+                        },
                     },
-                },
+                )
             )
-        )
-        session.commit()
+            session.commit()
+    except SQLAlchemyError:
+        LOGGER.warning("Idle worker heartbeat persistence failed.", exc_info=True)
 
 
 def main() -> int:
