@@ -272,6 +272,68 @@ def test_collector_records_bounded_safe_parse_diagnostic_samples(tmp_path) -> No
         engine.dispose()
 
 
+def test_collector_throttles_repeated_invalid_parse_heartbeats(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_repeated_invalid.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket(
+        [
+            {
+                "type": "orderbook_snapshot",
+                "sid": 1,
+                "seq": index,
+                "msg": {
+                    "market_ticker": "KXBTC15M-TEST",
+                    "yes_dollars_fp": [["0.6000", {"value": "10.00"}]],
+                },
+            }
+            for index in range(1, 21)
+        ]
+    )
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            heartbeat_count = session.scalar(select(func.count()).select_from(WorkerHeartbeat))
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert heartbeat_count == 3
+            assert heartbeat is not None
+            ws_metadata = heartbeat.metadata_["ws"]
+            assert ws_metadata["warnings"] == ["invalid_orderbook_snapshot_yes_level_size"]
+            assert len(ws_metadata["diagnostic_samples"]) == 1
+            assert (
+                ws_metadata["diagnostic_samples"][0]["reason"]
+                == "invalid_orderbook_snapshot_yes_level_size"
+            )
+    finally:
+        engine.dispose()
+
+
 def test_collector_persists_valid_snapshot_after_invalid_live_like_snapshot(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_snapshot_recovery.sqlite'}"
     config = load_config(

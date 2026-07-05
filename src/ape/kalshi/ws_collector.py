@@ -109,6 +109,8 @@ class KalshiWsCollector:
         self.now = now or (lambda: datetime.now(UTC))
         self.status = KalshiWsCollectorStatus(enabled=config.kalshi_ws_enabled)
         self._last_heartbeat_at: datetime | None = None
+        self._force_next_heartbeat = False
+        self._forced_diagnostic_signatures: set[str] = set()
 
     async def run(
         self,
@@ -313,7 +315,7 @@ class KalshiWsCollector:
                 self._add_warning("kalshi_ws_resubscribe_requested")
                 self.record_heartbeat()
                 return
-            self.record_heartbeat(force=message.kind == "invalid")
+            self.record_heartbeat(force=self._consume_force_next_heartbeat())
 
     def _handle_message(
         self,
@@ -392,7 +394,8 @@ class KalshiWsCollector:
                 self._add_warning("orderbook_reset_after_buffer_overflow")
                 self._add_warning(message.reason)
                 return "orderbook_reset_after_buffer_overflow"
-            self._record_parse_diagnostic(message)
+            if self._record_parse_diagnostic(message):
+                self._force_next_heartbeat = True
             self._add_warning(message.reason or "invalid_websocket_message")
             return None
 
@@ -484,14 +487,24 @@ class KalshiWsCollector:
         ]
         return self.status.warnings != existing
 
-    def _record_parse_diagnostic(self, message: ParsedWsMessage) -> None:
+    def _record_parse_diagnostic(self, message: ParsedWsMessage) -> bool:
         sample = _invalid_message_diagnostic_sample(message)
         if sample is None:
-            return
+            return False
+        signature = _diagnostic_sample_signature(sample)
+        force_heartbeat = signature not in self._forced_diagnostic_signatures
+        if force_heartbeat:
+            self._forced_diagnostic_signatures.add(signature)
         self.status.diagnostic_samples.append(sample)
         self.status.diagnostic_samples = self.status.diagnostic_samples[
             -MAX_DIAGNOSTIC_SAMPLES:
         ]
+        return force_heartbeat
+
+    def _consume_force_next_heartbeat(self) -> bool:
+        force = self._force_next_heartbeat
+        self._force_next_heartbeat = False
+        return force
 
 
 async def _default_websocket_factory(
@@ -600,6 +613,15 @@ def _invalid_message_diagnostic_sample(message: ParsedWsMessage) -> dict[str, An
         )
 
     return sample
+
+
+def _diagnostic_sample_signature(sample: dict[str, Any]) -> str:
+    return json.dumps(
+        {key: value for key, value in sample.items() if key != "raw_payload_hash"},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
 
 
 def _levels_diagnostic_shape(value: Any) -> dict[str, Any]:
