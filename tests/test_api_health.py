@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
@@ -196,6 +198,10 @@ def test_active_market_uses_mocked_kalshi_client_and_persists_to_db(tmp_path) ->
 
 class _FakeKalshiClient:
     def get_markets(self, **_kwargs):
+        now = datetime.now(UTC)
+        open_time = _isoformat_z(now - timedelta(minutes=5))
+        close_time = _isoformat_z(now + timedelta(minutes=10))
+
         return {
             "markets": [
                 {
@@ -205,17 +211,21 @@ class _FakeKalshiClient:
                     "title": "Bitcoin price above $62,000 at settlement?",
                     "yes_sub_title": "Above $62,000",
                     "no_sub_title": "At or below $62,000",
-                    "open_time": "2026-07-05T00:00:00Z",
-                    "close_time": "2026-07-06T00:00:00Z",
-                    "expected_expiration_time": "2026-07-06T00:00:00Z",
-                    "expiration_time": "2026-07-06T00:00:00Z",
-                    "latest_expiration_time": "2026-07-06T00:00:00Z",
+                    "open_time": open_time,
+                    "close_time": close_time,
+                    "expected_expiration_time": close_time,
+                    "expiration_time": close_time,
+                    "latest_expiration_time": close_time,
                     "functional_strike": "62000",
                     "price_level_structure": "binary",
                     "rules_primary": "Observer metadata only.",
                 }
             ]
         }
+
+
+def _isoformat_z(value: datetime) -> str:
+    return value.isoformat().replace("+00:00", "Z")
 
 
 def _test_private_key_pem() -> str:
