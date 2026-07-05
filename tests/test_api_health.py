@@ -272,6 +272,10 @@ def test_ws_status_reports_persisted_market_data(tmp_path) -> None:
                             "last_message_at": _isoformat_z(now),
                             "last_orderbook_at": _isoformat_z(now),
                             "last_trade_at": _isoformat_z(now),
+                            "last_error_type": "ProgrammingError",
+                            "last_error_message": (
+                                "UndefinedColumn: orderbook_snapshots.yes_bid_count"
+                            ),
                             "warnings": [],
                             "blockers": [],
                             "diagnostic_samples": [
@@ -315,6 +319,8 @@ def test_ws_status_reports_persisted_market_data(tmp_path) -> None:
         assert body["subscribed_channels"] == ["ticker", "orderbook_delta", "trade"]
         assert body["latest_orderbook_received_at"] is not None
         assert body["latest_trade_received_at"] is not None
+        assert body["last_error_type"] is None
+        assert body["last_error_message"] is None
         assert len(body["diagnostic_samples"]) == 3
         assert body["diagnostic_samples"][0]["reason"] == (
             "invalid_orderbook_snapshot_yes_level_size"
