@@ -118,6 +118,24 @@ def test_resolver_rejects_explicit_series_mismatch() -> None:
     assert result.market is None
 
 
+def test_resolver_does_not_select_nearest_inactive_market() -> None:
+    client = FakeKalshiClient(
+        [
+            _market_payload(
+                ticker="KXBTC15M-FUTURE",
+                open_time="2026-07-05T12:15:00Z",
+                close_time="2026-07-05T12:30:00Z",
+            )
+        ]
+    )
+
+    result = resolve_active_btc15_market(config=_configured(), client=client, now=NOW)
+
+    assert result.state is ResolverState.NO_ACTIVE_MARKET
+    assert result.market is None
+    assert result.resolver_decision_reason == "no_open_market_contains_now"
+
+
 def test_resolver_rejects_ambiguous_active_markets() -> None:
     client = FakeKalshiClient(
         [

@@ -354,35 +354,13 @@ def _select_market(
     if not timed_markets:
         return None, ResolverState.NO_ACTIVE_MARKET, "no_open_market_with_parseable_timing"
 
-    sorted_markets = sorted(
-        timed_markets,
-        key=lambda market: _distance_to_interval_seconds(market, now),
-    )
-    if len(sorted_markets) > 1:
-        first_distance = _distance_to_interval_seconds(sorted_markets[0], now)
-        second_distance = _distance_to_interval_seconds(sorted_markets[1], now)
-        if first_distance == second_distance:
-            return None, ResolverState.AMBIGUOUS_MARKET, "nearest_open_market_tie"
-
-    return sorted_markets[0], ResolverState.RESOLVED_OBSERVER_ONLY, "nearest_open_market_interval"
+    return None, ResolverState.NO_ACTIVE_MARKET, "no_open_market_contains_now"
 
 
 def _contains_now(open_time: datetime | None, close_time: datetime | None, now: datetime) -> bool:
     if open_time is None or close_time is None:
         return False
     return open_time <= now < close_time
-
-
-def _distance_to_interval_seconds(market: KalshiMarketPayload, now: datetime) -> float:
-    open_time = _datetime_or_none(market.get("open_time"))
-    close_time = _datetime_or_none(market.get("close_time"))
-    if open_time is None or close_time is None:
-        return float("inf")
-    if now < open_time:
-        return (open_time - now).total_seconds()
-    if now >= close_time:
-        return (now - close_time).total_seconds()
-    return 0
 
 
 def _persist_market(
