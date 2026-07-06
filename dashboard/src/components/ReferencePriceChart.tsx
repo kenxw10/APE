@@ -19,6 +19,9 @@ interface ReferencePriceChartProps {
   intervalStartMs: number;
   intervalEndMs: number;
   note: string;
+  provenanceLabel: "live BRTI" | "stale BRTI" | "fallback scaffold";
+  sourceAgeLabel: string;
+  backendAgeLabel: string;
 }
 
 export function ReferencePriceChart({
@@ -26,7 +29,10 @@ export function ReferencePriceChart({
   intervalOpenPrice,
   intervalStartMs,
   intervalEndMs,
-  note
+  note,
+  provenanceLabel,
+  sourceAgeLabel,
+  backendAgeLabel
 }: ReferencePriceChartProps) {
   const cappedPoints = capPoints(points, MAX_REFERENCE_CHART_POINTS);
   const xDomain = { startMs: intervalStartMs, endMs: intervalEndMs };
@@ -53,7 +59,7 @@ export function ReferencePriceChart({
         </div>
         <strong className="latest-price">{latest ? formatUsd(latest.value, 2) : "--"}</strong>
       </div>
-      <div className="chart-shell reference-chart" aria-label="CF/BRTI reference price scaffold chart">
+      <div className="chart-shell reference-chart" aria-label={`CF/BRTI reference price ${provenanceLabel} chart`}>
         <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img">
           <Grid />
           <line
@@ -87,7 +93,7 @@ export function ReferencePriceChart({
         </span>
       </div>
       <p className="chart-note">
-        {formatEasternTime(intervalStartMs)}-{formatEasternTime(intervalEndMs)} ET. {note}
+        {formatEasternTime(intervalStartMs)}-{formatEasternTime(intervalEndMs)} ET. {provenanceLabel}. Source age {sourceAgeLabel}. Backend age {backendAgeLabel}. {note}
       </p>
     </section>
   );

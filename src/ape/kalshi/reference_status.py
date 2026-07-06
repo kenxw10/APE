@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -16,6 +16,8 @@ from ape.repositories.reference_ticks import ReferenceTicksRepository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 
 WORKER_SERVICE_NAME = "ape-worker"
+BRTI_SERIES_MAX_WINDOW_SECONDS = 900
+BRTI_SERIES_MAX_POINTS = 16_000
 
 
 @dataclass(frozen=True)
@@ -26,7 +28,10 @@ class BrtiReferenceStatusSnapshot:
     source: str
     index_ids: list[str]
     subscription_id: int | None
+    subscription_request_id: int | None
+    subscribed_channels: list[str]
     connection_state: str
+    last_connected_at: datetime | None
     latest_tick_received_at: datetime | None
     latest_source_ts: datetime | None
     latest_parsed_value: Decimal | None
@@ -35,11 +40,27 @@ class BrtiReferenceStatusSnapshot:
     latest_final_minute_average: Decimal | None
     final_minute_average_status: str | None
     source_age_ms: int | None
+    kalshi_age_ms: int | None
+    upstream_to_kalshi_lag_ms: int | None
+    backend_transport_lag_ms: int | None
+    inter_arrival_ms: int | None
+    source_gap_ms: int | None
+    duplicate_source_ts_count: int
+    out_of_order_source_ts_count: int
+    skipped_tick_count: int
+    last_skipped_reason: str | None
+    last_skipped_at: datetime | None
+    transport_stale: bool
+    source_stale: bool
+    kalshi_received_stale: bool
+    persistence_stale: bool
+    trade_ready_fresh: bool
     stale: bool
     last_message_at: datetime | None
     last_persisted_at: datetime | None
     last_error_type: str | None
     last_error_message: str | None
+    reconnect_count: int
     warnings: list[str]
     blockers: list[str]
     checked_at: datetime
@@ -63,6 +84,31 @@ class BrtiReferenceLatestSnapshot:
     sequence_number: int | None
     subscription_id: str | None
     raw_payload_hash: str | None
+
+
+@dataclass(frozen=True)
+class BrtiReferenceSeriesPointSnapshot:
+    received_at: datetime
+    source_ts: datetime | None
+    kalshi_received_at: datetime | None
+    parsed_value: Decimal | None
+    trailing_60s_avg: Decimal | None
+    last_60s_windowed_average_15min: Decimal | None
+    final_minute_average_status: str | None
+    source_age_ms: int | None
+    parse_status: str | None
+    sequence_number: int | None
+    raw_payload_hash: str | None
+
+
+@dataclass(frozen=True)
+class BrtiReferenceSeriesSnapshot:
+    source: str
+    window_seconds: int
+    max_points: int
+    point_count: int
+    generated_at: datetime
+    points: list[BrtiReferenceSeriesPointSnapshot]
 
 
 def build_brti_reference_status(
@@ -132,22 +178,54 @@ def build_brti_reference_status(
         latest_received_at,
     )
     latest_source_age_ms = latest_tick.source_age_ms if latest_tick else None
-    stale_receipt = _is_stale(
+    latest_kalshi_age_ms = (
+        _age_ms(checked_at, latest_tick.kalshi_received_at) if latest_tick else None
+    )
+    upstream_to_kalshi_lag_ms = (
+        _lag_ms(latest_tick.kalshi_received_at, latest_tick.source_ts)
+        if latest_tick
+        else None
+    )
+    backend_transport_lag_ms = _age_ms(checked_at, last_message_at)
+    transport_stale = _is_stale(
+        enabled=effective_enabled and effective_signer_ready and not blockers,
+        latest_tick_received_at=last_message_at,
+        checked_at=checked_at,
+        stale_after_seconds=config.kalshi_cfbenchmarks_transport_stale_after_seconds,
+    )
+    persistence_stale = _is_stale(
         enabled=effective_enabled and effective_signer_ready and not blockers,
         latest_tick_received_at=last_persisted_at,
         checked_at=checked_at,
-        stale_after_seconds=config.kalshi_cfbenchmarks_stale_after_seconds,
+        stale_after_seconds=config.kalshi_cfbenchmarks_persistence_stale_after_seconds,
     )
-    stale_source_age = _is_source_age_stale(
+    source_stale = _is_source_age_stale(
         enabled=effective_enabled and effective_signer_ready and not blockers,
         source_age_ms=latest_source_age_ms,
-        max_source_age_ms=config.kalshi_cfbenchmarks_max_source_age_ms,
+        max_source_age_ms=config.kalshi_cfbenchmarks_source_age_warn_ms,
     )
-    stale = stale_receipt or stale_source_age
-    if stale_receipt:
-        warnings.append("brti_reference_stale")
-    if stale_source_age:
+    kalshi_received_stale = _is_source_age_stale(
+        enabled=effective_enabled and effective_signer_ready and not blockers,
+        source_age_ms=latest_kalshi_age_ms,
+        max_source_age_ms=config.kalshi_cfbenchmarks_kalshi_received_warn_ms,
+    )
+    trade_ready_fresh = _is_trade_ready_fresh(
+        enabled=effective_enabled and effective_signer_ready and not blockers,
+        transport_stale=transport_stale,
+        persistence_stale=persistence_stale,
+        source_age_ms=latest_source_age_ms,
+        kalshi_age_ms=latest_kalshi_age_ms,
+        trade_fresh_ms=config.kalshi_cfbenchmarks_trade_fresh_ms,
+    )
+    stale = transport_stale or persistence_stale
+    if transport_stale:
+        warnings.append("brti_reference_transport_stale")
+    if persistence_stale:
+        warnings.append("brti_reference_persistence_stale")
+    if source_stale:
         warnings.append("brti_reference_source_age_stale")
+    if kalshi_received_stale:
+        warnings.append("brti_reference_kalshi_received_stale")
 
     return BrtiReferenceStatusSnapshot(
         configured=effective_configured,
@@ -159,7 +237,12 @@ def build_brti_reference_status(
             or list(config.kalshi_cfbenchmarks_index_ids)
         ),
         subscription_id=_int_or_none(heartbeat_metadata.get("subscription_id")),
+        subscription_request_id=_int_or_none(
+            heartbeat_metadata.get("subscription_request_id")
+        ),
+        subscribed_channels=_string_list(heartbeat_metadata.get("subscribed_channels")),
         connection_state=connection_state,
+        last_connected_at=_datetime_or_none(heartbeat_metadata.get("last_connected_at")),
         latest_tick_received_at=latest_received_at,
         latest_source_ts=latest_tick.source_ts if latest_tick else None,
         latest_parsed_value=latest_tick.parsed_value if latest_tick else None,
@@ -174,14 +257,97 @@ def build_brti_reference_status(
             latest_tick.final_minute_average_status if latest_tick else None
         ),
         source_age_ms=latest_source_age_ms,
+        kalshi_age_ms=latest_kalshi_age_ms,
+        upstream_to_kalshi_lag_ms=upstream_to_kalshi_lag_ms,
+        backend_transport_lag_ms=backend_transport_lag_ms,
+        inter_arrival_ms=_int_or_none(heartbeat_metadata.get("inter_arrival_ms")),
+        source_gap_ms=_int_or_none(heartbeat_metadata.get("source_gap_ms")),
+        duplicate_source_ts_count=_int_or_zero(
+            heartbeat_metadata.get("duplicate_source_ts_count")
+        ),
+        out_of_order_source_ts_count=_int_or_zero(
+            heartbeat_metadata.get("out_of_order_source_ts_count")
+        ),
+        skipped_tick_count=_int_or_zero(heartbeat_metadata.get("skipped_tick_count")),
+        last_skipped_reason=_str_or_none(heartbeat_metadata.get("last_skipped_reason")),
+        last_skipped_at=_datetime_or_none(heartbeat_metadata.get("last_skipped_at")),
+        transport_stale=transport_stale,
+        source_stale=source_stale,
+        kalshi_received_stale=kalshi_received_stale,
+        persistence_stale=persistence_stale,
+        trade_ready_fresh=trade_ready_fresh,
         stale=stale,
         last_message_at=last_message_at,
         last_persisted_at=last_persisted_at,
         last_error_type=_str_or_none(heartbeat_metadata.get("last_error_type")),
         last_error_message=_str_or_none(heartbeat_metadata.get("last_error_message")),
+        reconnect_count=_int_or_zero(heartbeat_metadata.get("reconnect_count")),
         warnings=sorted(set(warnings)),
         blockers=sorted(set(blockers)),
         checked_at=checked_at,
+    )
+
+
+def build_brti_reference_series(
+    config: AppConfig,
+    *,
+    window_seconds: int = BRTI_SERIES_MAX_WINDOW_SECONDS,
+    max_points: int = BRTI_SERIES_MAX_POINTS,
+    since: datetime | None = None,
+    include_final_minute: bool = False,
+    now: datetime | None = None,
+) -> BrtiReferenceSeriesSnapshot:
+    generated_at = now or datetime.now(UTC)
+    bounded_window_seconds = min(max(1, window_seconds), BRTI_SERIES_MAX_WINDOW_SECONDS)
+    bounded_max_points = min(max(1, max_points), BRTI_SERIES_MAX_POINTS)
+    window_start = generated_at - timedelta(seconds=bounded_window_seconds)
+    if since is not None:
+        since_utc = _as_utc(since)
+        if since_utc > window_start:
+            window_start = since_utc
+
+    rows: list[ReferenceTick] = []
+    if config.database_url:
+        try:
+            engine = create_engine_from_config(config)
+            try:
+                session_factory = create_session_factory(engine)
+                with session_factory() as session:
+                    rows = ReferenceTicksRepository(session).get_ticks_since(
+                        BRTI_SOURCE,
+                        window_start,
+                        limit=bounded_max_points,
+                    )
+            finally:
+                engine.dispose()
+        except SQLAlchemyError:
+            rows = []
+
+    points = [
+        BrtiReferenceSeriesPointSnapshot(
+            received_at=row.received_at,
+            source_ts=row.source_ts,
+            kalshi_received_at=row.kalshi_received_at,
+            parsed_value=row.parsed_value,
+            trailing_60s_avg=row.trailing_60s_avg,
+            last_60s_windowed_average_15min=(
+                row.last_60s_windowed_average_15min if include_final_minute else None
+            ),
+            final_minute_average_status=row.final_minute_average_status,
+            source_age_ms=row.source_age_ms,
+            parse_status=row.parse_status,
+            sequence_number=row.sequence_number,
+            raw_payload_hash=row.raw_payload_hash,
+        )
+        for row in rows
+    ]
+    return BrtiReferenceSeriesSnapshot(
+        source=BRTI_SOURCE,
+        window_seconds=bounded_window_seconds,
+        max_points=bounded_max_points,
+        point_count=len(points),
+        generated_at=generated_at,
+        points=points,
     )
 
 
@@ -266,6 +432,34 @@ def _is_source_age_stale(
     return source_age_ms > max_source_age_ms
 
 
+def _is_trade_ready_fresh(
+    *,
+    enabled: bool,
+    transport_stale: bool,
+    persistence_stale: bool,
+    source_age_ms: int | None,
+    kalshi_age_ms: int | None,
+    trade_fresh_ms: int,
+) -> bool:
+    if not enabled or transport_stale or persistence_stale:
+        return False
+    if source_age_ms is None or kalshi_age_ms is None:
+        return False
+    return source_age_ms <= trade_fresh_ms and kalshi_age_ms <= trade_fresh_ms
+
+
+def _age_ms(checked_at: datetime, value: datetime | None) -> int | None:
+    if value is None:
+        return None
+    return max(0, int((_as_utc(checked_at) - _as_utc(value)).total_seconds() * 1000))
+
+
+def _lag_ms(end: datetime | None, start: datetime | None) -> int | None:
+    if end is None or start is None:
+        return None
+    return max(0, int((_as_utc(end) - _as_utc(start)).total_seconds() * 1000))
+
+
 def _dict_or_empty(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -310,6 +504,11 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _int_or_zero(value: Any) -> int:
+    parsed = _int_or_none(value)
+    return parsed if parsed is not None else 0
 
 
 def _bool_or_none(value: Any) -> bool | None:

@@ -104,7 +104,9 @@ class BrtiReferenceStatus:
     source: str = BRTI_SOURCE
     index_ids: list[str] = field(default_factory=list)
     subscription_id: int | None = None
+    subscribed_channels: list[str] = field(default_factory=list)
     connection_state: str = "disabled"
+    last_connected_at: datetime | None = None
     last_message_at: datetime | None = None
     last_persisted_at: datetime | None = None
     latest_source_ts: datetime | None = None
@@ -115,6 +117,14 @@ class BrtiReferenceStatus:
     final_minute_average_status: str | None = None
     source_age_ms: int | None = None
     subscription_request_id: int | None = None
+    reconnect_count: int = 0
+    inter_arrival_ms: int | None = None
+    source_gap_ms: int | None = None
+    duplicate_source_ts_count: int = 0
+    out_of_order_source_ts_count: int = 0
+    skipped_tick_count: int = 0
+    last_skipped_reason: str | None = None
+    last_skipped_at: datetime | None = None
     last_error_type: str | None = None
     last_error_message: str | None = None
     warnings: list[str] = field(default_factory=list)
@@ -128,7 +138,9 @@ class BrtiReferenceStatus:
             "source": self.source,
             "index_ids": self.index_ids,
             "subscription_id": self.subscription_id,
+            "subscribed_channels": self.subscribed_channels,
             "connection_state": self.connection_state,
+            "last_connected_at": _isoformat_or_none(self.last_connected_at),
             "last_message_at": _isoformat_or_none(self.last_message_at),
             "last_persisted_at": _isoformat_or_none(self.last_persisted_at),
             "latest_source_ts": _isoformat_or_none(self.latest_source_ts),
@@ -139,6 +151,14 @@ class BrtiReferenceStatus:
             "final_minute_average_status": self.final_minute_average_status,
             "source_age_ms": self.source_age_ms,
             "subscription_request_id": self.subscription_request_id,
+            "reconnect_count": self.reconnect_count,
+            "inter_arrival_ms": self.inter_arrival_ms,
+            "source_gap_ms": self.source_gap_ms,
+            "duplicate_source_ts_count": self.duplicate_source_ts_count,
+            "out_of_order_source_ts_count": self.out_of_order_source_ts_count,
+            "skipped_tick_count": self.skipped_tick_count,
+            "last_skipped_reason": self.last_skipped_reason,
+            "last_skipped_at": _isoformat_or_none(self.last_skipped_at),
             "last_error_type": self.last_error_type,
             "last_error_message": self.last_error_message,
             "warnings": self.warnings,
@@ -187,33 +207,87 @@ class KalshiWsCollector:
             self.record_heartbeat()
             return
 
+        if self._dedicated_reference_enabled():
+            tasks = []
+            if self.config.kalshi_ws_enabled:
+                tasks.append(
+                    self._run_loop(
+                        stop_event,
+                        max_cycles=max_cycles,
+                        include_market=True,
+                        include_reference=False,
+                    )
+                )
+            tasks.append(
+                self._run_loop(
+                    stop_event,
+                    max_cycles=max_cycles,
+                    include_market=False,
+                    include_reference=True,
+                )
+            )
+            await asyncio.gather(*tasks)
+            return
+
+        await self._run_loop(
+            stop_event,
+            max_cycles=max_cycles,
+            include_market=True,
+            include_reference=True,
+        )
+
+    async def _run_loop(
+        self,
+        stop_event: threading.Event,
+        *,
+        max_cycles: int | None,
+        include_market: bool,
+        include_reference: bool,
+    ) -> None:
         cycles = 0
         while not stop_event.is_set():
             cycles += 1
-            await self._run_cycle(stop_event)
+            await self._run_cycle(
+                stop_event,
+                include_market=include_market,
+                include_reference=include_reference,
+            )
             if max_cycles is not None and cycles >= max_cycles:
                 return
+            reconnect_count = (
+                self.status.reconnect_count
+                if include_market
+                else self.brti_status.reconnect_count
+            )
             await _sleep_or_stop(
                 stop_event,
                 min(
-                    self.config.kalshi_ws_reconnect_seconds * max(1, self.status.reconnect_count),
+                    self.config.kalshi_ws_reconnect_seconds * max(1, reconnect_count),
                     self.config.kalshi_ws_max_reconnect_seconds,
                 ),
             )
 
-    async def _run_cycle(self, stop_event: threading.Event) -> None:
+    async def _run_cycle(
+        self,
+        stop_event: threading.Event,
+        *,
+        include_market: bool,
+        include_reference: bool,
+    ) -> None:
         diagnostic = build_kalshi_config_diagnostic(self.config)
-        self.status.configured = diagnostic.configured
-        self.status.signer_ready = diagnostic.signer_ready
-        self.status.blockers = []
-        self.status.warnings = []
-        self.brti_status.configured = diagnostic.configured
-        self.brti_status.signer_ready = diagnostic.signer_ready
-        self.brti_status.blockers = []
-        self.brti_status.warnings = []
+        market_ws_enabled = include_market and self.config.kalshi_ws_enabled
+        brti_enabled = include_reference and self._reference_collection_enabled()
 
-        market_ws_enabled = self.config.kalshi_ws_enabled
-        brti_enabled = self._reference_collection_enabled()
+        if include_market:
+            self.status.configured = diagnostic.configured
+            self.status.signer_ready = diagnostic.signer_ready
+            self.status.blockers = []
+            self.status.warnings = []
+        if include_reference:
+            self.brti_status.configured = diagnostic.configured
+            self.brti_status.signer_ready = diagnostic.signer_ready
+            self.brti_status.blockers = []
+            self.brti_status.warnings = []
 
         if not diagnostic.signer_ready:
             if market_ws_enabled:
@@ -288,7 +362,7 @@ class KalshiWsCollector:
                     market_close_time = resolver_result.market.close_time
                     self.status.active_market_ticker = market_ticker
                     market_subscription_enabled = True
-        else:
+        elif include_market:
             self.status.connection_state = "disabled"
             self.status.warnings = ["kalshi_ws_disabled"]
 
@@ -309,10 +383,16 @@ class KalshiWsCollector:
                     self.status.connection_state = "connected"
                 if brti_enabled:
                     self.brti_status.connection_state = "connected"
-                self.status.last_connected_at = self.now()
+                    self.brti_status.last_connected_at = self.now()
+                if include_market:
+                    self.status.last_connected_at = self.now()
                 self.record_heartbeat()
 
-                await self._subscribe(websocket, market_ticker)
+                await self._subscribe(
+                    websocket,
+                    market_ticker,
+                    include_reference=brti_enabled,
+                )
                 if market_subscription_enabled:
                     self.status.connection_state = "subscribed"
                 if brti_enabled:
@@ -324,19 +404,31 @@ class KalshiWsCollector:
                     market_ticker,
                     market_close_time,
                     stop_event,
+                    include_reference=brti_enabled,
                 )
-                self.status.reconnect_count = 0
+                if include_market:
+                    self.status.reconnect_count = 0
+                if include_reference:
+                    self.brti_status.reconnect_count = 0
             finally:
                 await _close_websocket(websocket)
         except Exception as exc:
-            self.status.reconnect_count += 1
+            if include_market:
+                self.status.reconnect_count += 1
             if market_ws_enabled:
                 self._set_error(exc.__class__.__name__, exc)
             if brti_enabled:
+                self.brti_status.reconnect_count += 1
                 self._set_reference_error(exc.__class__.__name__, exc)
             self.record_heartbeat()
 
-    async def _subscribe(self, websocket: Any, market_ticker: str | None) -> None:
+    async def _subscribe(
+        self,
+        websocket: Any,
+        market_ticker: str | None,
+        *,
+        include_reference: bool,
+    ) -> None:
         request_id = 1
         subscribed_channels: list[str] = []
         subscription_ids: dict[str, int] = {}
@@ -371,16 +463,18 @@ class KalshiWsCollector:
                 subscription_ids[channel] = request_id
             request_id += 1
 
-        if self._reference_collection_enabled():
+        if include_reference:
             message = build_cfbenchmarks_subscribe_message(
                 request_id=request_id,
                 index_ids=list(self.config.kalshi_cfbenchmarks_index_ids),
             )
             await websocket.send(json.dumps(message))
             self.brti_status.subscription_request_id = request_id
+            self.brti_status.subscribed_channels = ["cfbenchmarks_value"]
 
-        self.status.subscribed_channels = subscribed_channels
-        self.status.subscription_ids = subscription_ids
+        if market_ticker is not None:
+            self.status.subscribed_channels = subscribed_channels
+            self.status.subscription_ids = subscription_ids
 
     async def _read_messages(
         self,
@@ -388,6 +482,7 @@ class KalshiWsCollector:
         market_ticker: str | None,
         market_close_time: datetime | None,
         stop_event: threading.Event,
+        include_reference: bool,
     ) -> None:
         orderbook = OrderbookState(market_ticker=market_ticker or "")
         message_iterator = websocket.__aiter__()
@@ -419,7 +514,7 @@ class KalshiWsCollector:
                 self.record_heartbeat(force=False)
                 continue
 
-            if is_cfbenchmarks_value_payload(parsed_json):
+            if include_reference and is_cfbenchmarks_value_payload(parsed_json):
                 reference_message = parse_cfbenchmarks_value_message(
                     parsed_json,
                     received_at=received_at,
@@ -431,7 +526,7 @@ class KalshiWsCollector:
                 self.record_heartbeat(force=self._consume_force_next_heartbeat())
                 continue
 
-            if self._handle_reference_control_payload(
+            if include_reference and self._handle_reference_control_payload(
                 parsed_json,
                 received_at=received_at,
                 market_ticker=market_ticker,
@@ -664,6 +759,7 @@ class KalshiWsCollector:
         try:
             with self.session_factory() as session:
                 repository = ReferenceTicksRepository(session)
+                latest_received = repository.get_latest_tick(tick.source)
                 latest = repository.get_latest_tick_with_source_ts(tick.source)
                 if (
                     tick.source_ts is not None
@@ -671,6 +767,18 @@ class KalshiWsCollector:
                     and latest.source_ts is not None
                     and _as_utc(tick.source_ts) <= _as_utc(latest.source_ts)
                 ):
+                    reason = (
+                        "duplicate_source_ts"
+                        if _as_utc(tick.source_ts) == _as_utc(latest.source_ts)
+                        else "out_of_order_source_ts"
+                    )
+                    if reason == "duplicate_source_ts":
+                        self.brti_status.duplicate_source_ts_count += 1
+                    else:
+                        self.brti_status.out_of_order_source_ts_count += 1
+                    self.brti_status.skipped_tick_count += 1
+                    self.brti_status.last_skipped_reason = reason
+                    self.brti_status.last_skipped_at = self.now()
                     self._add_reference_warning("brti_duplicate_or_out_of_order_source_ts")
                     self._force_next_heartbeat = True
                     return False
@@ -684,6 +792,32 @@ class KalshiWsCollector:
             return False
 
         self.brti_status.connection_state = "subscribed"
+        if latest_received is not None and latest_received.received_at is not None:
+            self.brti_status.inter_arrival_ms = max(
+                0,
+                int(
+                    (
+                        _as_utc(row.received_at)
+                        - _as_utc(latest_received.received_at)
+                    ).total_seconds()
+                    * 1000
+                ),
+            )
+        if (
+            latest is not None
+            and latest.source_ts is not None
+            and row.source_ts is not None
+        ):
+            self.brti_status.source_gap_ms = max(
+                0,
+                int(
+                    (
+                        _as_utc(row.source_ts)
+                        - _as_utc(latest.source_ts)
+                    ).total_seconds()
+                    * 1000
+                ),
+            )
         self.brti_status.last_persisted_at = row.received_at
         self.brti_status.latest_source_ts = row.source_ts
         self.brti_status.latest_value = _decimal_text_or_none(row.parsed_value)
@@ -733,6 +867,12 @@ class KalshiWsCollector:
 
     def _collector_enabled(self) -> bool:
         return self.config.kalshi_ws_enabled or self._reference_collection_enabled()
+
+    def _dedicated_reference_enabled(self) -> bool:
+        return (
+            self._reference_collection_enabled()
+            and self.config.kalshi_cfbenchmarks_dedicated_connection
+        )
 
     def _reference_collection_enabled(self) -> bool:
         return (

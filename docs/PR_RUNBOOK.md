@@ -55,18 +55,29 @@ PR 6 post-merge checkpoint:
   successful `/ws/status` response. Do not require literal browser WebSocket access
   from the Vercel dashboard.
 
-PR 7 post-merge checkpoint:
+PR 7a post-merge checkpoint:
 
 - Set `KALSHI_CFBENCHMARKS_ENABLED=true` on the Railway worker only.
 - Set `KALSHI_CFBENCHMARKS_INDEX_IDS=BRTI` on the Railway worker only.
 - Keep `KALSHI_CFBENCHMARKS_SUBSCRIBE_ON_WORKER=true`.
+- Keep `KALSHI_CFBENCHMARKS_DEDICATED_CONNECTION=true`.
 - Keep API and worker `APP_MODE=OBSERVER`, `TRADING_ENABLED=false`, and `EXECUTE=false`.
 - Do not add BRTI env vars, Kalshi credentials, or WebSocket settings to Vercel.
 - Redeploy the Railway worker.
-- Validate worker logs, `/reference/brti/status`, `/reference/brti/latest`, `/ws/status`,
+- Validate worker logs, `/reference/brti/status`, `/reference/brti/latest`,
+  `/reference/brti/series`, `/ws/status`,
   `/health`, `/safety`, `/db/status`, and `/ready`.
 - Confirm `reference_ticks` rows are being written when Kalshi emits BRTI
   `cfbenchmarks_value` events.
+- Confirm `/reference/brti/status` reports `transport_stale=false`,
+  `persistence_stale=false`, no blockers, and null unresolved error fields when
+  live BRTI rows are arriving. `source_stale` may be true if upstream CF
+  timestamps lag; that is visible but not a global collector failure by itself.
+- Confirm `/reference/brti/series` returns a rolling 900-second, 16,000-point
+  maximum series sorted by `received_at` and does not return raw payloads.
+- Confirm the dashboard Reference Price CF/BRTI chart says live BRTI when the
+  series endpoint has points, and fallback/scaffold only when live series data
+  is unavailable.
 - BRTI final-minute averages may be stored when present, but no strategy,
   position-management, paper trading, live trading, order, fill, or decision-ledger
-  logic is enabled by PR 7.
+  logic is enabled by PR 7a.

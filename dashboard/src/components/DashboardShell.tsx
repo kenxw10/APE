@@ -1,11 +1,20 @@
 "use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 
-import { type BrtiReferenceStatusResponse, type OperationalSnapshot } from "../lib/api";
-import { type PortfolioRange } from "../lib/chart";
-import { type ScaffoldDashboardData } from "../lib/scaffold-data";
+import {
+  type BrtiReferenceSeriesPointResponse,
+  type BrtiReferenceStatusResponse,
+  type OperationalSnapshot
+} from "../lib/api";
+import {
+  MAX_REFERENCE_CHART_POINTS,
+  REFERENCE_CHART_WINDOW_MS,
+  capPoints,
+  type PortfolioRange
+} from "../lib/chart";
+import { type ReferencePricePoint, type ScaffoldDashboardData } from "../lib/scaffold-data";
 import { formatDateButton, formatEasternDateKey, formatEasternDateTime, formatEasternTime } from "../lib/time";
 import { PortfolioValueChart } from "./PortfolioValueChart";
 import { PositionsTables } from "./PositionsTables";
@@ -15,6 +24,21 @@ import { StatusPanel, type StatusRow } from "./StatusPanel";
 interface DashboardShellProps {
   snapshot: OperationalSnapshot;
   scaffold: ScaffoldDashboardData;
+}
+
+interface ReferenceChartData {
+  points: readonly ReferencePricePoint[];
+  intervalStartMs: number;
+  intervalEndMs: number;
+  intervalOpenPrice: number;
+  currentPrice: number;
+  refSpreadBps: number | null;
+  status: "live" | "stale" | "fallback";
+  note: string;
+  sourceAgeLabel: string;
+  backendAgeLabel: string;
+  pointCount: number;
+  maxPoints: number;
 }
 
 export function DashboardShell({ snapshot, scaffold }: DashboardShellProps) {
@@ -34,10 +58,21 @@ export function DashboardShell({ snapshot, scaffold }: DashboardShellProps) {
   const tradingLabel = safety?.trading_enabled === false ? "DISABLED" : "UNKNOWN";
   const executeLabel = safety?.execute === false ? "FALSE" : "UNKNOWN";
 
-  const statusSections = useMemo(
-    () => createStatusSections(snapshot, scaffold, apiConnected, dbReady),
-    [snapshot, scaffold, apiConnected, dbReady]
+  const referenceChart = useMemo(
+    () => createReferenceChartData(snapshot, scaffold),
+    [snapshot, scaffold]
   );
+  const statusSections = useMemo(
+    () => createStatusSections(snapshot, apiConnected, dbReady, referenceChart),
+    [snapshot, apiConnected, dbReady, referenceChart]
+  );
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      router.refresh();
+    }, 1000);
+    return () => window.clearInterval(intervalId);
+  }, [router]);
 
   const refresh = () => {
     startTransition(() => {
@@ -99,13 +134,16 @@ export function DashboardShell({ snapshot, scaffold }: DashboardShellProps) {
 
       <section className="reference-grid">
         <ReferencePriceChart
-          points={scaffold.reference.series.points}
-          intervalOpenPrice={scaffold.reference.intervalOpenPrice}
-          intervalStartMs={scaffold.reference.intervalStartMs}
-          intervalEndMs={scaffold.reference.intervalEndMs}
-          note={scaffold.reference.series.note}
+          points={referenceChart.points}
+          intervalOpenPrice={referenceChart.intervalOpenPrice}
+          intervalStartMs={referenceChart.intervalStartMs}
+          intervalEndMs={referenceChart.intervalEndMs}
+          note={referenceChart.note}
+          provenanceLabel={referenceChartProvenanceLabel(referenceChart)}
+          sourceAgeLabel={referenceChart.sourceAgeLabel}
+          backendAgeLabel={referenceChart.backendAgeLabel}
         />
-        <BenchmarkSummary scaffold={scaffold} />
+        <BenchmarkSummary scaffold={scaffold} referenceChart={referenceChart} />
       </section>
 
       <PositionsTables
@@ -137,9 +175,18 @@ function MetricCard({ label, value, detail }: { label: string; value: string; de
   );
 }
 
-function BenchmarkSummary({ scaffold }: { scaffold: ScaffoldDashboardData }) {
-  const reference = scaffold.reference;
-  const move = ((reference.currentPrice - reference.intervalOpenPrice) / reference.intervalOpenPrice) * 100;
+function BenchmarkSummary({
+  scaffold,
+  referenceChart
+}: {
+  scaffold: ScaffoldDashboardData;
+  referenceChart: ReferenceChartData;
+}) {
+  const reference = referenceChart;
+  const move =
+    reference.intervalOpenPrice === 0
+      ? 0
+      : ((reference.currentPrice - reference.intervalOpenPrice) / reference.intervalOpenPrice) * 100;
   const rows = [
     [
       "Visible Window",
@@ -150,8 +197,8 @@ function BenchmarkSummary({ scaffold }: { scaffold: ScaffoldDashboardData }) {
     ["Current CF/BRTI", formatUsd(reference.currentPrice)],
     ["Move Since Open", `${move >= 0 ? "+" : ""}${move.toFixed(2)}%`],
     ["Ref Spread", reference.refSpreadBps === null ? "--" : `${reference.refSpreadBps.toFixed(1)} bps`],
-    ["Source Coverage", "1 / 1"],
-    ["Status", "SCAFFOLD"]
+    ["Source Coverage", referenceChartCoverageLabel(reference)],
+    ["Status", reference.status.toUpperCase()]
   ];
 
   return (
@@ -163,7 +210,7 @@ function BenchmarkSummary({ scaffold }: { scaffold: ScaffoldDashboardData }) {
         {rows.map(([label, value]) => (
           <div key={label}>
             <dt>{label}</dt>
-            <dd className={label === "Status" ? "tone-amber" : undefined}>{value}</dd>
+            <dd className={label === "Status" ? referenceChartToneClass(reference) : undefined}>{value}</dd>
           </div>
         ))}
       </dl>
@@ -174,9 +221,9 @@ function BenchmarkSummary({ scaffold }: { scaffold: ScaffoldDashboardData }) {
 
 function createStatusSections(
   snapshot: OperationalSnapshot,
-  scaffold: ScaffoldDashboardData,
   apiConnected: boolean,
-  dbReady: boolean
+  dbReady: boolean,
+  referenceChart: ReferenceChartData
 ): Record<"source" | "system" | "streaming" | "engine" | "safety", StatusRow[]> {
   const safety = snapshot.safety.data ?? snapshot.health.data?.safety ?? snapshot.readiness.data?.safety ?? null;
   const wsStatus = snapshot.wsStatus.data;
@@ -204,8 +251,8 @@ function createStatusSections(
   return {
     source: [
       {
-        label: "BRTI",
-        value: brtiStatus ? brtiStatus.connection_state.toUpperCase() : "UNREACHABLE",
+        label: "BRTI Transport",
+        value: brtiTransportLabel(brtiStatus),
         tone: brtiTone,
         detail: formatReferenceValue(brtiStatus?.latest_parsed_value ?? null)
       },
@@ -217,14 +264,29 @@ function createStatusSections(
       {
         label: "BRTI Age",
         value: formatSourceAge(brtiStatus),
-        tone: brtiStatus?.latest_tick_received_at && !brtiStatus.stale ? "green" : "muted"
+        tone: brtiStatus?.latest_tick_received_at && !brtiStatus.transport_stale ? "green" : "muted"
+      },
+      {
+        label: "BRTI Source Age",
+        value: brtiSourceAgeStatusLabel(brtiStatus),
+        tone: brtiSourceAgeStatusTone(brtiStatus),
+        detail: formatDurationMs(brtiStatus?.source_age_ms ?? null)
+      },
+      {
+        label: "BRTI Persistence",
+        value: brtiStatus?.persistence_stale ? "STALE" : brtiStatus?.last_persisted_at ? "LIVE" : "--",
+        tone: brtiStatus?.persistence_stale ? "amber" : brtiStatus?.last_persisted_at ? "green" : "muted"
       },
       {
         label: "Final Avg",
         value: brtiStatus?.final_minute_average_status?.toUpperCase() ?? "--",
         tone: brtiStatus?.final_minute_average_status === "present" ? "green" : "muted"
       },
-      { label: "Provenance", value: scaffold.reference.series.provenance.toUpperCase(), tone: "amber" }
+      {
+        label: "Provenance",
+        value: referenceChartCoverageLabel(referenceChart),
+        tone: referenceChartTone(referenceChart)
+      }
     ],
     system: [
       { label: "Backend API", value: apiConnected ? "HEALTHY" : "UNREACHABLE", tone: apiConnected ? "green" : "red" },
@@ -251,7 +313,12 @@ function createStatusSections(
         value: formatAge(snapshot.fetchedAt, wsStatus?.last_trade_at ?? null),
         tone: wsStatus?.last_trade_at ? "green" : "muted"
       },
-      { label: "Chart Points", value: `${scaffold.reference.series.points.length} / 600 max`, tone: "green" }
+      {
+        label: "Chart Points",
+        value: `${referenceChart.pointCount} / ${referenceChart.maxPoints} max`,
+        tone: referenceChartTone(referenceChart),
+        detail: `15m rolling ${referenceChartProvenanceLabel(referenceChart)}`
+      }
     ],
     engine: [
       { label: "Market Resolver", value: "DISABLED", tone: "amber" },
@@ -318,4 +385,198 @@ function formatSourceAge(brtiStatus: BrtiReferenceStatusResponse | null): string
     return formatAge(brtiStatus.checked_at, brtiStatus.latest_tick_received_at);
   }
   return "--";
+}
+
+function createReferenceChartData(
+  snapshot: OperationalSnapshot,
+  scaffold: ScaffoldDashboardData
+): ReferenceChartData {
+  const series = snapshot.brtiSeries.ok ? snapshot.brtiSeries.data : null;
+  const brtiStatus = snapshot.brtiStatus.data;
+  const livePoints = series
+    ? liveBrtiReferencePoints(
+        series.points,
+        Date.parse(series.generated_at) || Date.parse(snapshot.fetchedAt)
+      )
+    : [];
+
+  if (series && livePoints.length > 0) {
+    const cappedPoints = capPoints(livePoints, Math.min(series.max_points, MAX_REFERENCE_CHART_POINTS));
+    const firstPoint = cappedPoints[0];
+    const latestPoint = cappedPoints[cappedPoints.length - 1];
+    const intervalEndMs = Date.parse(series.generated_at) || Date.parse(snapshot.fetchedAt);
+    const intervalStartMs = intervalEndMs - REFERENCE_CHART_WINDOW_MS;
+    const status = isLiveBrtiStatus(brtiStatus) ? "live" : "stale";
+
+    return {
+      points: cappedPoints,
+      intervalStartMs,
+      intervalEndMs,
+      intervalOpenPrice: firstPoint.value,
+      currentPrice: latestPoint.value,
+      refSpreadBps: null,
+      status,
+      note:
+        status === "live"
+          ? "Backend /reference/brti/series, sorted by received time. Raw payload excluded."
+          : "Stored /reference/brti/series points are shown, but BRTI status is not live.",
+      sourceAgeLabel: formatDurationMs(
+        brtiStatus?.source_age_ms ?? latestSeriesSourceAge(livePoints)
+      ),
+      backendAgeLabel: formatAge(
+        snapshot.fetchedAt,
+        brtiStatus?.latest_tick_received_at ?? new Date(latestPoint.tsMs).toISOString()
+      ),
+      pointCount: cappedPoints.length,
+      maxPoints: Math.min(series.max_points, MAX_REFERENCE_CHART_POINTS)
+    };
+  }
+
+  const fallbackPoints = capPoints(scaffold.reference.series.points, MAX_REFERENCE_CHART_POINTS);
+  return {
+    points: fallbackPoints,
+    intervalStartMs: scaffold.reference.intervalStartMs,
+    intervalEndMs: scaffold.reference.intervalEndMs,
+    intervalOpenPrice: scaffold.reference.intervalOpenPrice,
+    currentPrice: scaffold.reference.currentPrice,
+    refSpreadBps: scaffold.reference.refSpreadBps,
+    status: "fallback",
+    note: scaffold.reference.series.note,
+    sourceAgeLabel: "--",
+    backendAgeLabel: "--",
+    pointCount: fallbackPoints.length,
+    maxPoints: MAX_REFERENCE_CHART_POINTS
+  };
+}
+
+function liveBrtiReferencePoints(
+  points: readonly BrtiReferenceSeriesPointResponse[],
+  generatedAtMs: number
+): BrtiReferencePointWithAge[] {
+  const windowStartMs = generatedAtMs - REFERENCE_CHART_WINDOW_MS;
+
+  return points
+    .map((point) => {
+      const tsMs = Date.parse(point.received_at);
+      const value = Number(point.parsed_value);
+      if (
+        !Number.isFinite(tsMs) ||
+        !Number.isFinite(value) ||
+        tsMs < windowStartMs ||
+        tsMs > generatedAtMs ||
+        point.parse_status !== "valid"
+      ) {
+        return null;
+      }
+
+      return {
+        tsMs,
+        value,
+        source: "CF/BRTI" as const,
+        sourceAgeMs: point.source_age_ms
+      };
+    })
+    .filter((point): point is BrtiReferencePointWithAge => point !== null)
+    .sort((left, right) => left.tsMs - right.tsMs);
+}
+
+function latestSeriesSourceAge(points: readonly BrtiReferencePointWithAge[]): number | null {
+  const latest = points[points.length - 1];
+  return latest?.sourceAgeMs ?? null;
+}
+
+interface BrtiReferencePointWithAge extends ReferencePricePoint {
+  sourceAgeMs: number | null;
+}
+
+function formatDurationMs(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "--";
+  }
+  const ms = Math.max(0, Math.round(value));
+  if (ms < 1000) {
+    return `${ms}ms`;
+  }
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  return `${Math.round(seconds / 60)}m`;
+}
+
+function brtiTransportLabel(brtiStatus: BrtiReferenceStatusResponse | null): string {
+  if (!brtiStatus) {
+    return "UNREACHABLE";
+  }
+  if (!brtiStatus.enabled) {
+    return "DISABLED";
+  }
+  if (brtiStatus.connection_state === "error") {
+    return "ERROR";
+  }
+  if (brtiStatus.transport_stale) {
+    return "STALE";
+  }
+  if (brtiStatus.connection_state === "subscribed") {
+    return "LIVE";
+  }
+  return brtiStatus.connection_state.toUpperCase();
+}
+
+function isLiveBrtiStatus(brtiStatus: BrtiReferenceStatusResponse | null): boolean {
+  return (
+    brtiStatus !== null &&
+    brtiStatus.enabled &&
+    brtiStatus.connection_state === "subscribed" &&
+    !brtiStatus.stale &&
+    !brtiStatus.transport_stale &&
+    !brtiStatus.persistence_stale &&
+    brtiStatus.last_error_type === null &&
+    brtiStatus.last_error_message === null &&
+    brtiStatus.blockers.length === 0
+  );
+}
+
+function brtiSourceAgeStatusLabel(brtiStatus: BrtiReferenceStatusResponse | null): string {
+  if (!brtiStatus || brtiStatus.source_age_ms === null || brtiStatus.source_age_ms === undefined) {
+    return "--";
+  }
+  return brtiStatus.source_stale ? "LAGGING" : "FRESH";
+}
+
+function brtiSourceAgeStatusTone(brtiStatus: BrtiReferenceStatusResponse | null): StatusRow["tone"] {
+  if (!brtiStatus || brtiStatus.source_age_ms === null || brtiStatus.source_age_ms === undefined) {
+    return "muted";
+  }
+  return brtiStatus.source_stale ? "amber" : "green";
+}
+
+function referenceChartCoverageLabel(referenceChart: ReferenceChartData): string {
+  if (referenceChart.status === "live") {
+    return "LIVE BRTI";
+  }
+  if (referenceChart.status === "stale") {
+    return "STALE BRTI";
+  }
+  return "FALLBACK";
+}
+
+function referenceChartProvenanceLabel(
+  referenceChart: ReferenceChartData
+): "live BRTI" | "stale BRTI" | "fallback scaffold" {
+  if (referenceChart.status === "live") {
+    return "live BRTI";
+  }
+  if (referenceChart.status === "stale") {
+    return "stale BRTI";
+  }
+  return "fallback scaffold";
+}
+
+function referenceChartTone(referenceChart: ReferenceChartData): StatusRow["tone"] {
+  return referenceChart.status === "live" ? "green" : "amber";
+}
+
+function referenceChartToneClass(referenceChart: ReferenceChartData): string {
+  return referenceChart.status === "live" ? "tone-green" : "tone-amber";
 }

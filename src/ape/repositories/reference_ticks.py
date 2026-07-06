@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
@@ -42,3 +44,20 @@ class ReferenceTicksRepository:
             .order_by(desc(ReferenceTick.source_ts), desc(ReferenceTick.id))
             .limit(1)
         )
+
+    def get_ticks_since(
+        self,
+        source: str,
+        since: datetime,
+        *,
+        limit: int,
+    ) -> list[ReferenceTick]:
+        rows = list(
+            self.session.scalars(
+                select(ReferenceTick)
+                .where(ReferenceTick.source == source, ReferenceTick.received_at >= since)
+                .order_by(desc(ReferenceTick.received_at), desc(ReferenceTick.id))
+                .limit(limit)
+            )
+        )
+        return list(reversed(rows))
