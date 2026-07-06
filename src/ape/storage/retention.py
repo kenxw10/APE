@@ -651,6 +651,13 @@ def _storage_status_snapshot(
     if enabled and database_configured:
         if latest_run is None:
             warnings.append("storage_retention_has_not_run")
+        elif latest_run.finished_at is None and latest_run.status == RETENTION_RUNNING:
+            age_seconds = (
+                checked_at - _as_utc(latest_run.started_at)
+            ).total_seconds()
+            stale_running_after_seconds = max(config.storage_retention_max_run_seconds, 1.0)
+            if age_seconds > stale_running_after_seconds:
+                warnings.append("storage_retention_running_run_stale")
         elif latest_run.finished_at is not None:
             age_seconds = (
                 checked_at - _as_utc(latest_run.finished_at)

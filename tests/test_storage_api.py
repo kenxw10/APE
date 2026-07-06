@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
@@ -86,6 +86,30 @@ def test_storage_status_warns_on_latest_failed_run(tmp_path) -> None:
     assert "latest_storage_retention_run_failed" in body["warnings"]
 
 
+def test_storage_status_warns_on_stale_running_run(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_storage_running.sqlite'}"
+    checked_at = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    _insert_retention_run(
+        database_url,
+        checked_at,
+        status="running",
+        started_at=checked_at - timedelta(seconds=60),
+        unfinished=True,
+    )
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "STORAGE_RETENTION_ENABLED": "true",
+            "STORAGE_RETENTION_MAX_RUN_SECONDS": "20",
+        }
+    )
+
+    snapshot = retention_module.build_storage_status(config, now=checked_at)
+
+    assert snapshot.latest_run_status == "running"
+    assert "storage_retention_running_run_stale" in snapshot.warnings
+
+
 def test_storage_status_uses_worker_observed_enabled(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_storage_worker.sqlite'}"
     now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
@@ -158,7 +182,15 @@ def test_storage_status_warn_and_critical_thresholds(tmp_path, monkeypatch) -> N
     assert "database_size_critical" in critical_snapshot.blockers
 
 
-def _insert_retention_run(database_url: str, now: datetime, *, status: str) -> None:
+def _insert_retention_run(
+    database_url: str,
+    now: datetime,
+    *,
+    status: str,
+    started_at: datetime | None = None,
+    finished_at: datetime | None = None,
+    unfinished: bool = False,
+) -> None:
     engine = create_engine_from_config(load_config({"DATABASE_URL": database_url}))
     run_migrations(engine)
     session_factory = create_session_factory(engine)
@@ -167,8 +199,8 @@ def _insert_retention_run(database_url: str, now: datetime, *, status: str) -> N
             StorageRetentionRepository(session).start_run(
                 StorageRetentionRunInput(
                     run_id=f"run-{status}",
-                    started_at=now,
-                    finished_at=now,
+                    started_at=started_at or now,
+                    finished_at=None if unfinished else finished_at or now,
                     status=status,
                     dry_run=False,
                     duration_ms=10,
