@@ -6,12 +6,13 @@ import { useRouter } from "next/navigation";
 import {
   type BrtiReferenceSeriesPointResponse,
   type BrtiReferenceStatusResponse,
-  type OperationalSnapshot
+  type OperationalSnapshot,
+  type StrategyStatusResponse
 } from "../lib/api";
 import {
   MAX_REFERENCE_CHART_POINTS,
-  REFERENCE_CHART_WINDOW_MS,
   capPoints,
+  selectFixedIntervalReferencePoints,
   type PortfolioRange
 } from "../lib/chart";
 import { type ReferencePricePoint, type ScaffoldDashboardData } from "../lib/scaffold-data";
@@ -228,6 +229,7 @@ function createStatusSections(
   const safety = snapshot.safety.data ?? snapshot.health.data?.safety ?? snapshot.readiness.data?.safety ?? null;
   const wsStatus = snapshot.wsStatus.data;
   const brtiStatus = snapshot.brtiStatus.data;
+  const strategyStatus = snapshot.strategyStatus.data;
   const wsConnected = wsStatus?.connection_state === "subscribed" && !wsStatus.stale;
   const wsTone = !snapshot.wsStatus.ok
     ? "red"
@@ -317,12 +319,41 @@ function createStatusSections(
         label: "Chart Points",
         value: `${referenceChart.pointCount} / ${referenceChart.maxPoints} max`,
         tone: referenceChartTone(referenceChart),
-        detail: `15m rolling ${referenceChartProvenanceLabel(referenceChart)}`
+        detail: `active 15m ${referenceChartProvenanceLabel(referenceChart)}`
       }
     ],
     engine: [
-      { label: "Market Resolver", value: "DISABLED", tone: "amber" },
-      { label: "Signal Engine", value: "DISABLED", tone: "green" },
+      {
+        label: "Strategy Observer",
+        value: strategyObserverLabel(snapshot.strategyStatus.ok, strategyStatus),
+        tone: strategyObserverTone(snapshot.strategyStatus.ok, strategyStatus)
+      },
+      {
+        label: "Latest Decision",
+        value: strategyStatus?.latest_decision_state ?? "--",
+        tone: strategyDecisionTone(strategyStatus),
+        detail: strategyStatus?.latest_primary_reason ?? undefined
+      },
+      {
+        label: "Candidate",
+        value: strategyStatus?.candidate_side ?? "--",
+        tone: strategyStatus?.candidate_side ? "green" : "muted",
+        detail: strategyDistanceLabel(strategyStatus)
+      },
+      {
+        label: "Seconds Left",
+        value: strategyStatus?.seconds_left === null || strategyStatus?.seconds_left === undefined
+          ? "--"
+          : `${strategyStatus.seconds_left}s`,
+        tone: strategyStatus?.seconds_left === null || strategyStatus?.seconds_left === undefined ? "muted" : "green"
+      },
+      {
+        label: "Decision Age",
+        value: strategyStatus?.decision_age_seconds === null || strategyStatus?.decision_age_seconds === undefined
+          ? "--"
+          : `${Math.round(strategyStatus.decision_age_seconds)}s`,
+        tone: strategyStatus?.stale ? "amber" : strategyStatus?.latest_decision_id ? "green" : "muted"
+      },
       { label: "Execution", value: "DISABLED", tone: "green" }
     ],
     safety: [
@@ -387,41 +418,105 @@ function formatSourceAge(brtiStatus: BrtiReferenceStatusResponse | null): string
   return "--";
 }
 
+function strategyObserverLabel(
+  endpointOk: boolean,
+  strategyStatus: StrategyStatusResponse | null
+): string {
+  if (!endpointOk || !strategyStatus) {
+    return "UNREACHABLE";
+  }
+  if (!strategyStatus.enabled) {
+    return "DISABLED";
+  }
+  if (strategyStatus.blockers.length > 0 || !strategyStatus.is_safe) {
+    return "BLOCKED";
+  }
+  if (strategyStatus.stale) {
+    return "STALE";
+  }
+  return "RUNNING";
+}
+
+function strategyObserverTone(
+  endpointOk: boolean,
+  strategyStatus: StrategyStatusResponse | null
+): StatusRow["tone"] {
+  const label = strategyObserverLabel(endpointOk, strategyStatus);
+  if (label === "RUNNING" || label === "DISABLED") {
+    return "green";
+  }
+  if (label === "UNREACHABLE" || label === "BLOCKED") {
+    return "red";
+  }
+  return "amber";
+}
+
+function strategyDecisionTone(strategyStatus: StrategyStatusResponse | null): StatusRow["tone"] {
+  if (!strategyStatus?.latest_decision_state) {
+    return "muted";
+  }
+  if (strategyStatus.latest_decision_state === "OBSERVE_ONLY_MARKET") {
+    return "green";
+  }
+  if (
+    strategyStatus.latest_decision_state === "LIVE_GUARD_BLOCKED" ||
+    strategyStatus.latest_decision_state === "BOOK_UNUSABLE"
+  ) {
+    return "red";
+  }
+  return "amber";
+}
+
+function strategyDistanceLabel(strategyStatus: StrategyStatusResponse | null): string | undefined {
+  if (strategyStatus?.distance_bps === null || strategyStatus?.distance_bps === undefined) {
+    return undefined;
+  }
+  const distance = Number(strategyStatus.distance_bps);
+  if (!Number.isFinite(distance)) {
+    return undefined;
+  }
+  return `${distance.toFixed(2)} bps`;
+}
+
 function createReferenceChartData(
   snapshot: OperationalSnapshot,
   scaffold: ScaffoldDashboardData
 ): ReferenceChartData {
   const series = snapshot.brtiSeries.ok ? snapshot.brtiSeries.data : null;
   const brtiStatus = snapshot.brtiStatus.data;
-  const livePoints = series
-    ? liveBrtiReferencePoints(
-        series.points,
-        Date.parse(series.generated_at) || Date.parse(snapshot.fetchedAt)
-      )
-    : [];
+  const generatedAtMs = series
+    ? Date.parse(series.generated_at) || Date.parse(snapshot.fetchedAt)
+    : Date.parse(snapshot.fetchedAt);
+  const livePoints = series ? liveBrtiReferencePoints(series.points) : [];
+  const intervalSelection = selectFixedIntervalReferencePoints(livePoints, generatedAtMs);
 
-  if (series && livePoints.length > 0) {
-    const cappedPoints = capPoints(livePoints, Math.min(series.max_points, MAX_REFERENCE_CHART_POINTS));
-    const firstPoint = cappedPoints[0];
+  if (
+    series &&
+    intervalSelection.points.length > 0 &&
+    intervalSelection.intervalOpenPrice !== null &&
+    intervalSelection.currentPrice !== null
+  ) {
+    const cappedPoints = capPoints(
+      intervalSelection.points,
+      Math.min(series.max_points, MAX_REFERENCE_CHART_POINTS)
+    );
     const latestPoint = cappedPoints[cappedPoints.length - 1];
-    const intervalEndMs = Date.parse(series.generated_at) || Date.parse(snapshot.fetchedAt);
-    const intervalStartMs = intervalEndMs - REFERENCE_CHART_WINDOW_MS;
     const status = isLiveBrtiStatus(brtiStatus) ? "live" : "stale";
 
     return {
       points: cappedPoints,
-      intervalStartMs,
-      intervalEndMs,
-      intervalOpenPrice: firstPoint.value,
-      currentPrice: latestPoint.value,
+      intervalStartMs: intervalSelection.domain.startMs,
+      intervalEndMs: intervalSelection.domain.endMs,
+      intervalOpenPrice: intervalSelection.intervalOpenPrice,
+      currentPrice: intervalSelection.currentPrice,
       refSpreadBps: null,
       status,
       note:
         status === "live"
-          ? "Backend /reference/brti/series, sorted by received time. Raw payload excluded."
-          : "Stored /reference/brti/series points are shown, but BRTI status is not live.",
+          ? "Current Kalshi 15-minute interval from /reference/brti/series. Raw payload excluded."
+          : "Current-interval /reference/brti/series points are shown, but BRTI status is not live.",
       sourceAgeLabel: formatDurationMs(
-        brtiStatus?.source_age_ms ?? latestSeriesSourceAge(livePoints)
+        brtiStatus?.source_age_ms ?? latestSeriesSourceAge(intervalSelection.points)
       ),
       backendAgeLabel: formatAge(
         snapshot.fetchedAt,
@@ -450,11 +545,8 @@ function createReferenceChartData(
 }
 
 function liveBrtiReferencePoints(
-  points: readonly BrtiReferenceSeriesPointResponse[],
-  generatedAtMs: number
+  points: readonly BrtiReferenceSeriesPointResponse[]
 ): BrtiReferencePointWithAge[] {
-  const windowStartMs = generatedAtMs - REFERENCE_CHART_WINDOW_MS;
-
   return points
     .map((point) => {
       const tsMs = Date.parse(point.received_at);
@@ -462,8 +554,6 @@ function liveBrtiReferencePoints(
       if (
         !Number.isFinite(tsMs) ||
         !Number.isFinite(value) ||
-        tsMs < windowStartMs ||
-        tsMs > generatedAtMs ||
         point.parse_status !== "valid"
       ) {
         return null;

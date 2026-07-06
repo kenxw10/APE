@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
@@ -32,3 +34,22 @@ class MarketsRepository:
             self.session.scalars(select(Market).order_by(desc(Market.created_at)).limit(limit))
         )
 
+    def get_active_market(
+        self,
+        *,
+        now: datetime,
+        series_ticker: str,
+    ) -> Market | None:
+        checked_at = now.astimezone(UTC)
+        return self.session.scalar(
+            select(Market)
+            .where(
+                Market.series_ticker == series_ticker,
+                Market.open_time.is_not(None),
+                Market.close_time.is_not(None),
+                Market.open_time <= checked_at,
+                Market.close_time > checked_at,
+            )
+            .order_by(desc(Market.updated_at), desc(Market.id))
+            .limit(1)
+        )

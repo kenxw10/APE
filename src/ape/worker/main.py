@@ -13,6 +13,7 @@ from ape.kalshi.ws_collector import KalshiWsCollector, heartbeat_interval_second
 from ape.repositories.inputs import WorkerHeartbeatInput
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import SafetyError, assert_startup_safe, assess_startup_safety
+from ape.strategy.observer import StrategyObserver
 
 LOGGER = logging.getLogger(__name__)
 
@@ -41,25 +42,45 @@ def run_worker(
     try:
         LOGGER.info(
             "Starting ape-worker env=%s app_mode=%s safety=%s db_configured=%s "
-            "ws_enabled=%s brti_enabled=%s",
+            "ws_enabled=%s brti_enabled=%s strategy_observer_enabled=%s",
             config.env,
             config.app_mode.value,
             "safe" if safety.is_safe else "blocked",
             bool(config.database_url),
             config.kalshi_ws_enabled,
             config.kalshi_cfbenchmarks_enabled,
+            config.strategy_observer_enabled,
         )
 
         event = stop_event or threading.Event()
-        if config.kalshi_ws_enabled or _reference_worker_enabled(config):
-            LOGGER.info("APE worker running Kalshi WebSocket collector in OBSERVER mode.")
-            collector = KalshiWsCollector(
-                config=config,
-                safety=safety,
-                session_factory=session_factory,
-                started_at=started_at,
+        if (
+            config.kalshi_ws_enabled
+            or _reference_worker_enabled(config)
+            or config.strategy_observer_enabled
+        ):
+            LOGGER.info("APE worker running enabled observer services.")
+            tasks = []
+            if config.kalshi_ws_enabled or _reference_worker_enabled(config):
+                collector = KalshiWsCollector(
+                    config=config,
+                    safety=safety,
+                    session_factory=session_factory,
+                    started_at=started_at,
+                )
+                tasks.append(collector.run(stop_event=event, max_cycles=max_iterations))
+            if config.strategy_observer_enabled:
+                observer = StrategyObserver(
+                    config=config,
+                    safety=safety,
+                    session_factory=session_factory,
+                    started_at=started_at,
+                )
+                tasks.append(observer.run(stop_event=event, max_iterations=max_iterations))
+            asyncio.run(
+                _run_enabled_observer_tasks(
+                    *tasks,
+                )
             )
-            asyncio.run(collector.run(stop_event=event, max_cycles=max_iterations))
             return
 
         LOGGER.info("APE worker running in OBSERVER mode; idle heartbeat only.")
@@ -125,6 +146,18 @@ def _record_idle_heartbeat(
                                 "blockers": [],
                             }
                         },
+                        "strategy": {
+                            "observer": {
+                                "enabled": config.strategy_observer_enabled,
+                                "connection_state": "disabled",
+                                "last_evaluated_at": None,
+                                "last_decision_state": None,
+                                "last_primary_reason": None,
+                                "last_decision_id": None,
+                                "warnings": ["strategy_observer_disabled"],
+                                "blockers": [],
+                            }
+                        },
                     },
                 )
             )
@@ -151,6 +184,10 @@ def _reference_worker_enabled(config: AppConfig) -> bool:
         config.kalshi_cfbenchmarks_enabled
         and config.kalshi_cfbenchmarks_subscribe_on_worker
     )
+
+
+async def _run_enabled_observer_tasks(*tasks) -> None:
+    await asyncio.gather(*tasks)
 
 
 def main() -> int:

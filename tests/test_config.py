@@ -42,6 +42,17 @@ def test_default_config_is_observer_only() -> None:
     assert config.kalshi_cfbenchmarks_source_age_warn_ms == 45000
     assert config.kalshi_cfbenchmarks_kalshi_received_warn_ms == 10000
     assert config.kalshi_cfbenchmarks_trade_fresh_ms == 2000
+    assert config.strategy_observer_enabled is False
+    assert config.strategy_observer_poll_seconds == 1.0
+    assert config.strategy_observer_decision_ttl_seconds == 5
+    assert config.strategy_min_boundary_distance_bps == 3.5
+    assert config.strategy_reference_max_age_ms == 2000
+    assert config.strategy_kalshi_book_max_age_ms == 2000
+    assert config.strategy_no_entry_first_seconds == 300
+    assert config.strategy_no_entry_last_seconds == 60
+    assert config.strategy_min_entry_ask == 0.56
+    assert config.strategy_max_entry_ask == 0.78
+    assert config.strategy_max_spread_cents == 4
 
 
 def test_kalshi_credentials_are_not_required() -> None:
@@ -134,6 +145,36 @@ def test_kalshi_cfbenchmarks_env_vars_parse_safely() -> None:
 def test_invalid_kalshi_cfbenchmarks_index_ids_raise_clear_config_error() -> None:
     with pytest.raises(ConfigError, match="KALSHI_CFBENCHMARKS_INDEX_IDS"):
         load_config({"KALSHI_CFBENCHMARKS_INDEX_IDS": " , "})
+
+
+def test_strategy_observer_env_vars_parse_safely() -> None:
+    config = load_config(
+        {
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_OBSERVER_POLL_SECONDS": "2",
+            "STRATEGY_OBSERVER_DECISION_TTL_SECONDS": "6",
+            "STRATEGY_MIN_BOUNDARY_DISTANCE_BPS": "4.5",
+            "STRATEGY_REFERENCE_MAX_AGE_MS": "2500",
+            "STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2600",
+            "STRATEGY_NO_ENTRY_FIRST_SECONDS": "301",
+            "STRATEGY_NO_ENTRY_LAST_SECONDS": "61",
+            "STRATEGY_MIN_ENTRY_ASK": "0.57",
+            "STRATEGY_MAX_ENTRY_ASK": "0.79",
+            "STRATEGY_MAX_SPREAD_CENTS": "5",
+        }
+    )
+
+    assert config.strategy_observer_enabled is True
+    assert config.strategy_observer_poll_seconds == 2
+    assert config.strategy_observer_decision_ttl_seconds == 6
+    assert config.strategy_min_boundary_distance_bps == 4.5
+    assert config.strategy_reference_max_age_ms == 2500
+    assert config.strategy_kalshi_book_max_age_ms == 2600
+    assert config.strategy_no_entry_first_seconds == 301
+    assert config.strategy_no_entry_last_seconds == 61
+    assert config.strategy_min_entry_ask == 0.57
+    assert config.strategy_max_entry_ask == 0.79
+    assert config.strategy_max_spread_cents == 5
 
 
 def test_invalid_kalshi_api_base_url_raises_clear_config_error() -> None:

@@ -41,7 +41,20 @@ from ape.models.reference import (
     brti_reference_series_response,
     brti_reference_status_response,
 )
+from ape.models.strategy import (
+    StrategyDecisionResponse,
+    StrategyRecentDecisionsResponse,
+    StrategyStatusResponse,
+    strategy_decision_response,
+    strategy_recent_decisions_response,
+    strategy_status_response,
+)
 from ape.safety import SafetyAssessment, assert_startup_safe, assess_startup_safety
+from ape.strategy.observer import (
+    build_latest_strategy_decision,
+    build_recent_strategy_decisions,
+    build_strategy_status,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -122,6 +135,22 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 since=since,
                 include_final_minute=include_final_minute,
             )
+        )
+
+    @app.get("/strategy/status", response_model=StrategyStatusResponse)
+    def strategy_status() -> StrategyStatusResponse:
+        return strategy_status_response(build_strategy_status(settings))
+
+    @app.get("/strategy/decisions/latest", response_model=StrategyDecisionResponse)
+    def strategy_decision_latest() -> StrategyDecisionResponse:
+        return strategy_decision_response(build_latest_strategy_decision(settings))
+
+    @app.get("/strategy/decisions/recent", response_model=StrategyRecentDecisionsResponse)
+    def strategy_decisions_recent(
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> StrategyRecentDecisionsResponse:
+        return strategy_recent_decisions_response(
+            build_recent_strategy_decisions(settings, limit=limit)
         )
 
     @app.get("/ready", response_model=ReadinessResponse)

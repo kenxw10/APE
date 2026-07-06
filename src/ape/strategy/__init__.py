@@ -1,0 +1,1 @@
+"""Observer-only strategy diagnostics."""

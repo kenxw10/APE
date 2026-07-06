@@ -126,6 +126,32 @@ export interface BrtiReferenceSeriesResponse {
   points: BrtiReferenceSeriesPointResponse[];
 }
 
+export interface StrategyStatusResponse {
+  enabled: boolean;
+  worker_observed_enabled: boolean | null;
+  connection_state: string;
+  app_mode: string;
+  trading_enabled: boolean;
+  execute: boolean;
+  is_safe: boolean;
+  latest_decision_id: string | null;
+  latest_evaluated_at: string | null;
+  latest_decision_state: string | null;
+  latest_primary_reason: string | null;
+  market_ticker: string | null;
+  candidate_side: string | null;
+  boundary: string | number | null;
+  brti_value: string | number | null;
+  distance_bps: string | number | null;
+  seconds_left: number | null;
+  latest_measurements_summary: Record<string, unknown> | null;
+  decision_age_seconds: number | null;
+  stale: boolean;
+  warnings: string[];
+  blockers: string[];
+  checked_at: string;
+}
+
 export interface EndpointResult<T> {
   path: string;
   ok: boolean;
@@ -144,6 +170,7 @@ export interface OperationalSnapshot {
   wsStatus: EndpointResult<WebSocketStatusResponse>;
   brtiStatus: EndpointResult<BrtiReferenceStatusResponse>;
   brtiSeries: EndpointResult<BrtiReferenceSeriesResponse>;
+  strategyStatus: EndpointResult<StrategyStatusResponse>;
 }
 
 export function getApiBaseUrl(): string {
@@ -182,7 +209,16 @@ async function fetchEndpoint<T>(apiBaseUrl: string, path: string): Promise<Endpo
 
 export async function fetchOperationalSnapshot(): Promise<OperationalSnapshot> {
   const apiBaseUrl = getApiBaseUrl();
-  const [health, safety, database, readiness, wsStatus, brtiStatus, brtiSeries] = await Promise.all([
+  const [
+    health,
+    safety,
+    database,
+    readiness,
+    wsStatus,
+    brtiStatus,
+    brtiSeries,
+    strategyStatus
+  ] = await Promise.all([
     fetchEndpoint<HealthResponse>(apiBaseUrl, "/health"),
     fetchEndpoint<SafetyResponse>(apiBaseUrl, "/safety"),
     fetchEndpoint<DatabaseStatusResponse>(apiBaseUrl, "/db/status"),
@@ -192,7 +228,8 @@ export async function fetchOperationalSnapshot(): Promise<OperationalSnapshot> {
     fetchEndpoint<BrtiReferenceSeriesResponse>(
       apiBaseUrl,
       "/reference/brti/series?window_seconds=900&max_points=16000"
-    )
+    ),
+    fetchEndpoint<StrategyStatusResponse>(apiBaseUrl, "/strategy/status")
   ]);
 
   return {
@@ -205,6 +242,7 @@ export async function fetchOperationalSnapshot(): Promise<OperationalSnapshot> {
     readiness,
     wsStatus,
     brtiStatus,
-    brtiSeries
+    brtiSeries,
+    strategyStatus
   };
 }

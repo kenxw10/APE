@@ -81,3 +81,25 @@ PR 7a post-merge checkpoint:
 - BRTI final-minute averages may be stored when present, but no strategy,
   position-management, paper trading, live trading, order, fill, or decision-ledger
   logic is enabled by PR 7a.
+
+PR 8 post-merge checkpoint:
+
+- Set `STRATEGY_OBSERVER_ENABLED=true` on the Railway worker only after PR 7a
+  market/BRTI intake is healthy.
+- Keep API and worker `APP_MODE=OBSERVER`, `TRADING_ENABLED=false`, and
+  `EXECUTE=false`.
+- Do not add strategy observer env vars, Kalshi credentials, WebSocket settings,
+  or BRTI env vars to Vercel.
+- Redeploy the Railway worker.
+- Validate worker logs, `/strategy/status`, `/strategy/decisions/latest`,
+  `/strategy/decisions/recent`, `/ws/status`, `/reference/brti/status`,
+  `/health`, `/safety`, `/db/status`, and `/ready`.
+- Confirm `strategy_decisions` rows are being written when active persisted market,
+  BRTI, and orderbook rows are fresh enough for evaluation.
+- Confirm latest strategy states are observer-safe diagnostics only. They may
+  include `OBSERVE_ONLY_MARKET`, `REFERENCE_STALE`, `KALSHI_STALE`, `TOO_EARLY`,
+  `TOO_LATE_FOR_ENTRY`, `TOO_CLOSE_TO_BOUNDARY`, `BOOK_UNUSABLE`, or
+  `CONTRACT_NOT_CONFIRMED`; they must not include enter, order, fill, paper, or
+  live execution states.
+- Confirm the dashboard Engine Status panel shows Strategy Observer state from
+  `/strategy/status` and remains read-only.
