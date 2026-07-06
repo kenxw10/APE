@@ -102,7 +102,7 @@ export function createScaffoldDashboardData(nowIso: string): ScaffoldDashboardDa
       series: {
         provenance: "dashboard-scaffold",
         futureSurface: "future-reference",
-        note: "Scaffold sample only. APE does not ingest CF/BRTI reference data yet.",
+        note: "Fallback scaffold sample only. Live CF/BRTI reference data is unavailable.",
         points: referencePoints
       }
     },

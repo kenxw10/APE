@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 
 from ape import __version__
 from ape.config import AppConfig, load_config
@@ -13,6 +14,7 @@ from ape.db.session import check_database_connection, create_engine_from_config
 from ape.kalshi.diagnostics import build_kalshi_config_diagnostic
 from ape.kalshi.reference_status import (
     build_brti_reference_latest,
+    build_brti_reference_series,
     build_brti_reference_status,
 )
 from ape.kalshi.resolver import resolve_active_btc15_market
@@ -33,8 +35,10 @@ from ape.models.kalshi import (
 )
 from ape.models.reference import (
     BrtiReferenceLatestResponse,
+    BrtiReferenceSeriesResponse,
     BrtiReferenceStatusResponse,
     brti_reference_latest_response,
+    brti_reference_series_response,
     brti_reference_status_response,
 )
 from ape.safety import SafetyAssessment, assert_startup_safe, assess_startup_safety
@@ -102,6 +106,23 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.get("/reference/brti/latest", response_model=BrtiReferenceLatestResponse)
     def brti_reference_latest() -> BrtiReferenceLatestResponse:
         return brti_reference_latest_response(build_brti_reference_latest(settings))
+
+    @app.get("/reference/brti/series", response_model=BrtiReferenceSeriesResponse)
+    def brti_reference_series(
+        window_seconds: int = Query(default=900, ge=1),
+        max_points: int = Query(default=16_000, ge=1),
+        since: datetime | None = None,
+        include_final_minute: bool = False,
+    ) -> BrtiReferenceSeriesResponse:
+        return brti_reference_series_response(
+            build_brti_reference_series(
+                settings,
+                window_seconds=window_seconds,
+                max_points=max_points,
+                since=since,
+                include_final_minute=include_final_minute,
+            )
+        )
 
     @app.get("/ready", response_model=ReadinessResponse)
     def readiness() -> ReadinessResponse:

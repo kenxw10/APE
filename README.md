@@ -10,13 +10,13 @@ PR 3 adds Railway backend deployment scaffolding for the API and always-on worke
 
 PR 3a adds a root `requirements.txt` so Railway/Railpack installs APE's runtime Python dependencies before starting the API or worker.
 
-PR 4 adds a Vercel-ready read-only dashboard scaffold under `dashboard/`. The dashboard uses the live Railway API for health, safety, database, and readiness state. Portfolio, CF/BRTI reference, and positions sections are clearly labeled placeholders until backend endpoints exist.
+PR 4 adds a Vercel-ready read-only dashboard scaffold under `dashboard/`. The dashboard uses the live Railway API for health, safety, database, and readiness state. Portfolio and positions sections remain clearly labeled placeholders until backend endpoints exist; PR 7a wires the CF/BRTI reference chart to the live read-only BRTI series when available.
 
 PR 5 adds observer-only Kalshi REST authentication diagnostics and an active BTC15 market resolver. It can authenticate to Kalshi REST when Railway credentials are configured, resolve the currently active `KXBTC15M` market, store market metadata in the existing `markets` table, and expose safe read-only diagnostics.
 
 PR 6 adds an observer-only Kalshi WebSocket market-data intake foundation for the Railway worker. It is disabled by default, subscribes only to public `ticker`, `orderbook_delta`, and `trade` channels for the active BTC15 market when enabled, stores normalized orderbook/trade data in existing tables, and exposes `/ws/status` diagnostics. It does not add BRTI/CF Benchmarks intake, strategy decisions, paper trading, live trading, or order placement.
 
-PR 7 adds observer-only BRTI / CF Benchmarks reference-feed intake. It is disabled by default, subscribes to Kalshi's authenticated `cfbenchmarks_value` WebSocket channel for `index_ids=["BRTI"]` only on the Railway worker, stores safe reference ticks in the existing `reference_ticks` table, and exposes read-only `/reference/brti/status` and `/reference/brti/latest` diagnostics. It does not add strategy decisions, paper trading, live trading, orders, fills, private channels, or execution controls.
+PR 7 adds observer-only BRTI / CF Benchmarks reference-feed intake. It is disabled by default, subscribes to Kalshi's authenticated `cfbenchmarks_value` WebSocket channel for `index_ids=["BRTI"]` only on the Railway worker, stores safe reference ticks in the existing `reference_ticks` table, and exposes read-only `/reference/brti/status` and `/reference/brti/latest` diagnostics. PR 7a makes BRTI use a dedicated worker-owned WebSocket connection by default and adds `/reference/brti/series` for the read-only dashboard reference chart. It does not add strategy decisions, paper trading, live trading, orders, fills, private channels, or execution controls.
 
 ## Safety Defaults
 
@@ -91,6 +91,7 @@ Invoke-RestMethod http://127.0.0.1:8000/markets/active
 Invoke-RestMethod http://127.0.0.1:8000/ws/status
 Invoke-RestMethod http://127.0.0.1:8000/reference/brti/status
 Invoke-RestMethod http://127.0.0.1:8000/reference/brti/latest
+Invoke-RestMethod "http://127.0.0.1:8000/reference/brti/series?window_seconds=900&max_points=16000"
 ```
 
 Successful health output should report `status` as `ok`, `app_mode` as `OBSERVER`, and `is_safe` as `True`.
@@ -145,7 +146,9 @@ After PR 6 is merged, enable the collector only on the Railway worker by setting
 
 ## BRTI Reference Feed
 
-PR 7 is observer-only. The BRTI collector is owned by the Railway worker and remains disabled unless `KALSHI_CFBENCHMARKS_ENABLED=true`.
+PR 7/7a is observer-only. The BRTI collector is owned by the Railway worker and remains disabled unless `KALSHI_CFBENCHMARKS_ENABLED=true`.
+
+BRTI uses a dedicated authenticated WebSocket connection by default when enabled. The market WebSocket owns BTC15 `orderbook_delta`, `ticker`, and `trade`; the BRTI WebSocket owns only `cfbenchmarks_value` with `index_ids=["BRTI"]`. Market rollover should not disconnect BRTI, and BRTI errors should not kill market collection.
 
 Optional Railway worker settings:
 
@@ -156,9 +159,15 @@ KALSHI_CFBENCHMARKS_STALE_AFTER_SECONDS=3
 KALSHI_CFBENCHMARKS_MAX_SOURCE_AGE_MS=3000
 KALSHI_CFBENCHMARKS_SUBSCRIBE_ON_WORKER=true
 KALSHI_CFBENCHMARKS_PERSIST_RAW_PAYLOAD=true
+KALSHI_CFBENCHMARKS_DEDICATED_CONNECTION=true
+KALSHI_CFBENCHMARKS_TRANSPORT_STALE_AFTER_SECONDS=5
+KALSHI_CFBENCHMARKS_PERSISTENCE_STALE_AFTER_SECONDS=5
+KALSHI_CFBENCHMARKS_SOURCE_AGE_WARN_MS=45000
+KALSHI_CFBENCHMARKS_KALSHI_RECEIVED_WARN_MS=10000
+KALSHI_CFBENCHMARKS_TRADE_FRESH_MS=2000
 ```
 
-After PR 7 is merged, enable BRTI only on the Railway worker. Do not add Kalshi credentials, WebSocket settings, or BRTI env vars to Vercel. The API remains read-only and the dashboard only reads the public Railway API. If Kalshi sends the final-minute 15-minute average, APE stores it for diagnostics only; no position-management, strategy, or trading logic uses it in PR 7.
+After PR 7a is merged, enable BRTI only on the Railway worker. Do not add Kalshi credentials, WebSocket settings, or BRTI env vars to Vercel. The API remains read-only and the dashboard only reads the public Railway API. `/reference/brti/series` returns a rolling 15-minute BRTI series sorted by `received_at`, capped at 16,000 points, and excludes raw payloads. Source age is upstream CF timestamp lag; it remains visible but is separate from transport and persistence staleness. `trade_ready_fresh` is a future strategy gate and is not used for trading in PR 7a. If Kalshi sends the final-minute 15-minute average, APE stores it for diagnostics only; no position-management, strategy, or trading logic uses it in PR 7a.
 
 ## Database Setup
 
@@ -205,6 +214,8 @@ NEXT_PUBLIC_API_BASE_URL=https://ape-api-production.up.railway.app
 
 Do not add `DATABASE_URL`, Kalshi credentials, private keys, or trading secrets to Vercel. See [docs/VERCEL.md](docs/VERCEL.md).
 
+The Reference Price CF/BRTI chart reads `/reference/brti/series` from the public Railway API when live data is available. It remains read-only, shows only the rolling 15-minute window, caps the chart at 16,000 points, and falls back to clearly labeled scaffold data when the backend series is unavailable.
+
 ## Run Worker Locally
 
 ```powershell
@@ -224,7 +235,6 @@ Successful startup should log that the worker is running in observer mode. Stop 
 - Strategy use of BRTI/reference data
 - CF Benchmarks/BRTI REST intake
 - Real dashboard portfolio/ledger endpoints
-- Real CF/BRTI chart-series endpoint
 - Railway cron
 - GitHub Actions
 - Real secrets

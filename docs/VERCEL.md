@@ -34,7 +34,7 @@ PR 5 Kalshi REST credentials are Railway-only. Do not add `KALSHI_API_KEY_ID`, `
 
 PR 6 Kalshi WebSocket intake is Railway-worker-only. Do not add `KALSHI_WS_ENABLED`, `KALSHI_WS_BASE_URL`, Kalshi credentials, or any WebSocket secrets/settings to Vercel. The dashboard only reads the public Railway API `/ws/status` response.
 
-PR 7 BRTI / CF Benchmarks intake is Railway-worker-only. Do not add `KALSHI_CFBENCHMARKS_ENABLED`, `KALSHI_CFBENCHMARKS_INDEX_IDS`, WebSocket settings, Kalshi credentials, or any BRTI-related secrets/settings to Vercel. The dashboard only reads the public Railway API `/reference/brti/status` response.
+PR 7a BRTI / CF Benchmarks intake is Railway-worker-only. Do not add `KALSHI_CFBENCHMARKS_ENABLED`, `KALSHI_CFBENCHMARKS_INDEX_IDS`, WebSocket settings, Kalshi credentials, or any BRTI-related secrets/settings to Vercel. The dashboard only reads the public Railway API `/reference/brti/status` and `/reference/brti/series` responses.
 
 ## Expected Build Logs
 
@@ -70,10 +70,13 @@ Open the Vercel dashboard and confirm:
 - Header shows DB ready when `/db/status` is `ok`.
 - Source/Data panels show Kalshi WebSocket status from `/ws/status` when the Railway API is reachable.
 - Source/Data panels show BRTI status from `/reference/brti/status` when the Railway API is reachable.
+- Reference Price CF/BRTI chart uses live `/reference/brti/series` data when available.
+- Reference Price CF/BRTI chart shows only a rolling 15-minute window and a 16,000-point maximum.
+- If live BRTI series data is unavailable, the chart is clearly labeled as fallback/scaffold.
 - Safety panel shows `Mode: OBSERVER`.
 - Safety panel shows `Trading: DISABLED`.
 - Safety panel shows `Execute: FALSE`.
-- Portfolio, reference, and positions sections are labeled as scaffold placeholders.
+- Portfolio and positions sections are labeled as scaffold placeholders.
 
 You can also verify the Railway API directly:
 

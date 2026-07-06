@@ -64,6 +64,12 @@ class AppConfig:
     kalshi_cfbenchmarks_max_source_age_ms: int = 3000
     kalshi_cfbenchmarks_subscribe_on_worker: bool = True
     kalshi_cfbenchmarks_persist_raw_payload: bool = True
+    kalshi_cfbenchmarks_dedicated_connection: bool = True
+    kalshi_cfbenchmarks_transport_stale_after_seconds: float = 5.0
+    kalshi_cfbenchmarks_persistence_stale_after_seconds: float = 5.0
+    kalshi_cfbenchmarks_source_age_warn_ms: int = 45_000
+    kalshi_cfbenchmarks_kalshi_received_warn_ms: int = 10_000
+    kalshi_cfbenchmarks_trade_fresh_ms: int = 2_000
 
 
 TRUE_VALUES = {"1", "true", "t", "yes", "y", "on"}
@@ -178,6 +184,30 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         kalshi_cfbenchmarks_persist_raw_payload=_parse_bool(
             "KALSHI_CFBENCHMARKS_PERSIST_RAW_PAYLOAD",
             _get(source, "KALSHI_CFBENCHMARKS_PERSIST_RAW_PAYLOAD", "true"),
+        ),
+        kalshi_cfbenchmarks_dedicated_connection=_parse_bool(
+            "KALSHI_CFBENCHMARKS_DEDICATED_CONNECTION",
+            _get(source, "KALSHI_CFBENCHMARKS_DEDICATED_CONNECTION", "true"),
+        ),
+        kalshi_cfbenchmarks_transport_stale_after_seconds=_parse_float(
+            "KALSHI_CFBENCHMARKS_TRANSPORT_STALE_AFTER_SECONDS",
+            _get(source, "KALSHI_CFBENCHMARKS_TRANSPORT_STALE_AFTER_SECONDS", "5"),
+        ),
+        kalshi_cfbenchmarks_persistence_stale_after_seconds=_parse_float(
+            "KALSHI_CFBENCHMARKS_PERSISTENCE_STALE_AFTER_SECONDS",
+            _get(source, "KALSHI_CFBENCHMARKS_PERSISTENCE_STALE_AFTER_SECONDS", "5"),
+        ),
+        kalshi_cfbenchmarks_source_age_warn_ms=_parse_int(
+            "KALSHI_CFBENCHMARKS_SOURCE_AGE_WARN_MS",
+            _get(source, "KALSHI_CFBENCHMARKS_SOURCE_AGE_WARN_MS", "45000"),
+        ),
+        kalshi_cfbenchmarks_kalshi_received_warn_ms=_parse_int(
+            "KALSHI_CFBENCHMARKS_KALSHI_RECEIVED_WARN_MS",
+            _get(source, "KALSHI_CFBENCHMARKS_KALSHI_RECEIVED_WARN_MS", "10000"),
+        ),
+        kalshi_cfbenchmarks_trade_fresh_ms=_parse_int(
+            "KALSHI_CFBENCHMARKS_TRADE_FRESH_MS",
+            _get(source, "KALSHI_CFBENCHMARKS_TRADE_FRESH_MS", "2000"),
         ),
     )
 

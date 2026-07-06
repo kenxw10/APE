@@ -10,8 +10,9 @@ It reads the live Railway observer API for operational status:
 - `/ready`
 - `/ws/status`
 - `/reference/brti/status`
+- `/reference/brti/series`
 
-Portfolio and position sections are scaffold placeholders until backend endpoints exist. The BRTI source status is read from the public Railway API and is not live trading data.
+Portfolio and position sections are scaffold placeholders until backend endpoints exist. The Reference Price CF/BRTI chart reads live `/reference/brti/series` data when available, polls once per second, shows only the rolling 15-minute window, and caps rendering at 16,000 points. If the backend series is unavailable, it falls back to clearly labeled scaffold data. This is not live trading data.
 
 ## Local Development
 
@@ -51,7 +52,7 @@ NEXT_PUBLIC_API_BASE_URL=https://ape-api-production.up.railway.app
 ```
 
 Do not add secrets to the dashboard. Do not add `DATABASE_URL`, Kalshi credentials, private keys, WebSocket settings, or BRTI env vars.
-Kalshi WebSocket and BRTI collection are Railway-worker-only; the dashboard only reads public Railway API status endpoints.
+Kalshi WebSocket and BRTI collection are Railway-worker-only; the dashboard only reads public Railway API status and series endpoints.
 
 ## Current Scaffold Limits
 

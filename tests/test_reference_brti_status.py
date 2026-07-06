@@ -238,7 +238,7 @@ def test_brti_status_uses_worker_enabled_state_when_api_disabled(tmp_path) -> No
 
 
 def test_brti_status_reports_stale_persisted_tick(tmp_path) -> None:
-    now = datetime(2026, 7, 5, 12, 0, 10, tzinfo=UTC)
+    now = datetime.now(UTC)
     old_tick_time = now - timedelta(seconds=10)
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_brti_stale.sqlite'}"
     config = load_config(
@@ -247,7 +247,7 @@ def test_brti_status_reports_stale_persisted_tick(tmp_path) -> None:
             "KALSHI_API_KEY_ID": "key-id",
             "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
             "KALSHI_CFBENCHMARKS_ENABLED": "true",
-            "KALSHI_CFBENCHMARKS_STALE_AFTER_SECONDS": "3",
+            "KALSHI_CFBENCHMARKS_PERSISTENCE_STALE_AFTER_SECONDS": "3",
         }
     )
     engine = create_engine_from_config(config)
@@ -264,6 +264,29 @@ def test_brti_status_reports_stale_persisted_tick(tmp_path) -> None:
                     parsed_value=Decimal("68000.12"),
                 )
             )
+            WorkerHeartbeatRepository(session).record_heartbeat(
+                WorkerHeartbeatInput(
+                    service_name="ape-worker",
+                    started_at=now - timedelta(minutes=1),
+                    heartbeat_at=now,
+                    app_mode="OBSERVER",
+                    is_safe=True,
+                    metadata={
+                        "reference": {
+                            "brti": {
+                                "enabled": True,
+                                "configured": True,
+                                "signer_ready": True,
+                                "connection_state": "subscribed",
+                                "last_message_at": _isoformat_z(now),
+                                "last_persisted_at": _isoformat_z(old_tick_time),
+                                "warnings": [],
+                                "blockers": [],
+                            }
+                        }
+                    },
+                )
+            )
             session.commit()
 
         app = create_app(config)
@@ -273,12 +296,14 @@ def test_brti_status_reports_stale_persisted_tick(tmp_path) -> None:
         assert response.status_code == 200
         body = response.json()
         assert body["stale"] is True
-        assert "brti_reference_stale" in body["warnings"]
+        assert body["transport_stale"] is False
+        assert body["persistence_stale"] is True
+        assert "brti_reference_persistence_stale" in body["warnings"]
     finally:
         engine.dispose()
 
 
-def test_brti_status_reports_stale_source_age(tmp_path) -> None:
+def test_brti_source_age_over_legacy_threshold_does_not_fail_observer_health(tmp_path) -> None:
     now = datetime.now(UTC)
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_brti_stale_source_age.sqlite'}"
     config = load_config(
@@ -287,8 +312,8 @@ def test_brti_status_reports_stale_source_age(tmp_path) -> None:
             "KALSHI_API_KEY_ID": "key-id",
             "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
             "KALSHI_CFBENCHMARKS_ENABLED": "true",
-            "KALSHI_CFBENCHMARKS_STALE_AFTER_SECONDS": "60",
             "KALSHI_CFBENCHMARKS_MAX_SOURCE_AGE_MS": "3000",
+            "KALSHI_CFBENCHMARKS_SOURCE_AGE_WARN_MS": "45000",
         }
     )
     engine = create_engine_from_config(config)
@@ -306,6 +331,29 @@ def test_brti_status_reports_stale_source_age(tmp_path) -> None:
                     source_age_ms=5000,
                 )
             )
+            WorkerHeartbeatRepository(session).record_heartbeat(
+                WorkerHeartbeatInput(
+                    service_name="ape-worker",
+                    started_at=now - timedelta(minutes=1),
+                    heartbeat_at=now,
+                    app_mode="OBSERVER",
+                    is_safe=True,
+                    metadata={
+                        "reference": {
+                            "brti": {
+                                "enabled": True,
+                                "configured": True,
+                                "signer_ready": True,
+                                "connection_state": "subscribed",
+                                "last_message_at": _isoformat_z(now),
+                                "last_persisted_at": _isoformat_z(now),
+                                "warnings": [],
+                                "blockers": [],
+                            }
+                        }
+                    },
+                )
+            )
             session.commit()
 
         app = create_app(config)
@@ -315,8 +363,234 @@ def test_brti_status_reports_stale_source_age(tmp_path) -> None:
         assert response.status_code == 200
         body = response.json()
         assert body["source_age_ms"] == 5000
-        assert body["stale"] is True
+        assert body["source_stale"] is False
+        assert body["transport_stale"] is False
+        assert body["persistence_stale"] is False
+        assert body["trade_ready_fresh"] is False
+        assert body["stale"] is False
+        assert "brti_reference_source_age_stale" not in body["warnings"]
+    finally:
+        engine.dispose()
+
+
+def test_brti_status_reports_source_age_warning_without_global_stale(tmp_path) -> None:
+    now = datetime.now(UTC)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_brti_source_age_warning.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_SOURCE_AGE_WARN_MS": "45000",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        with session_factory() as session:
+            ReferenceTicksRepository(session).insert_tick(
+                ReferenceTickInput(
+                    source=BRTI_SOURCE,
+                    received_at=now,
+                    source_ts=now - timedelta(seconds=50),
+                    kalshi_received_at=now,
+                    parse_status="valid",
+                    parsed_value=Decimal("68000.12"),
+                    source_age_ms=50000,
+                )
+            )
+            WorkerHeartbeatRepository(session).record_heartbeat(
+                WorkerHeartbeatInput(
+                    service_name="ape-worker",
+                    started_at=now - timedelta(minutes=1),
+                    heartbeat_at=now,
+                    app_mode="OBSERVER",
+                    is_safe=True,
+                    metadata={
+                        "reference": {
+                            "brti": {
+                                "enabled": True,
+                                "configured": True,
+                                "signer_ready": True,
+                                "connection_state": "subscribed",
+                                "last_message_at": _isoformat_z(now),
+                                "last_persisted_at": _isoformat_z(now),
+                                "warnings": [],
+                                "blockers": [],
+                            }
+                        }
+                    },
+                )
+            )
+            session.commit()
+
+        app = create_app(config)
+        with TestClient(app) as client:
+            response = client.get("/reference/brti/status")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["source_stale"] is True
+        assert body["stale"] is False
         assert "brti_reference_source_age_stale" in body["warnings"]
+    finally:
+        engine.dispose()
+
+
+def test_brti_status_reports_transport_stale_without_recent_backend_message(tmp_path) -> None:
+    now = datetime.now(UTC)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_brti_transport_stale.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_TRANSPORT_STALE_AFTER_SECONDS": "3",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        with session_factory() as session:
+            ReferenceTicksRepository(session).insert_tick(
+                ReferenceTickInput(
+                    source=BRTI_SOURCE,
+                    received_at=now,
+                    source_ts=now,
+                    kalshi_received_at=now,
+                    parse_status="valid",
+                    parsed_value=Decimal("68000.12"),
+                    source_age_ms=1000,
+                )
+            )
+            WorkerHeartbeatRepository(session).record_heartbeat(
+                WorkerHeartbeatInput(
+                    service_name="ape-worker",
+                    started_at=now - timedelta(minutes=1),
+                    heartbeat_at=now,
+                    app_mode="OBSERVER",
+                    is_safe=True,
+                    metadata={
+                        "reference": {
+                            "brti": {
+                                "enabled": True,
+                                "configured": True,
+                                "signer_ready": True,
+                                "connection_state": "subscribed",
+                                "last_message_at": _isoformat_z(now - timedelta(seconds=10)),
+                                "last_persisted_at": _isoformat_z(now),
+                                "warnings": [],
+                                "blockers": [],
+                            }
+                        }
+                    },
+                )
+            )
+            session.commit()
+
+        app = create_app(config)
+        with TestClient(app) as client:
+            response = client.get("/reference/brti/status")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["transport_stale"] is True
+        assert body["persistence_stale"] is False
+        assert body["stale"] is True
+        assert "brti_reference_transport_stale" in body["warnings"]
+    finally:
+        engine.dispose()
+
+
+def test_brti_series_returns_bounded_recent_points_without_raw_payload(tmp_path) -> None:
+    now = datetime.now(UTC)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_brti_series.sqlite'}"
+    config = load_config({"DATABASE_URL": database_url})
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        with session_factory() as session:
+            repository = ReferenceTicksRepository(session)
+            repository.insert_tick(
+                ReferenceTickInput(
+                    source=BRTI_SOURCE,
+                    received_at=now - timedelta(minutes=20),
+                    source_ts=now - timedelta(minutes=20),
+                    kalshi_received_at=now - timedelta(minutes=20),
+                    parse_status="valid",
+                    parsed_value=Decimal("67000.00"),
+                    raw_payload_hash="old-hash",
+                    raw_payload={"secret": "not returned"},
+                )
+            )
+            repository.insert_tick(
+                ReferenceTickInput(
+                    source=BRTI_SOURCE,
+                    received_at=now - timedelta(seconds=3),
+                    source_ts=now - timedelta(seconds=4),
+                    kalshi_received_at=now - timedelta(seconds=3),
+                    parse_status="valid",
+                    parsed_value=Decimal("68000.12"),
+                    trailing_60s_avg=Decimal("67999.50"),
+                    last_60s_windowed_average_15min=Decimal("68001.25"),
+                    final_minute_average_status="present",
+                    source_age_ms=1000,
+                    sequence_number=1,
+                    raw_payload_hash="first-hash",
+                    raw_payload={"secret": "not returned"},
+                )
+            )
+            repository.insert_tick(
+                ReferenceTickInput(
+                    source=BRTI_SOURCE,
+                    received_at=now - timedelta(seconds=1),
+                    source_ts=now - timedelta(seconds=2),
+                    kalshi_received_at=now - timedelta(seconds=1),
+                    parse_status="valid",
+                    parsed_value=Decimal("68001.12"),
+                    trailing_60s_avg=Decimal("68000.50"),
+                    last_60s_windowed_average_15min=Decimal("68002.25"),
+                    final_minute_average_status="present",
+                    source_age_ms=1000,
+                    sequence_number=2,
+                    raw_payload_hash="latest-hash",
+                    raw_payload={"secret": "not returned"},
+                )
+            )
+            session.commit()
+
+        app = create_app(config)
+        with TestClient(app) as client:
+            response = client.get(
+                "/reference/brti/series?window_seconds=999&max_points=99999"
+            )
+            latest_only_response = client.get(
+                "/reference/brti/series?window_seconds=900&max_points=1&include_final_minute=true"
+            )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["source"] == BRTI_SOURCE
+        assert body["window_seconds"] == 900
+        assert body["max_points"] == 16000
+        assert body["point_count"] == 2
+        assert [point["raw_payload_hash"] for point in body["points"]] == [
+            "first-hash",
+            "latest-hash",
+        ]
+        assert body["points"][0]["last_60s_windowed_average_15min"] is None
+        assert "raw_payload" not in body["points"][0]
+
+        assert latest_only_response.status_code == 200
+        latest_only = latest_only_response.json()
+        assert latest_only["point_count"] == 1
+        assert latest_only["points"][0]["raw_payload_hash"] == "latest-hash"
+        assert latest_only["points"][0]["last_60s_windowed_average_15min"] == "68002.25000000"
     finally:
         engine.dispose()
 

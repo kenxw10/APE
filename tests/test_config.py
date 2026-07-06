@@ -36,6 +36,12 @@ def test_default_config_is_observer_only() -> None:
     assert config.kalshi_cfbenchmarks_max_source_age_ms == 3000
     assert config.kalshi_cfbenchmarks_subscribe_on_worker is True
     assert config.kalshi_cfbenchmarks_persist_raw_payload is True
+    assert config.kalshi_cfbenchmarks_dedicated_connection is True
+    assert config.kalshi_cfbenchmarks_transport_stale_after_seconds == 5
+    assert config.kalshi_cfbenchmarks_persistence_stale_after_seconds == 5
+    assert config.kalshi_cfbenchmarks_source_age_warn_ms == 45000
+    assert config.kalshi_cfbenchmarks_kalshi_received_warn_ms == 10000
+    assert config.kalshi_cfbenchmarks_trade_fresh_ms == 2000
 
 
 def test_kalshi_credentials_are_not_required() -> None:
@@ -102,6 +108,12 @@ def test_kalshi_cfbenchmarks_env_vars_parse_safely() -> None:
             "KALSHI_CFBENCHMARKS_MAX_SOURCE_AGE_MS": "4000",
             "KALSHI_CFBENCHMARKS_SUBSCRIBE_ON_WORKER": "false",
             "KALSHI_CFBENCHMARKS_PERSIST_RAW_PAYLOAD": "false",
+            "KALSHI_CFBENCHMARKS_DEDICATED_CONNECTION": "false",
+            "KALSHI_CFBENCHMARKS_TRANSPORT_STALE_AFTER_SECONDS": "6",
+            "KALSHI_CFBENCHMARKS_PERSISTENCE_STALE_AFTER_SECONDS": "7",
+            "KALSHI_CFBENCHMARKS_SOURCE_AGE_WARN_MS": "45001",
+            "KALSHI_CFBENCHMARKS_KALSHI_RECEIVED_WARN_MS": "10001",
+            "KALSHI_CFBENCHMARKS_TRADE_FRESH_MS": "2001",
         }
     )
 
@@ -111,6 +123,12 @@ def test_kalshi_cfbenchmarks_env_vars_parse_safely() -> None:
     assert config.kalshi_cfbenchmarks_max_source_age_ms == 4000
     assert config.kalshi_cfbenchmarks_subscribe_on_worker is False
     assert config.kalshi_cfbenchmarks_persist_raw_payload is False
+    assert config.kalshi_cfbenchmarks_dedicated_connection is False
+    assert config.kalshi_cfbenchmarks_transport_stale_after_seconds == 6
+    assert config.kalshi_cfbenchmarks_persistence_stale_after_seconds == 7
+    assert config.kalshi_cfbenchmarks_source_age_warn_ms == 45001
+    assert config.kalshi_cfbenchmarks_kalshi_received_warn_ms == 10001
+    assert config.kalshi_cfbenchmarks_trade_fresh_ms == 2001
 
 
 def test_invalid_kalshi_cfbenchmarks_index_ids_raise_clear_config_error() -> None:

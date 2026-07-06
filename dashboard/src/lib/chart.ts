@@ -1,6 +1,7 @@
 import { EASTERN_TIME_ZONE } from "./time";
 
-export const MAX_REFERENCE_CHART_POINTS = 600;
+export const MAX_REFERENCE_CHART_POINTS = 16_000;
+export const REFERENCE_CHART_WINDOW_MS = 15 * 60 * 1000;
 
 export const CHART_PLOT = {
   left: 7,

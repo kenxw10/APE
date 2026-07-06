@@ -185,6 +185,7 @@ def test_collector_subscribes_to_brti_with_market_channels_and_persists_tick(tmp
             "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
             "KALSHI_WS_ENABLED": "true",
             "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_DEDICATED_CONNECTION": "false",
             "KALSHI_WS_RECONNECT_SECONDS": "1",
         }
     )
@@ -249,6 +250,234 @@ def test_collector_subscribes_to_brti_with_market_channels_and_persists_tick(tmp
         engine.dispose()
 
 
+def test_collector_uses_dedicated_brti_connection_by_default(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_dedicated.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    market_websocket = FakeWebSocket(
+        [
+            {
+                "type": "orderbook_snapshot",
+                "sid": 1,
+                "seq": 1,
+                "msg": {
+                    "market_ticker": "KXBTC15M-TEST",
+                    "yes_dollars_fp": [["0.6000", "10.00"]],
+                    "no_dollars_fp": [["0.6500", "8.00"]],
+                    "ts_ms": 1780000000000,
+                },
+            }
+        ]
+    )
+    brti_websocket = FakeWebSocket([_brti_payload(sid=1)])
+    websocket_sequence = [market_websocket, brti_websocket]
+
+    async def websocket_factory(*_args):
+        return websocket_sequence.pop(0)
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            latest_book = OrderbookRepository(session).get_latest_snapshot("KXBTC15M-TEST")
+            latest_tick = ReferenceTicksRepository(session).get_latest_tick(BRTI_SOURCE)
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert latest_book is not None
+            assert latest_tick is not None
+            assert latest_tick.parse_status == "valid"
+            assert heartbeat is not None
+            ws_metadata = heartbeat.metadata_["ws"]
+            assert ws_metadata["subscribed_channels"] == ["orderbook_delta", "ticker", "trade"]
+            brti_metadata = heartbeat.metadata_["reference"]["brti"]
+            assert brti_metadata["subscribed_channels"] == ["cfbenchmarks_value"]
+            assert brti_metadata["subscription_request_id"] == 1
+            assert brti_metadata["connection_state"] == "subscribed"
+
+        assert market_websocket.sent == [
+            {
+                "id": 1,
+                "cmd": "subscribe",
+                "params": {
+                    "channels": ["orderbook_delta"],
+                    "market_ticker": "KXBTC15M-TEST",
+                    "use_yes_price": True,
+                },
+            },
+            {
+                "id": 2,
+                "cmd": "subscribe",
+                "params": {
+                    "channels": ["ticker", "trade"],
+                    "market_ticker": "KXBTC15M-TEST",
+                },
+            },
+        ]
+        assert brti_websocket.sent == [
+            {
+                "id": 1,
+                "cmd": "subscribe",
+                "params": {
+                    "channels": ["cfbenchmarks_value"],
+                    "index_ids": ["BRTI"],
+                },
+            }
+        ]
+        assert "market_ticker" not in brti_websocket.sent[0]["params"]
+    finally:
+        engine.dispose()
+
+
+def test_collector_dedicated_brti_failure_does_not_stop_market_ws(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_failure_market_ok.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    market_websocket = FakeWebSocket(
+        [
+            {
+                "type": "orderbook_snapshot",
+                "sid": 1,
+                "seq": 1,
+                "msg": {
+                    "market_ticker": "KXBTC15M-TEST",
+                    "yes_dollars_fp": [["0.6000", "10.00"]],
+                    "no_dollars_fp": [["0.6500", "8.00"]],
+                },
+            }
+        ]
+    )
+    brti_websocket = FakeWebSocket(
+        [
+            {
+                "type": "error",
+                "id": 1,
+                "msg": {
+                    "code": 403,
+                    "msg": "missing entitlement for BRTI",
+                },
+            }
+        ]
+    )
+    websocket_sequence = [market_websocket, brti_websocket]
+
+    async def websocket_factory(*_args):
+        return websocket_sequence.pop(0)
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            latest_book = OrderbookRepository(session).get_latest_snapshot("KXBTC15M-TEST")
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert latest_book is not None
+            assert heartbeat is not None
+            assert heartbeat.metadata_["ws"]["connection_state"] == "subscribed"
+            brti_metadata = heartbeat.metadata_["reference"]["brti"]
+            assert brti_metadata["connection_state"] == "error"
+            assert (
+                brti_metadata["last_error_type"]
+                == "kalshi_cfbenchmarks_subscription_error"
+            )
+            assert "missing entitlement" in brti_metadata["last_error_message"]
+    finally:
+        engine.dispose()
+
+
+def test_collector_market_roll_does_not_stop_dedicated_brti(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_market_roll_brti_ok.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    market_websocket = FakeWebSocket([])
+    brti_websocket = FakeWebSocket([_brti_payload(sid=1)])
+    websocket_sequence = [market_websocket, brti_websocket]
+
+    async def websocket_factory(*_args):
+        return websocket_sequence.pop(0)
+
+    def resolver(**_kwargs) -> ResolverResult:
+        return _resolved_market(close_time=NOW)
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=resolver,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            latest_tick = ReferenceTicksRepository(session).get_latest_tick(BRTI_SOURCE)
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert latest_tick is not None
+            assert latest_tick.parse_status == "valid"
+            assert heartbeat is not None
+            assert heartbeat.metadata_["ws"]["connection_state"] == "market_roll_reresolve"
+            assert heartbeat.metadata_["reference"]["brti"]["connection_state"] == "subscribed"
+            assert market_websocket.closed is True
+    finally:
+        engine.dispose()
+
+
 def test_collector_matches_brti_subscribe_error_by_request_id_with_market_channels(
     tmp_path,
 ) -> None:
@@ -260,6 +489,7 @@ def test_collector_matches_brti_subscribe_error_by_request_id_with_market_channe
             "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
             "KALSHI_WS_ENABLED": "true",
             "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_DEDICATED_CONNECTION": "false",
             "KALSHI_WS_RECONNECT_SECONDS": "1",
         }
     )
@@ -324,6 +554,7 @@ def test_collector_does_not_consume_sidless_market_error_as_brti(tmp_path) -> No
             "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
             "KALSHI_WS_ENABLED": "true",
             "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_DEDICATED_CONNECTION": "false",
             "KALSHI_WS_RECONNECT_SECONDS": "1",
         }
     )

@@ -27,7 +27,7 @@ After PR 5 merges, Kalshi credentials may be added to Railway API and worker env
 
 After PR 6 merges, Kalshi WebSocket intake is still disabled by default. Enable it only on the Railway worker service with `KALSHI_WS_ENABLED=true` after API/worker safety and credentials are validated.
 
-After PR 7 merges, BRTI / CF Benchmarks intake is still disabled by default. Enable it only on the Railway worker service with `KALSHI_CFBENCHMARKS_ENABLED=true` and `KALSHI_CFBENCHMARKS_INDEX_IDS=BRTI`. Do not add BRTI env vars or Kalshi credentials to Vercel.
+After PR 7a merges, BRTI / CF Benchmarks intake is still disabled by default. Enable it only on the Railway worker service with `KALSHI_CFBENCHMARKS_ENABLED=true` and `KALSHI_CFBENCHMARKS_INDEX_IDS=BRTI`. BRTI uses a dedicated worker-owned WebSocket connection by default. Do not add BRTI env vars or Kalshi credentials to Vercel.
 
 ## Create Railway Project
 
@@ -66,6 +66,7 @@ Useful API endpoints:
 /ws/status
 /reference/brti/status
 /reference/brti/latest
+/reference/brti/series
 ```
 
 `/ready` should return `ready` only when safety is safe and database connectivity works.
@@ -91,7 +92,7 @@ The worker is an always-on observer process. Do not configure a Railway cron job
 
 When `KALSHI_WS_ENABLED=false`, the worker records heartbeat-only diagnostics. When `KALSHI_WS_ENABLED=true`, the worker owns the observer-only Kalshi WebSocket collector for the active BTC15 market.
 
-When `KALSHI_CFBENCHMARKS_ENABLED=true`, the worker also subscribes to Kalshi's authenticated `cfbenchmarks_value` channel with `index_ids=["BRTI"]` and stores observer-only reference ticks in `reference_ticks`. This does not add strategy, paper trading, live trading, orders, private channels, or execution.
+When `KALSHI_CFBENCHMARKS_ENABLED=true`, the worker also subscribes to Kalshi's authenticated `cfbenchmarks_value` channel with `index_ids=["BRTI"]` and stores observer-only reference ticks in `reference_ticks`. By default this runs on a dedicated BRTI WebSocket connection so BTC15 market rollover/resubscribe does not disconnect the reference feed. This does not add strategy, paper trading, live trading, orders, private channels, or execution.
 
 For `/ws/status`, `last_error_type` and `last_error_message` describe a current unresolved worker error. A successful current orderbook or trade database write clears old recovered errors so stale startup failures do not keep the status page red.
 
@@ -194,7 +195,7 @@ Expected behavior:
   `Kalshi WS` and `WS Channels`; direct API `/ws/status` success is also an acceptable
   validation signal.
 
-## BRTI Reference Checkpoint After PR 7
+## BRTI Reference Checkpoint After PR 7a
 
 Only after PR 7 is merged and PR 6d WebSocket validation is healthy, add these to the Railway worker service:
 
@@ -205,6 +206,12 @@ KALSHI_CFBENCHMARKS_STALE_AFTER_SECONDS=3
 KALSHI_CFBENCHMARKS_MAX_SOURCE_AGE_MS=3000
 KALSHI_CFBENCHMARKS_SUBSCRIBE_ON_WORKER=true
 KALSHI_CFBENCHMARKS_PERSIST_RAW_PAYLOAD=true
+KALSHI_CFBENCHMARKS_DEDICATED_CONNECTION=true
+KALSHI_CFBENCHMARKS_TRANSPORT_STALE_AFTER_SECONDS=5
+KALSHI_CFBENCHMARKS_PERSISTENCE_STALE_AFTER_SECONDS=5
+KALSHI_CFBENCHMARKS_SOURCE_AGE_WARN_MS=45000
+KALSHI_CFBENCHMARKS_KALSHI_RECEIVED_WARN_MS=10000
+KALSHI_CFBENCHMARKS_TRADE_FRESH_MS=2000
 ```
 
 Keep:
@@ -223,6 +230,7 @@ After enabling BRTI on the worker, redeploy the worker and validate:
 ```powershell
 Invoke-RestMethod https://ape-api-production.up.railway.app/reference/brti/status
 Invoke-RestMethod https://ape-api-production.up.railway.app/reference/brti/latest
+Invoke-RestMethod "https://ape-api-production.up.railway.app/reference/brti/series?window_seconds=900&max_points=16000"
 Invoke-RestMethod https://ape-api-production.up.railway.app/ws/status
 Invoke-RestMethod https://ape-api-production.up.railway.app/health
 Invoke-RestMethod https://ape-api-production.up.railway.app/safety
@@ -233,11 +241,13 @@ Invoke-RestMethod https://ape-api-production.up.railway.app/ready
 Expected behavior:
 
 - Worker logs show the BRTI subscription without secrets.
-- `/reference/brti/status` shows `enabled=true`, `index_ids=["BRTI"]`, and either `subscribed` with recent data or a safe diagnostic state.
+- `/reference/brti/status` shows `enabled=true`, `index_ids=["BRTI"]`, `connection_state=subscribed`, recent transport/persistence timestamps, no blockers, and null `last_error_type` / `last_error_message`.
+- Source age may be lagging without making observer status globally stale. Read `source_stale`, `kalshi_received_stale`, and `trade_ready_fresh` separately from `transport_stale` and `persistence_stale`.
 - `/reference/brti/latest` returns the latest safe reference tick shape without raw payloads or credentials.
+- `/reference/brti/series` returns live BRTI points sorted by `received_at`, capped at a 900-second rolling window and 16,000 points, without raw payloads.
 - `reference_ticks` rows are written when Kalshi emits `cfbenchmarks_value` events.
-- BRTI final-minute averages are stored when present, but no strategy or position-management logic uses them in PR 7.
-- Dashboard remains read-only and may show BRTI/source status from the public API only.
+- BRTI final-minute averages are stored when present, but no strategy or position-management logic uses them in PR 7a.
+- Dashboard remains read-only and may show live BRTI status and the rolling 15-minute CF/BRTI chart from the public API only.
 
 ## Explicitly Not Included
 
