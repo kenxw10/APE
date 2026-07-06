@@ -11,6 +11,10 @@ from ape import __version__
 from ape.config import AppConfig, load_config
 from ape.db.session import check_database_connection, create_engine_from_config
 from ape.kalshi.diagnostics import build_kalshi_config_diagnostic
+from ape.kalshi.reference_status import (
+    build_brti_reference_latest,
+    build_brti_reference_status,
+)
 from ape.kalshi.resolver import resolve_active_btc15_market
 from ape.kalshi.ws_status import build_kalshi_ws_status
 from ape.models.health import (
@@ -26,6 +30,12 @@ from ape.models.kalshi import (
     active_market_response,
     kalshi_status_response,
     kalshi_ws_status_response,
+)
+from ape.models.reference import (
+    BrtiReferenceLatestResponse,
+    BrtiReferenceStatusResponse,
+    brti_reference_latest_response,
+    brti_reference_status_response,
 )
 from ape.safety import SafetyAssessment, assert_startup_safe, assess_startup_safety
 
@@ -84,6 +94,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.get("/ws/status", response_model=KalshiWsStatusResponse)
     def websocket_status() -> KalshiWsStatusResponse:
         return kalshi_ws_status_response(build_kalshi_ws_status(settings))
+
+    @app.get("/reference/brti/status", response_model=BrtiReferenceStatusResponse)
+    def brti_reference_status() -> BrtiReferenceStatusResponse:
+        return brti_reference_status_response(build_brti_reference_status(settings))
+
+    @app.get("/reference/brti/latest", response_model=BrtiReferenceLatestResponse)
+    def brti_reference_latest() -> BrtiReferenceLatestResponse:
+        return brti_reference_latest_response(build_brti_reference_latest(settings))
 
     @app.get("/ready", response_model=ReadinessResponse)
     def readiness() -> ReadinessResponse:

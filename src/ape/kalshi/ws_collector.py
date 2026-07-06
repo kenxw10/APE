@@ -17,17 +17,25 @@ from ape.config import AppConfig
 from ape.kalshi.client import KalshiRestClient
 from ape.kalshi.diagnostics import build_kalshi_config_diagnostic
 from ape.kalshi.errors import KalshiError
+from ape.kalshi.reference_messages import (
+    BRTI_SOURCE,
+    ParsedReferenceMessage,
+    is_cfbenchmarks_value_payload,
+    parse_cfbenchmarks_value_message,
+)
 from ape.kalshi.resolver import ResolverState, resolve_active_btc15_market
 from ape.kalshi.ws_client import (
+    build_cfbenchmarks_subscribe_message,
     build_subscribe_message,
     connect_websocket,
     create_websocket_auth_headers,
 )
 from ape.kalshi.ws_messages import ParsedWsMessage, parse_ws_payload
 from ape.kalshi.ws_state import OrderbookState
-from ape.repositories.inputs import WorkerHeartbeatInput
+from ape.repositories.inputs import ReferenceTickInput, WorkerHeartbeatInput
 from ape.repositories.orderbook import OrderbookRepository
 from ape.repositories.public_trades import PublicTradesRepository
+from ape.repositories.reference_ticks import ReferenceTicksRepository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import SafetyAssessment
 
@@ -88,6 +96,56 @@ class KalshiWsCollectorStatus:
         }
 
 
+@dataclass
+class BrtiReferenceStatus:
+    enabled: bool
+    configured: bool = False
+    signer_ready: bool = False
+    source: str = BRTI_SOURCE
+    index_ids: list[str] = field(default_factory=list)
+    subscription_id: int | None = None
+    connection_state: str = "disabled"
+    last_message_at: datetime | None = None
+    last_persisted_at: datetime | None = None
+    latest_source_ts: datetime | None = None
+    latest_value: str | None = None
+    latest_trailing_60s_avg: str | None = None
+    latest_trailing_60s_window_size: int | None = None
+    latest_final_minute_average: str | None = None
+    final_minute_average_status: str | None = None
+    source_age_ms: int | None = None
+    subscription_request_id: int | None = None
+    last_error_type: str | None = None
+    last_error_message: str | None = None
+    warnings: list[str] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
+
+    def as_metadata(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "configured": self.configured,
+            "signer_ready": self.signer_ready,
+            "source": self.source,
+            "index_ids": self.index_ids,
+            "subscription_id": self.subscription_id,
+            "connection_state": self.connection_state,
+            "last_message_at": _isoformat_or_none(self.last_message_at),
+            "last_persisted_at": _isoformat_or_none(self.last_persisted_at),
+            "latest_source_ts": _isoformat_or_none(self.latest_source_ts),
+            "latest_value": self.latest_value,
+            "latest_trailing_60s_avg": self.latest_trailing_60s_avg,
+            "latest_trailing_60s_window_size": self.latest_trailing_60s_window_size,
+            "latest_final_minute_average": self.latest_final_minute_average,
+            "final_minute_average_status": self.final_minute_average_status,
+            "source_age_ms": self.source_age_ms,
+            "subscription_request_id": self.subscription_request_id,
+            "last_error_type": self.last_error_type,
+            "last_error_message": self.last_error_message,
+            "warnings": self.warnings,
+            "blockers": self.blockers,
+        }
+
+
 class KalshiWsCollector:
     def __init__(
         self,
@@ -108,6 +166,10 @@ class KalshiWsCollector:
         self.resolver = resolver
         self.now = now or (lambda: datetime.now(UTC))
         self.status = KalshiWsCollectorStatus(enabled=config.kalshi_ws_enabled)
+        self.brti_status = BrtiReferenceStatus(
+            enabled=config.kalshi_cfbenchmarks_enabled,
+            index_ids=list(config.kalshi_cfbenchmarks_index_ids),
+        )
         self._last_heartbeat_at: datetime | None = None
         self._force_next_heartbeat = False
         self._forced_diagnostic_signatures: set[str] = set()
@@ -118,9 +180,10 @@ class KalshiWsCollector:
         stop_event: threading.Event,
         max_cycles: int | None = None,
     ) -> None:
-        if not self.config.kalshi_ws_enabled:
+        if not self._collector_enabled():
             self.status.connection_state = "disabled"
             self.status.warnings = ["kalshi_ws_disabled"]
+            self.brti_status.connection_state = "disabled"
             self.record_heartbeat()
             return
 
@@ -144,55 +207,90 @@ class KalshiWsCollector:
         self.status.signer_ready = diagnostic.signer_ready
         self.status.blockers = []
         self.status.warnings = []
+        self.brti_status.configured = diagnostic.configured
+        self.brti_status.signer_ready = diagnostic.signer_ready
+        self.brti_status.blockers = []
+        self.brti_status.warnings = []
+
+        market_ws_enabled = self.config.kalshi_ws_enabled
+        brti_enabled = self._reference_collection_enabled()
 
         if not diagnostic.signer_ready:
-            self.status.connection_state = "not_configured"
-            self.status.blockers = ["kalshi_ws_credentials_not_configured_or_not_parseable"]
+            if market_ws_enabled:
+                self.status.connection_state = "not_configured"
+                self.status.blockers = ["kalshi_ws_credentials_not_configured_or_not_parseable"]
+            if brti_enabled:
+                self.brti_status.connection_state = "not_configured"
+                self.brti_status.blockers = [
+                    "kalshi_cfbenchmarks_credentials_not_configured_or_not_parseable"
+                ]
             self.record_heartbeat()
             return
 
         if self.session_factory is None:
-            self.status.connection_state = "not_configured"
-            self.status.blockers = ["database_not_configured_for_ws_persistence"]
+            if market_ws_enabled:
+                self.status.connection_state = "not_configured"
+                self.status.blockers = ["database_not_configured_for_ws_persistence"]
+            if brti_enabled:
+                self.brti_status.connection_state = "not_configured"
+                self.brti_status.blockers = [
+                    "database_not_configured_for_reference_persistence"
+                ]
             self.record_heartbeat()
             return
 
-        try:
-            with self.session_factory() as session:
-                resolver_result = self.resolver(
-                    config=self.config,
-                    client=_rest_client(self.config),
-                    session=session,
-                    now=self.now(),
-                )
-        except KalshiError as exc:
-            self._set_error("resolver_error", exc)
-            self.record_heartbeat()
-            return
-        except SQLAlchemyError as exc:
-            self._set_error("resolver_database_error", exc)
-            self.status.blockers = ["market_resolver_database_error"]
-            self.record_heartbeat()
-            return
-
-        if resolver_result.state is not ResolverState.RESOLVED_OBSERVER_ONLY:
-            self.status.connection_state = resolver_result.state.value
-            self.status.blockers = resolver_result.blockers or [resolver_result.state.value]
-            self.status.warnings = resolver_result.warnings
-            self.status.active_market_ticker = (
-                resolver_result.market.market_ticker if resolver_result.market else None
-            )
-            self.record_heartbeat()
-            return
-
-        if resolver_result.market is None:
-            self.status.connection_state = "no_active_market"
-            self.status.blockers = ["no_active_market"]
-            self.record_heartbeat()
-            return
-
-        market_ticker = resolver_result.market.market_ticker
-        self.status.active_market_ticker = market_ticker
+        market_ticker: str | None = None
+        market_close_time: datetime | None = None
+        market_subscription_enabled = False
+        if market_ws_enabled:
+            try:
+                with self.session_factory() as session:
+                    resolver_result = self.resolver(
+                        config=self.config,
+                        client=_rest_client(self.config),
+                        session=session,
+                        now=self.now(),
+                    )
+            except KalshiError as exc:
+                self._set_error("resolver_error", exc)
+                self.record_heartbeat()
+                if not brti_enabled:
+                    return
+            except SQLAlchemyError as exc:
+                self._set_error("resolver_database_error", exc)
+                self.status.blockers = ["market_resolver_database_error"]
+                self.record_heartbeat()
+                if not brti_enabled:
+                    return
+            else:
+                if resolver_result.state is not ResolverState.RESOLVED_OBSERVER_ONLY:
+                    self.status.connection_state = resolver_result.state.value
+                    self.status.blockers = resolver_result.blockers or [
+                        resolver_result.state.value
+                    ]
+                    self.status.warnings = resolver_result.warnings
+                    self.status.active_market_ticker = (
+                        resolver_result.market.market_ticker
+                        if resolver_result.market
+                        else None
+                    )
+                    self.record_heartbeat()
+                    if not brti_enabled:
+                        return
+                elif resolver_result.market is None:
+                    self.status.connection_state = "no_active_market"
+                    self.status.blockers = ["no_active_market"]
+                    self.record_heartbeat()
+                    if not brti_enabled:
+                        return
+                else:
+                    market_ticker = resolver_result.market.market_ticker
+                    market_close_time = resolver_result.market.close_time
+                    self.status.active_market_ticker = market_ticker
+                    market_subscription_enabled = True
+        else:
+            self.status.connection_state = "disabled"
+            self.status.warnings = ["kalshi_ws_disabled"]
 
         try:
             headers = create_websocket_auth_headers(
@@ -207,18 +305,24 @@ class KalshiWsCollector:
                 self.config.kalshi_ws_heartbeat_timeout_seconds,
             )
             try:
-                self.status.connection_state = "connected"
+                if market_subscription_enabled:
+                    self.status.connection_state = "connected"
+                if brti_enabled:
+                    self.brti_status.connection_state = "connected"
                 self.status.last_connected_at = self.now()
                 self.record_heartbeat()
 
                 await self._subscribe(websocket, market_ticker)
-                self.status.connection_state = "subscribed"
+                if market_subscription_enabled:
+                    self.status.connection_state = "subscribed"
+                if brti_enabled:
+                    self.brti_status.connection_state = "subscribed"
                 self.record_heartbeat()
 
                 await self._read_messages(
                     websocket,
                     market_ticker,
-                    resolver_result.market.close_time,
+                    market_close_time,
                     stop_event,
                 )
                 self.status.reconnect_count = 0
@@ -226,15 +330,18 @@ class KalshiWsCollector:
                 await _close_websocket(websocket)
         except Exception as exc:
             self.status.reconnect_count += 1
-            self._set_error(exc.__class__.__name__, exc)
+            if market_ws_enabled:
+                self._set_error(exc.__class__.__name__, exc)
+            if brti_enabled:
+                self._set_reference_error(exc.__class__.__name__, exc)
             self.record_heartbeat()
 
-    async def _subscribe(self, websocket: Any, market_ticker: str) -> None:
+    async def _subscribe(self, websocket: Any, market_ticker: str | None) -> None:
         request_id = 1
         subscribed_channels: list[str] = []
         subscription_ids: dict[str, int] = {}
 
-        if self.config.kalshi_ws_subscribe_orderbook:
+        if market_ticker is not None and self.config.kalshi_ws_subscribe_orderbook:
             message = build_subscribe_message(
                 request_id=request_id,
                 channels=["orderbook_delta"],
@@ -247,9 +354,9 @@ class KalshiWsCollector:
             request_id += 1
 
         secondary_channels: list[str] = []
-        if self.config.kalshi_ws_subscribe_ticker:
+        if market_ticker is not None and self.config.kalshi_ws_subscribe_ticker:
             secondary_channels.append("ticker")
-        if self.config.kalshi_ws_subscribe_trades:
+        if market_ticker is not None and self.config.kalshi_ws_subscribe_trades:
             secondary_channels.append("trade")
 
         if secondary_channels:
@@ -262,6 +369,15 @@ class KalshiWsCollector:
             subscribed_channels.extend(secondary_channels)
             for channel in secondary_channels:
                 subscription_ids[channel] = request_id
+            request_id += 1
+
+        if self._reference_collection_enabled():
+            message = build_cfbenchmarks_subscribe_message(
+                request_id=request_id,
+                index_ids=list(self.config.kalshi_cfbenchmarks_index_ids),
+            )
+            await websocket.send(json.dumps(message))
+            self.brti_status.subscription_request_id = request_id
 
         self.status.subscribed_channels = subscribed_channels
         self.status.subscription_ids = subscription_ids
@@ -269,11 +385,11 @@ class KalshiWsCollector:
     async def _read_messages(
         self,
         websocket: Any,
-        market_ticker: str,
+        market_ticker: str | None,
         market_close_time: datetime | None,
         stop_event: threading.Event,
     ) -> None:
-        orderbook = OrderbookState(market_ticker=market_ticker)
+        orderbook = OrderbookState(market_ticker=market_ticker or "")
         message_iterator = websocket.__aiter__()
 
         while not stop_event.is_set():
@@ -303,6 +419,30 @@ class KalshiWsCollector:
                 self.record_heartbeat(force=False)
                 continue
 
+            if is_cfbenchmarks_value_payload(parsed_json):
+                reference_message = parse_cfbenchmarks_value_message(
+                    parsed_json,
+                    received_at=received_at,
+                    allowed_index_ids=self.config.kalshi_cfbenchmarks_index_ids,
+                    persist_raw_payload=self.config.kalshi_cfbenchmarks_persist_raw_payload,
+                )
+                self.brti_status.last_message_at = received_at
+                self._handle_reference_message(reference_message)
+                self.record_heartbeat(force=self._consume_force_next_heartbeat())
+                continue
+
+            if self._handle_reference_control_payload(
+                parsed_json,
+                received_at=received_at,
+                market_ticker=market_ticker,
+            ):
+                self.record_heartbeat(force=self._consume_force_next_heartbeat())
+                continue
+
+            if market_ticker is None:
+                self.record_heartbeat(force=False)
+                continue
+
             message = parse_ws_payload(
                 parsed_json,
                 target_market_ticker=market_ticker,
@@ -316,6 +456,25 @@ class KalshiWsCollector:
                 self.record_heartbeat()
                 return
             self.record_heartbeat(force=self._consume_force_next_heartbeat())
+
+    def _handle_reference_message(self, message: ParsedReferenceMessage) -> None:
+        if message.kind == "ignored":
+            return
+
+        if message.kind == "invalid" or message.tick is None:
+            self._add_reference_warning(message.reason or "invalid_cfbenchmarks_message")
+            return
+
+        self._set_reference_subscription_id(message.tick.subscription_id)
+        if message.warning:
+            self._add_reference_warning(message.warning)
+        if self._persist_reference_tick(message.tick):
+            self._clear_reference_warnings(
+                "brti_persistence_failed",
+                "brti_duplicate_or_out_of_order_source_ts",
+            )
+            self._clear_reference_error()
+            self._force_next_heartbeat = True
 
     def _handle_message(
         self,
@@ -397,12 +556,63 @@ class KalshiWsCollector:
                 self._add_warning("orderbook_reset_after_buffer_overflow")
                 self._add_warning(message.reason)
                 return "orderbook_reset_after_buffer_overflow"
+            if message.reason == "kalshi_websocket_error":
+                self._force_next_heartbeat = True
             if self._record_parse_diagnostic(message):
                 self._force_next_heartbeat = True
             self._add_warning(message.reason or "invalid_websocket_message")
             return None
 
         return None
+
+    def _handle_reference_control_payload(
+        self,
+        payload: Any,
+        *,
+        received_at: datetime,
+        market_ticker: str | None,
+    ) -> bool:
+        if not self._reference_collection_enabled() or not isinstance(payload, dict):
+            return False
+
+        message_type = _safe_text(payload.get("type"))
+        if message_type not in {"subscribed", "ok", "unsubscribed", "error"}:
+            return False
+
+        sid = _int_or_none(payload.get("sid"))
+        request_id = _int_or_none(payload.get("id"))
+        msg_sid = _message_sid(payload)
+        matched = False
+        request_subscription_id = self.brti_status.subscription_request_id
+        if request_subscription_id is not None and request_id == request_subscription_id:
+            matched = True
+        subscription_id = self.brti_status.subscription_id
+        if subscription_id is not None and sid == subscription_id:
+            matched = True
+        if subscription_id is not None and msg_sid == subscription_id:
+            matched = True
+        if not matched and market_ticker is None and request_id is None and sid is None:
+            matched = True
+        if not matched:
+            return False
+
+        if msg_sid is not None:
+            self.brti_status.subscription_id = msg_sid
+        elif sid is not None and request_id is None:
+            self.brti_status.subscription_id = sid
+
+        self.brti_status.last_message_at = received_at
+        if message_type != "error":
+            return True
+
+        self._set_reference_error(
+            "kalshi_cfbenchmarks_subscription_error",
+            RuntimeError(_websocket_error_message(payload)),
+        )
+        self._add_reference_warning("kalshi_cfbenchmarks_subscription_error")
+        self._add_reference_blocker("kalshi_cfbenchmarks_subscription_error")
+        self._force_next_heartbeat = True
+        return True
 
     def _persist_orderbook(self, snapshot) -> bool:
         if self.session_factory is None:
@@ -446,6 +656,48 @@ class KalshiWsCollector:
         self._mark_persistence_success(warning="trade_persistence_failed")
         return True
 
+    def _persist_reference_tick(self, tick: ReferenceTickInput) -> bool:
+        if self.session_factory is None:
+            self._add_reference_warning("database_not_configured_for_reference")
+            return False
+
+        try:
+            with self.session_factory() as session:
+                repository = ReferenceTicksRepository(session)
+                latest = repository.get_latest_tick_with_source_ts(tick.source)
+                if (
+                    tick.source_ts is not None
+                    and latest is not None
+                    and latest.source_ts is not None
+                    and _as_utc(tick.source_ts) <= _as_utc(latest.source_ts)
+                ):
+                    self._add_reference_warning("brti_duplicate_or_out_of_order_source_ts")
+                    self._force_next_heartbeat = True
+                    return False
+                row = repository.insert_tick(tick)
+                session.commit()
+        except SQLAlchemyError as exc:
+            LOGGER.warning("Kalshi BRTI persistence failed.", exc_info=True)
+            self._set_reference_error(exc.__class__.__name__, exc)
+            self._add_reference_warning("brti_persistence_failed")
+            self.record_heartbeat()
+            return False
+
+        self.brti_status.connection_state = "subscribed"
+        self.brti_status.last_persisted_at = row.received_at
+        self.brti_status.latest_source_ts = row.source_ts
+        self.brti_status.latest_value = _decimal_text_or_none(row.parsed_value)
+        self.brti_status.latest_trailing_60s_avg = _decimal_text_or_none(
+            row.trailing_60s_avg
+        )
+        self.brti_status.latest_trailing_60s_window_size = row.trailing_60s_window_size
+        self.brti_status.latest_final_minute_average = _decimal_text_or_none(
+            row.last_60s_windowed_average_15min
+        )
+        self.brti_status.final_minute_average_status = row.final_minute_average_status
+        self.brti_status.source_age_ms = row.source_age_ms
+        return True
+
     def record_heartbeat(self, *, force: bool = True) -> None:
         if self.session_factory is None:
             return
@@ -464,8 +716,11 @@ class KalshiWsCollector:
                         app_mode=self.config.app_mode.value,
                         is_safe=self.safety.is_safe,
                         metadata={
-                            "mode": "kalshi_ws" if self.config.kalshi_ws_enabled else "idle",
+                            "mode": self._heartbeat_mode(),
                             "ws": self.status.as_metadata(),
+                            "reference": {
+                                "brti": self.brti_status.as_metadata(),
+                            },
                         },
                     )
                 )
@@ -475,6 +730,22 @@ class KalshiWsCollector:
             return
 
         self._last_heartbeat_at = heartbeat_at
+
+    def _collector_enabled(self) -> bool:
+        return self.config.kalshi_ws_enabled or self._reference_collection_enabled()
+
+    def _reference_collection_enabled(self) -> bool:
+        return (
+            self.config.kalshi_cfbenchmarks_enabled
+            and self.config.kalshi_cfbenchmarks_subscribe_on_worker
+        )
+
+    def _heartbeat_mode(self) -> str:
+        if self.config.kalshi_ws_enabled:
+            return "kalshi_ws"
+        if self._reference_collection_enabled():
+            return "reference_ws"
+        return "idle"
 
     def _heartbeat_due(self, heartbeat_at: datetime) -> bool:
         if self._last_heartbeat_at is None:
@@ -489,19 +760,43 @@ class KalshiWsCollector:
         self.status.last_error_type = error_type
         self.status.last_error_message = _redacted_error_message(exc, self.config)
 
+    def _set_reference_error(self, error_type: str, exc: Exception) -> None:
+        self.brti_status.connection_state = "error"
+        self.brti_status.last_error_type = error_type
+        self.brti_status.last_error_message = _redacted_error_message(exc, self.config)
+
     def _clear_error(self) -> bool:
         existing = self.status.last_error_type or self.status.last_error_message
         self.status.last_error_type = None
         self.status.last_error_message = None
         return bool(existing)
 
+    def _clear_reference_error(self) -> bool:
+        existing = self.brti_status.last_error_type or self.brti_status.last_error_message
+        self.brti_status.last_error_type = None
+        self.brti_status.last_error_message = None
+        return bool(existing)
+
     def _add_warning(self, warning: str) -> None:
         if warning not in self.status.warnings:
             self.status.warnings.append(warning)
 
+    def _add_reference_warning(self, warning: str) -> None:
+        if warning not in self.brti_status.warnings:
+            self.brti_status.warnings.append(warning)
+
     def _add_blocker(self, blocker: str) -> None:
         if blocker not in self.status.blockers:
             self.status.blockers.append(blocker)
+
+    def _add_reference_blocker(self, blocker: str) -> None:
+        if blocker not in self.brti_status.blockers:
+            self.brti_status.blockers.append(blocker)
+
+    def _set_reference_subscription_id(self, value: Any) -> None:
+        subscription_id = _int_or_none(value)
+        if subscription_id is not None:
+            self.brti_status.subscription_id = subscription_id
 
     def _clear_warnings(self, *warnings: str) -> bool:
         if not warnings:
@@ -512,6 +807,16 @@ class KalshiWsCollector:
             warning for warning in self.status.warnings if warning not in warning_set
         ]
         return self.status.warnings != existing
+
+    def _clear_reference_warnings(self, *warnings: str) -> bool:
+        if not warnings:
+            return False
+        warning_set = set(warnings)
+        existing = self.brti_status.warnings
+        self.brti_status.warnings = [
+            warning for warning in self.brti_status.warnings if warning not in warning_set
+        ]
+        return self.brti_status.warnings != existing
 
     def _clear_warning_prefixes(self, *prefixes: str) -> bool:
         if not prefixes:
@@ -636,6 +941,14 @@ def _seconds_until_market_close(now: datetime, close_time: datetime | None) -> f
     if close_time is None:
         return None
     return max(0.0, (close_time.astimezone(UTC) - now.astimezone(UTC)).total_seconds())
+
+
+def _decimal_text_or_none(value: Any) -> str | None:
+    return str(value) if value is not None else None
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
 
 
 def _invalid_message_diagnostic_sample(message: ParsedWsMessage) -> dict[str, Any] | None:
@@ -778,6 +1091,42 @@ def _safe_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text[:120] if text else None
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _message_sid(payload: dict[str, Any]) -> int | None:
+    message = payload.get("msg")
+    if not isinstance(message, dict):
+        return None
+    return _int_or_none(message.get("sid"))
+
+
+def _websocket_error_message(payload: dict[str, Any]) -> str:
+    message = payload.get("msg")
+    if isinstance(message, dict):
+        code = _safe_text(message.get("code"))
+        text = _safe_text(
+            message.get("msg")
+            or message.get("message")
+            or message.get("reason")
+            or message.get("error")
+        )
+        if code and text:
+            return f"{code}: {text}"
+        if text:
+            return text
+        if code:
+            return f"code={code}"
+    text = _safe_text(message)
+    return text or "Kalshi cfbenchmarks_value subscription error."
 
 
 def heartbeat_interval_seconds(config: AppConfig) -> float:

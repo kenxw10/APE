@@ -9,8 +9,9 @@ It reads the live Railway observer API for operational status:
 - `/db/status`
 - `/ready`
 - `/ws/status`
+- `/reference/brti/status`
 
-Portfolio, CF/BRTI reference, and position sections are scaffold placeholders until backend endpoints exist. They are labeled in the UI and are not live trading data.
+Portfolio and position sections are scaffold placeholders until backend endpoints exist. The BRTI source status is read from the public Railway API and is not live trading data.
 
 ## Local Development
 
@@ -49,19 +50,18 @@ Required:
 NEXT_PUBLIC_API_BASE_URL=https://ape-api-production.up.railway.app
 ```
 
-Do not add secrets to the dashboard. Do not add `DATABASE_URL`, Kalshi credentials, or private keys.
-Kalshi WebSocket collection is Railway-worker-only; the dashboard only reads `/ws/status`.
+Do not add secrets to the dashboard. Do not add `DATABASE_URL`, Kalshi credentials, private keys, WebSocket settings, or BRTI env vars.
+Kalshi WebSocket and BRTI collection are Railway-worker-only; the dashboard only reads public Railway API status endpoints.
 
 ## Current Scaffold Limits
 
 - No live trading.
 - No paper trading.
 - No Kalshi client.
-- No BRTI ingestion.
 - No websocket collectors.
 - No order placement.
 - No portfolio ledger endpoint yet.
-- No real CF/BRTI reference endpoint yet.
+- No raw CF/BRTI payload endpoint.
 - No real open or closed positions endpoint yet.
 
 The dashboard fetches Railway API status server-side, so browser CORS is not required for PR 4.

@@ -3,7 +3,7 @@
 import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 
-import { type OperationalSnapshot } from "../lib/api";
+import { type BrtiReferenceStatusResponse, type OperationalSnapshot } from "../lib/api";
 import { type PortfolioRange } from "../lib/chart";
 import { type ScaffoldDashboardData } from "../lib/scaffold-data";
 import { formatDateButton, formatEasternDateKey, formatEasternDateTime, formatEasternTime } from "../lib/time";
@@ -180,6 +180,7 @@ function createStatusSections(
 ): Record<"source" | "system" | "streaming" | "engine" | "safety", StatusRow[]> {
   const safety = snapshot.safety.data ?? snapshot.health.data?.safety ?? snapshot.readiness.data?.safety ?? null;
   const wsStatus = snapshot.wsStatus.data;
+  const brtiStatus = snapshot.brtiStatus.data;
   const wsConnected = wsStatus?.connection_state === "subscribed" && !wsStatus.stale;
   const wsTone = !snapshot.wsStatus.ok
     ? "red"
@@ -190,17 +191,39 @@ function createStatusSections(
         : wsStatus.connection_state === "error"
           ? "red"
           : "amber";
+  const brtiTone = !snapshot.brtiStatus.ok
+    ? "red"
+    : !brtiStatus?.enabled
+      ? "muted"
+      : brtiStatus.connection_state === "subscribed" && !brtiStatus.stale
+        ? "green"
+        : brtiStatus.connection_state === "error"
+          ? "red"
+          : "amber";
 
   return {
     source: [
-      { label: "CF/BRTI", value: "NOT IMPLEMENTED", tone: "amber" },
+      {
+        label: "BRTI",
+        value: brtiStatus ? brtiStatus.connection_state.toUpperCase() : "UNREACHABLE",
+        tone: brtiTone,
+        detail: formatReferenceValue(brtiStatus?.latest_parsed_value ?? null)
+      },
       {
         label: "Kalshi WS",
         value: wsStatus ? wsStatus.connection_state.toUpperCase() : "UNREACHABLE",
         tone: wsTone
       },
-      { label: "Age", value: "--", tone: "muted" },
-      { label: "Latency", value: "--", tone: "muted" },
+      {
+        label: "BRTI Age",
+        value: formatSourceAge(brtiStatus),
+        tone: brtiStatus?.latest_tick_received_at && !brtiStatus.stale ? "green" : "muted"
+      },
+      {
+        label: "Final Avg",
+        value: brtiStatus?.final_minute_average_status?.toUpperCase() ?? "--",
+        tone: brtiStatus?.final_minute_average_status === "present" ? "green" : "muted"
+      },
       { label: "Provenance", value: scaffold.reference.series.provenance.toUpperCase(), tone: "amber" }
     ],
     system: [
@@ -274,4 +297,25 @@ function formatAge(fetchedAt: string, value: string | null): string {
   }
 
   return `${Math.round(ageSeconds / 60)}m`;
+}
+
+function formatReferenceValue(value: string | number | null): string | undefined {
+  if (value === null) {
+    return undefined;
+  }
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return undefined;
+  }
+  return formatUsd(numeric);
+}
+
+function formatSourceAge(brtiStatus: BrtiReferenceStatusResponse | null): string {
+  if (!brtiStatus) {
+    return "--";
+  }
+  if (brtiStatus.latest_tick_received_at) {
+    return formatAge(brtiStatus.checked_at, brtiStatus.latest_tick_received_at);
+  }
+  return "--";
 }

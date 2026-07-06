@@ -16,6 +16,8 @@ PR 5 adds observer-only Kalshi REST authentication diagnostics and an active BTC
 
 PR 6 adds an observer-only Kalshi WebSocket market-data intake foundation for the Railway worker. It is disabled by default, subscribes only to public `ticker`, `orderbook_delta`, and `trade` channels for the active BTC15 market when enabled, stores normalized orderbook/trade data in existing tables, and exposes `/ws/status` diagnostics. It does not add BRTI/CF Benchmarks intake, strategy decisions, paper trading, live trading, or order placement.
 
+PR 7 adds observer-only BRTI / CF Benchmarks reference-feed intake. It is disabled by default, subscribes to Kalshi's authenticated `cfbenchmarks_value` WebSocket channel for `index_ids=["BRTI"]` only on the Railway worker, stores safe reference ticks in the existing `reference_ticks` table, and exposes read-only `/reference/brti/status` and `/reference/brti/latest` diagnostics. It does not add strategy decisions, paper trading, live trading, orders, fills, private channels, or execution controls.
+
 ## Safety Defaults
 
 The default configuration is intentionally non-trading:
@@ -39,6 +41,8 @@ Kalshi credentials are not required for local health checks or tests.
 If Kalshi credentials are missing, `/kalshi/status` and `/markets/active` return safe `not_configured` diagnostics instead of crashing.
 
 `KALSHI_WS_ENABLED=false` by default. The worker only connects to Kalshi WebSocket when this is set to `true` on the Railway worker service.
+
+`KALSHI_CFBENCHMARKS_ENABLED=false` by default. BRTI collection is worker-only and does not change trading safety.
 
 ## Local Setup
 
@@ -85,6 +89,8 @@ Invoke-RestMethod http://127.0.0.1:8000/ready
 Invoke-RestMethod http://127.0.0.1:8000/kalshi/status
 Invoke-RestMethod http://127.0.0.1:8000/markets/active
 Invoke-RestMethod http://127.0.0.1:8000/ws/status
+Invoke-RestMethod http://127.0.0.1:8000/reference/brti/status
+Invoke-RestMethod http://127.0.0.1:8000/reference/brti/latest
 ```
 
 Successful health output should report `status` as `ok`, `app_mode` as `OBSERVER`, and `is_safe` as `True`.
@@ -96,6 +102,8 @@ When `DATABASE_URL` is unset, `/ready` should report `status` as `not_ready`. Th
 When Kalshi credentials are unset, `/kalshi/status` should report `configured` as `False`, and `/markets/active` should report `state` as `not_configured`.
 
 When `KALSHI_WS_ENABLED=false`, `/ws/status` should report `connection_state` as `disabled` and `stale` as `False`.
+
+When `KALSHI_CFBENCHMARKS_ENABLED=false`, `/reference/brti/status` should report `connection_state` as `disabled` and `stale` as `False`.
 
 ## Kalshi REST Resolver
 
@@ -135,6 +143,23 @@ KALSHI_WS_SUBSCRIBE_TRADES=true
 
 After PR 6 is merged, enable the collector only on the Railway worker by setting `KALSHI_WS_ENABLED=true`. The API service may keep `KALSHI_WS_ENABLED=false`; `/ws/status` is derived from database rows and worker heartbeat metadata. Do not add these variables or Kalshi credentials to Vercel.
 
+## BRTI Reference Feed
+
+PR 7 is observer-only. The BRTI collector is owned by the Railway worker and remains disabled unless `KALSHI_CFBENCHMARKS_ENABLED=true`.
+
+Optional Railway worker settings:
+
+```text
+KALSHI_CFBENCHMARKS_ENABLED=false
+KALSHI_CFBENCHMARKS_INDEX_IDS=BRTI
+KALSHI_CFBENCHMARKS_STALE_AFTER_SECONDS=3
+KALSHI_CFBENCHMARKS_MAX_SOURCE_AGE_MS=3000
+KALSHI_CFBENCHMARKS_SUBSCRIBE_ON_WORKER=true
+KALSHI_CFBENCHMARKS_PERSIST_RAW_PAYLOAD=true
+```
+
+After PR 7 is merged, enable BRTI only on the Railway worker. Do not add Kalshi credentials, WebSocket settings, or BRTI env vars to Vercel. The API remains read-only and the dashboard only reads the public Railway API. If Kalshi sends the final-minute 15-minute average, APE stores it for diagnostics only; no position-management, strategy, or trading logic uses it in PR 7.
+
 ## Database Setup
 
 PR 2 uses SQLAlchemy for the schema and repository layer. Railway Postgres is the production direction for a later PR, but local tests use SQLite so you do not need to install Postgres manually.
@@ -155,7 +180,7 @@ PR 3 adds Railway deployment helper scripts and documentation for two Railway se
 - API service: `python -m scripts.railway_start_api`
 - Worker service: `python -m scripts.railway_start_worker`
 
-The API command runs database migrations before API startup. The worker command starts the always-on observer worker directly so both services do not race on migrations. Railway Postgres should provide `DATABASE_URL` in deployment. See [docs/RAILWAY.md](docs/RAILWAY.md) before configuring Railway.
+The API and worker commands run database migrations before startup. PostgreSQL migrations are serialized with an advisory transaction lock so simultaneous Railway restarts do not race on schema changes. Railway Postgres should provide `DATABASE_URL` in deployment. See [docs/RAILWAY.md](docs/RAILWAY.md) before configuring Railway.
 
 Railway/Railpack uses the root `requirements.txt` for runtime dependency installation. If deploy logs show missing modules such as `sqlalchemy`, verify `requirements.txt` includes the runtime dependencies from `pyproject.toml`.
 
@@ -195,11 +220,11 @@ Successful startup should log that the worker is running in observer mode. Stop 
 - Kalshi order placement
 - Order executor
 - Strategy decision engine
-- Kalshi WebSocket ingestion beyond observer-only public ticker/orderbook/trade capture
-- BRTI/reference ingestion
-- CF Benchmarks/BRTI WebSocket or REST intake
+- Kalshi WebSocket ingestion beyond observer-only public market/reference capture
+- Strategy use of BRTI/reference data
+- CF Benchmarks/BRTI REST intake
 - Real dashboard portfolio/ledger endpoints
-- Real CF/BRTI reference data endpoint
+- Real CF/BRTI chart-series endpoint
 - Railway cron
 - GitHub Actions
 - Real secrets

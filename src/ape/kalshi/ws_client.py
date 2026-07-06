@@ -53,6 +53,21 @@ def build_subscribe_message(
     }
 
 
+def build_cfbenchmarks_subscribe_message(
+    *,
+    request_id: int,
+    index_ids: list[str],
+) -> dict[str, Any]:
+    return {
+        "id": request_id,
+        "cmd": "subscribe",
+        "params": {
+            "channels": ["cfbenchmarks_value"],
+            "index_ids": index_ids,
+        },
+    }
+
+
 async def connect_websocket(
     *,
     endpoint: str,
