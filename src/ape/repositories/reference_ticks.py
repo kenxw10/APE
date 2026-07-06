@@ -34,3 +34,11 @@ class ReferenceTicksRepository:
             .order_by(desc(ReferenceTick.received_at), desc(ReferenceTick.id))
             .limit(1)
         )
+
+    def get_latest_tick_with_source_ts(self, source: str) -> ReferenceTick | None:
+        return self.session.scalar(
+            select(ReferenceTick)
+            .where(ReferenceTick.source == source, ReferenceTick.source_ts.is_not(None))
+            .order_by(desc(ReferenceTick.source_ts), desc(ReferenceTick.id))
+            .limit(1)
+        )

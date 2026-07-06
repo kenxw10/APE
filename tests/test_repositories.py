@@ -86,6 +86,38 @@ def test_reference_ticks_repository_inserts_and_reads_recent_ticks(session) -> N
     assert repository.get_latest_tick("BRTI").parse_status == "parsed"
 
 
+def test_reference_ticks_repository_reads_latest_non_null_source_ts(session) -> None:
+    repository = ReferenceTicksRepository(session)
+    now = datetime.now(UTC)
+    source_ts = now - timedelta(seconds=5)
+
+    repository.insert_tick(
+        ReferenceTickInput(
+            source="BRTI",
+            received_at=now - timedelta(seconds=2),
+            source_ts=source_ts,
+            parse_status="valid",
+        )
+    )
+    repository.insert_tick(
+        ReferenceTickInput(
+            source="BRTI",
+            received_at=now,
+            source_ts=None,
+            parse_status="malformed_value",
+        )
+    )
+
+    assert repository.get_latest_tick("BRTI").parse_status == "malformed_value"
+    latest_with_source_ts = repository.get_latest_tick_with_source_ts("BRTI")
+    assert latest_with_source_ts is not None
+    latest_source_ts = latest_with_source_ts.source_ts
+    assert latest_source_ts is not None
+    if latest_source_ts.tzinfo is None:
+        latest_source_ts = latest_source_ts.replace(tzinfo=UTC)
+    assert latest_source_ts == source_ts
+
+
 def test_orderbook_repository_inserts_and_reads_latest_snapshot(session) -> None:
     repository = OrderbookRepository(session)
     now = datetime.now(UTC)

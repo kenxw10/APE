@@ -114,6 +114,7 @@ class BrtiReferenceStatus:
     latest_final_minute_average: str | None = None
     final_minute_average_status: str | None = None
     source_age_ms: int | None = None
+    subscription_request_id: int | None = None
     last_error_type: str | None = None
     last_error_message: str | None = None
     warnings: list[str] = field(default_factory=list)
@@ -137,6 +138,7 @@ class BrtiReferenceStatus:
             "latest_final_minute_average": self.latest_final_minute_average,
             "final_minute_average_status": self.final_minute_average_status,
             "source_age_ms": self.source_age_ms,
+            "subscription_request_id": self.subscription_request_id,
             "last_error_type": self.last_error_type,
             "last_error_message": self.last_error_message,
             "warnings": self.warnings,
@@ -375,7 +377,7 @@ class KalshiWsCollector:
                 index_ids=list(self.config.kalshi_cfbenchmarks_index_ids),
             )
             await websocket.send(json.dumps(message))
-            self.brti_status.subscription_id = request_id
+            self.brti_status.subscription_request_id = request_id
 
         self.status.subscribed_channels = subscribed_channels
         self.status.subscription_ids = subscription_ids
@@ -463,6 +465,7 @@ class KalshiWsCollector:
             self._add_reference_warning(message.reason or "invalid_cfbenchmarks_message")
             return
 
+        self._set_reference_subscription_id(message.tick.subscription_id)
         if message.warning:
             self._add_reference_warning(message.warning)
         if self._persist_reference_tick(message.tick):
@@ -577,12 +580,26 @@ class KalshiWsCollector:
             return False
 
         sid = _int_or_none(payload.get("sid"))
-        if sid is None and market_ticker is not None:
+        request_id = _int_or_none(payload.get("id"))
+        msg_sid = _message_sid(payload)
+        matched = False
+        request_subscription_id = self.brti_status.subscription_request_id
+        if request_subscription_id is not None and request_id == request_subscription_id:
+            matched = True
+        subscription_id = self.brti_status.subscription_id
+        if subscription_id is not None and sid == subscription_id:
+            matched = True
+        if subscription_id is not None and msg_sid == subscription_id:
+            matched = True
+        if not matched and market_ticker is None and request_id is None and sid is None:
+            matched = True
+        if not matched:
             return False
 
-        subscription_id = self.brti_status.subscription_id
-        if subscription_id is not None and sid != subscription_id:
-            return False
+        if msg_sid is not None:
+            self.brti_status.subscription_id = msg_sid
+        elif sid is not None and request_id is None:
+            self.brti_status.subscription_id = sid
 
         self.brti_status.last_message_at = received_at
         if message_type != "error":
@@ -647,7 +664,7 @@ class KalshiWsCollector:
         try:
             with self.session_factory() as session:
                 repository = ReferenceTicksRepository(session)
-                latest = repository.get_latest_tick(tick.source)
+                latest = repository.get_latest_tick_with_source_ts(tick.source)
                 if (
                     tick.source_ts is not None
                     and latest is not None
@@ -775,6 +792,11 @@ class KalshiWsCollector:
     def _add_reference_blocker(self, blocker: str) -> None:
         if blocker not in self.brti_status.blockers:
             self.brti_status.blockers.append(blocker)
+
+    def _set_reference_subscription_id(self, value: Any) -> None:
+        subscription_id = _int_or_none(value)
+        if subscription_id is not None:
+            self.brti_status.subscription_id = subscription_id
 
     def _clear_warnings(self, *warnings: str) -> bool:
         if not warnings:
@@ -1078,6 +1100,13 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _message_sid(payload: dict[str, Any]) -> int | None:
+    message = payload.get("msg")
+    if not isinstance(message, dict):
+        return None
+    return _int_or_none(message.get("sid"))
 
 
 def _websocket_error_message(payload: dict[str, Any]) -> str:
