@@ -114,6 +114,8 @@ def test_strategy_observer_runtime_records_decision_and_heartbeat(tmp_path) -> N
         {
             "DATABASE_URL": database_url,
             "STRATEGY_OBSERVER_ENABLED": "true",
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
         }
     )
     engine = create_engine_from_config(config)
@@ -169,6 +171,70 @@ def test_strategy_observer_runtime_records_decision_and_heartbeat(tmp_path) -> N
             assert observer_metadata["last_decision_state"] == STATE_OBSERVE_ONLY_MARKET
             assert heartbeat.metadata_["ws"]["connection_state"] == "subscribed"
             assert heartbeat.metadata_["reference"]["brti"]["connection_state"] == "subscribed"
+    finally:
+        engine.dispose()
+
+
+def test_strategy_observer_heartbeat_drops_stale_collector_metadata_when_disabled(
+    tmp_path,
+) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_strategy_drop_collectors.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "KALSHI_WS_ENABLED": "false",
+            "KALSHI_CFBENCHMARKS_ENABLED": "false",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        with session_factory() as session:
+            _seed_observable_context(session, now=now)
+            WorkerHeartbeatRepository(session).record_heartbeat(
+                WorkerHeartbeatInput(
+                    service_name="ape-worker",
+                    started_at=now - timedelta(minutes=1),
+                    heartbeat_at=now - timedelta(seconds=1),
+                    app_mode="OBSERVER",
+                    is_safe=True,
+                    metadata={
+                        "mode": "kalshi_ws",
+                        "ws": {
+                            "enabled": True,
+                            "connection_state": "subscribed",
+                            "active_market_ticker": "KXBTC15M-ACTIVE",
+                        },
+                        "reference": {
+                            "brti": {
+                                "enabled": True,
+                                "connection_state": "subscribed",
+                            }
+                        },
+                    },
+                )
+            )
+            session.commit()
+
+        observer = StrategyObserver(
+            config=config,
+            safety=assess_startup_safety(config),
+            session_factory=session_factory,
+            started_at=now - timedelta(minutes=1),
+            now=lambda: now,
+        )
+        observer.evaluate_once()
+
+        with session_factory() as session:
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert heartbeat is not None
+            assert heartbeat.metadata_["strategy"]["observer"]["enabled"] is True
+            assert "ws" not in heartbeat.metadata_
+            assert "reference" not in heartbeat.metadata_
     finally:
         engine.dispose()
 

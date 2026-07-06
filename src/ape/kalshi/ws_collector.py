@@ -851,7 +851,7 @@ class KalshiWsCollector:
                     },
                 }
                 latest_heartbeat = repository.get_latest_heartbeat("ape-worker")
-                if latest_heartbeat is not None:
+                if latest_heartbeat is not None and self.config.strategy_observer_enabled:
                     _preserve_existing_worker_metadata(
                         metadata,
                         latest_heartbeat.metadata_,

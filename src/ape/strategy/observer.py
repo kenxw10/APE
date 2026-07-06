@@ -239,11 +239,12 @@ class StrategyObserver:
                     "strategy": {"observer": self.status.as_metadata()},
                 }
                 latest_heartbeat = repository.get_latest_heartbeat("ape-worker")
-                if latest_heartbeat is not None:
+                metadata_keys = _enabled_collector_metadata_keys(self.config)
+                if latest_heartbeat is not None and metadata_keys:
                     _preserve_existing_worker_metadata(
                         metadata,
                         latest_heartbeat.metadata_,
-                        keys=("ws", "reference"),
+                        keys=metadata_keys,
                     )
                 repository.record_heartbeat(
                     WorkerHeartbeatInput(
@@ -910,6 +911,18 @@ def _preserve_existing_worker_metadata(
     for key in keys:
         if key not in metadata and isinstance(existing_metadata.get(key), dict):
             metadata[key] = existing_metadata[key]
+
+
+def _enabled_collector_metadata_keys(config: AppConfig) -> tuple[str, ...]:
+    keys: list[str] = []
+    if config.kalshi_ws_enabled:
+        keys.append("ws")
+    if (
+        config.kalshi_cfbenchmarks_enabled
+        and config.kalshi_cfbenchmarks_subscribe_on_worker
+    ):
+        keys.append("reference")
+    return tuple(keys)
 
 
 def _string_list(value: Any) -> list[str]:

@@ -182,6 +182,7 @@ def test_collector_heartbeat_preserves_strategy_metadata(tmp_path) -> None:
         {
             "DATABASE_URL": database_url,
             "KALSHI_WS_ENABLED": "true",
+            "STRATEGY_OBSERVER_ENABLED": "true",
         }
     )
     engine = create_engine_from_config(config)
@@ -227,6 +228,62 @@ def test_collector_heartbeat_preserves_strategy_metadata(tmp_path) -> None:
             assert heartbeat is not None
             assert heartbeat.metadata_["ws"]["connection_state"] == "subscribed"
             assert heartbeat.metadata_["strategy"]["observer"]["last_decision_id"] == "strategy-1"
+    finally:
+        engine.dispose()
+
+
+def test_collector_heartbeat_drops_stale_strategy_metadata_when_disabled(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_drop_strategy.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_WS_ENABLED": "true",
+            "STRATEGY_OBSERVER_ENABLED": "false",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+
+    try:
+        with session_factory() as session:
+            WorkerHeartbeatRepository(session).record_heartbeat(
+                WorkerHeartbeatInput(
+                    service_name="ape-worker",
+                    started_at=NOW - timedelta(minutes=1),
+                    heartbeat_at=NOW - timedelta(seconds=1),
+                    app_mode="OBSERVER",
+                    is_safe=True,
+                    metadata={
+                        "mode": "strategy_observer",
+                        "strategy": {
+                            "observer": {
+                                "enabled": True,
+                                "connection_state": "running",
+                                "last_decision_id": "stale-strategy",
+                            }
+                        },
+                    },
+                )
+            )
+            session.commit()
+
+        collector = KalshiWsCollector(
+            config=config,
+            safety=assess_startup_safety(config),
+            session_factory=session_factory,
+            started_at=NOW,
+            now=lambda: NOW,
+        )
+        collector.status.connection_state = "subscribed"
+        collector.record_heartbeat()
+
+        with session_factory() as session:
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert heartbeat is not None
+            assert heartbeat.metadata_["ws"]["connection_state"] == "subscribed"
+            assert "strategy" not in heartbeat.metadata_
     finally:
         engine.dispose()
 
