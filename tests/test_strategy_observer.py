@@ -12,6 +12,7 @@ from ape.repositories.inputs import (
     MarketInput,
     OrderbookSnapshotInput,
     ReferenceTickInput,
+    WorkerHeartbeatInput,
 )
 from ape.repositories.markets import MarketsRepository
 from ape.repositories.orderbook import OrderbookRepository
@@ -121,6 +122,29 @@ def test_strategy_observer_runtime_records_decision_and_heartbeat(tmp_path) -> N
     try:
         with session_factory() as session:
             _seed_observable_context(session, now=now)
+            WorkerHeartbeatRepository(session).record_heartbeat(
+                WorkerHeartbeatInput(
+                    service_name="ape-worker",
+                    started_at=now - timedelta(minutes=1),
+                    heartbeat_at=now - timedelta(seconds=1),
+                    app_mode="OBSERVER",
+                    is_safe=True,
+                    metadata={
+                        "mode": "kalshi_ws",
+                        "ws": {
+                            "enabled": True,
+                            "connection_state": "subscribed",
+                            "active_market_ticker": "KXBTC15M-ACTIVE",
+                        },
+                        "reference": {
+                            "brti": {
+                                "enabled": True,
+                                "connection_state": "subscribed",
+                            }
+                        },
+                    },
+                )
+            )
             session.commit()
 
         observer = StrategyObserver(
@@ -143,6 +167,8 @@ def test_strategy_observer_runtime_records_decision_and_heartbeat(tmp_path) -> N
             assert observer_metadata["enabled"] is True
             assert observer_metadata["connection_state"] == "running"
             assert observer_metadata["last_decision_state"] == STATE_OBSERVE_ONLY_MARKET
+            assert heartbeat.metadata_["ws"]["connection_state"] == "subscribed"
+            assert heartbeat.metadata_["reference"]["brti"]["connection_state"] == "subscribed"
     finally:
         engine.dispose()
 

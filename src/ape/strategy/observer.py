@@ -233,17 +233,26 @@ class StrategyObserver:
 
         try:
             with self.session_factory() as session:
-                WorkerHeartbeatRepository(session).record_heartbeat(
+                repository = WorkerHeartbeatRepository(session)
+                metadata = {
+                    "mode": "strategy_observer",
+                    "strategy": {"observer": self.status.as_metadata()},
+                }
+                latest_heartbeat = repository.get_latest_heartbeat("ape-worker")
+                if latest_heartbeat is not None:
+                    _preserve_existing_worker_metadata(
+                        metadata,
+                        latest_heartbeat.metadata_,
+                        keys=("ws", "reference"),
+                    )
+                repository.record_heartbeat(
                     WorkerHeartbeatInput(
                         service_name="ape-worker",
                         started_at=self.started_at,
                         heartbeat_at=self.now(),
                         app_mode=self.config.app_mode.value,
                         is_safe=self.safety.is_safe,
-                        metadata={
-                            "mode": "strategy_observer",
-                            "strategy": {"observer": self.status.as_metadata()},
-                        },
+                        metadata=metadata,
                     )
                 )
                 session.commit()
@@ -599,6 +608,11 @@ def _status_snapshot(
     worker_observed_enabled = (
         None if worker_metadata is None else bool(worker_metadata.get("enabled"))
     )
+    effective_enabled = (
+        config.strategy_observer_enabled
+        if worker_observed_enabled is None
+        else worker_observed_enabled
+    )
     worker_warnings = _string_list(worker_metadata.get("warnings") if worker_metadata else [])
     worker_blockers = _string_list(worker_metadata.get("blockers") if worker_metadata else [])
     warnings = [*warnings, *worker_warnings]
@@ -612,16 +626,16 @@ def _status_snapshot(
             (checked_at - _as_utc(latest_decision.evaluated_at)).total_seconds(),
         )
         stale = (
-            config.strategy_observer_enabled
+            effective_enabled
             and decision_age_seconds > config.strategy_observer_decision_ttl_seconds
         )
-    elif config.strategy_observer_enabled:
+    elif effective_enabled:
         stale = True
         blockers.append("strategy_decision_missing")
 
     if worker_metadata is not None:
         connection_state = str(worker_metadata.get("connection_state") or "unknown")
-    elif not config.strategy_observer_enabled:
+    elif not effective_enabled:
         connection_state = "disabled"
     elif blockers:
         connection_state = "blocked"
@@ -629,7 +643,7 @@ def _status_snapshot(
         connection_state = "unknown"
 
     return StrategyStatusSnapshot(
-        enabled=config.strategy_observer_enabled,
+        enabled=effective_enabled,
         worker_observed_enabled=worker_observed_enabled,
         connection_state=connection_state,
         app_mode=config.app_mode.value,
@@ -883,6 +897,19 @@ def _strategy_worker_metadata(metadata: Any) -> dict[str, Any] | None:
         return None
     observer_metadata = strategy_metadata.get("observer")
     return observer_metadata if isinstance(observer_metadata, dict) else None
+
+
+def _preserve_existing_worker_metadata(
+    metadata: dict[str, Any],
+    existing_metadata: Any,
+    *,
+    keys: tuple[str, ...],
+) -> None:
+    if not isinstance(existing_metadata, dict):
+        return
+    for key in keys:
+        if key not in metadata and isinstance(existing_metadata.get(key), dict):
+            metadata[key] = existing_metadata[key]
 
 
 def _string_list(value: Any) -> list[str]:

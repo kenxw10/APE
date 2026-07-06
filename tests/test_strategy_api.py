@@ -35,12 +35,7 @@ def test_strategy_status_is_disabled_without_database() -> None:
 def test_strategy_status_reports_latest_decision_and_worker_metadata(tmp_path) -> None:
     now = datetime.now(UTC)
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_strategy_api.sqlite'}"
-    config = load_config(
-        {
-            "DATABASE_URL": database_url,
-            "STRATEGY_OBSERVER_ENABLED": "true",
-        }
-    )
+    config = load_config({"DATABASE_URL": database_url})
     engine = create_engine_from_config(config)
     run_migrations(engine)
     session_factory = create_session_factory(engine)

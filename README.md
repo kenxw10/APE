@@ -255,7 +255,7 @@ NEXT_PUBLIC_API_BASE_URL=https://ape-api-production.up.railway.app
 
 Do not add `DATABASE_URL`, Kalshi credentials, private keys, or trading secrets to Vercel. See [docs/VERCEL.md](docs/VERCEL.md).
 
-The Reference Price CF/BRTI chart reads `/reference/brti/series` from the public Railway API when live data is available. It remains read-only, shows only the rolling 15-minute window, caps the chart at 16,000 points, and falls back to clearly labeled scaffold data when the backend series is unavailable.
+The Reference Price CF/BRTI chart reads `/reference/brti/series` from the public Railway API when live data is available. It remains read-only, renders the current fixed Kalshi 15-minute interval, keeps the interval-open value fixed to the first valid BRTI tick at or after interval start, caps the chart at 16,000 points, and falls back to clearly labeled scaffold data when the backend series is unavailable.
 
 ## Run Worker Locally
 

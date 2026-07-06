@@ -842,20 +842,29 @@ class KalshiWsCollector:
 
         try:
             with self.session_factory() as session:
-                WorkerHeartbeatRepository(session).record_heartbeat(
+                repository = WorkerHeartbeatRepository(session)
+                metadata = {
+                    "mode": self._heartbeat_mode(),
+                    "ws": self.status.as_metadata(),
+                    "reference": {
+                        "brti": self.brti_status.as_metadata(),
+                    },
+                }
+                latest_heartbeat = repository.get_latest_heartbeat("ape-worker")
+                if latest_heartbeat is not None:
+                    _preserve_existing_worker_metadata(
+                        metadata,
+                        latest_heartbeat.metadata_,
+                        keys=("strategy",),
+                    )
+                repository.record_heartbeat(
                     WorkerHeartbeatInput(
                         service_name="ape-worker",
                         started_at=self.started_at,
                         heartbeat_at=heartbeat_at,
                         app_mode=self.config.app_mode.value,
                         is_safe=self.safety.is_safe,
-                        metadata={
-                            "mode": self._heartbeat_mode(),
-                            "ws": self.status.as_metadata(),
-                            "reference": {
-                                "brti": self.brti_status.as_metadata(),
-                            },
-                        },
+                        metadata=metadata,
                     )
                 )
                 session.commit()
@@ -1148,6 +1157,19 @@ def _diagnostic_sample_signature(sample: dict[str, Any]) -> str:
         separators=(",", ":"),
         default=str,
     )
+
+
+def _preserve_existing_worker_metadata(
+    metadata: dict[str, Any],
+    existing_metadata: Any,
+    *,
+    keys: tuple[str, ...],
+) -> None:
+    if not isinstance(existing_metadata, dict):
+        return
+    for key in keys:
+        if key not in metadata and isinstance(existing_metadata.get(key), dict):
+            metadata[key] = existing_metadata[key]
 
 
 def _levels_diagnostic_shape(value: Any) -> dict[str, Any]:

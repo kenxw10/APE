@@ -13,7 +13,7 @@ It reads the live Railway observer API for operational status:
 - `/reference/brti/series`
 - `/strategy/status`
 
-Portfolio and position sections are scaffold placeholders until backend endpoints exist. The Reference Price CF/BRTI chart reads live `/reference/brti/series` data when available, polls once per second, shows only the rolling 15-minute window, and caps rendering at 16,000 points. The Engine Status panel reads `/strategy/status` for the observer-only strategy ledger. If the backend series is unavailable, it falls back to clearly labeled scaffold data. This is not live trading data.
+Portfolio and position sections are scaffold placeholders until backend endpoints exist. The Reference Price CF/BRTI chart reads live `/reference/brti/series` data when available, polls once per second, renders the current fixed Kalshi 15-minute interval, keeps Interval Open fixed to the first valid BRTI tick at or after interval start, and caps rendering at 16,000 points. The Engine Status panel reads `/strategy/status` for the observer-only strategy ledger. If the backend series is unavailable, it falls back to clearly labeled scaffold data. This is not live trading data.
 
 ## Local Development
 

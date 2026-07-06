@@ -73,7 +73,7 @@ Open the Vercel dashboard and confirm:
 - Source/Data panels show Kalshi WebSocket status from `/ws/status` when the Railway API is reachable.
 - Source/Data panels show BRTI status from `/reference/brti/status` when the Railway API is reachable.
 - Reference Price CF/BRTI chart uses live `/reference/brti/series` data when available.
-- Reference Price CF/BRTI chart shows only a rolling 15-minute window and a 16,000-point maximum.
+- Reference Price CF/BRTI chart shows the current fixed Kalshi 15-minute interval, fixes Interval Open to the first valid interval tick, and caps rendering at 16,000 points.
 - Engine Status shows Strategy Observer status from `/strategy/status` when the Railway API is reachable.
 - If live BRTI series data is unavailable, the chart is clearly labeled as fallback/scaffold.
 - Safety panel shows `Mode: OBSERVER`.

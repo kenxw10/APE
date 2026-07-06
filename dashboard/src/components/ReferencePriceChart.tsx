@@ -55,7 +55,7 @@ export function ReferencePriceChart({
             <span>
               <i className="legend-gold" /> CF/BRTI
             </span>
-            <small>Rolling 15-minute window. Max {MAX_REFERENCE_CHART_POINTS} points.</small>
+            <small>Current Kalshi 15-minute interval. Max {MAX_REFERENCE_CHART_POINTS} points.</small>
           </div>
         </div>
         <strong className="latest-price">{latest ? formatUsd(latest.value, 2) : "--"}</strong>

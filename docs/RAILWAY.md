@@ -254,7 +254,7 @@ Expected behavior:
 - `/reference/brti/series` returns live BRTI points sorted by `received_at`, capped at a 900-second rolling window and 16,000 points, without raw payloads.
 - `reference_ticks` rows are written when Kalshi emits `cfbenchmarks_value` events.
 - BRTI final-minute averages are stored when present, but no strategy or position-management logic uses them in PR 7a.
-- Dashboard remains read-only and may show live BRTI status and the rolling 15-minute CF/BRTI chart from the public API only.
+- Dashboard remains read-only and may show live BRTI status plus the current fixed Kalshi 15-minute CF/BRTI chart from the public API only.
 
 ## Strategy Observer Checkpoint After PR 8
 

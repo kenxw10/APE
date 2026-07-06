@@ -123,6 +123,46 @@ export function capPoints<T>(points: readonly T[], maxPoints: number): T[] {
   return sampled.slice(-maxPoints);
 }
 
+export interface FixedIntervalReferenceSelection<T extends TimeValuePoint> {
+  domain: TimeDomain;
+  points: T[];
+  intervalOpenPrice: number | null;
+  currentPrice: number | null;
+}
+
+export function getFixedIntervalDomain(
+  nowMs: number,
+  intervalMs = REFERENCE_CHART_WINDOW_MS
+): TimeDomain {
+  const span = Math.max(intervalMs, 1);
+  const startMs = Math.floor(nowMs / span) * span;
+  return {
+    startMs,
+    endMs: startMs + span
+  };
+}
+
+export function selectFixedIntervalReferencePoints<T extends TimeValuePoint>(
+  points: readonly T[],
+  nowMs: number,
+  intervalMs = REFERENCE_CHART_WINDOW_MS
+): FixedIntervalReferenceSelection<T> {
+  const domain = getFixedIntervalDomain(nowMs, intervalMs);
+  const visibleEndMs = Math.min(nowMs, domain.endMs);
+  const intervalPoints = points
+    .filter((point) => point.tsMs >= domain.startMs && point.tsMs <= visibleEndMs)
+    .sort((left, right) => left.tsMs - right.tsMs);
+  const intervalOpen = intervalPoints[0] ?? null;
+  const current = intervalPoints[intervalPoints.length - 1] ?? null;
+
+  return {
+    domain,
+    points: intervalPoints,
+    intervalOpenPrice: intervalOpen?.value ?? null,
+    currentPrice: current?.value ?? null
+  };
+}
+
 export function getPortfolioWindow(
   range: PortfolioRange,
   nowMs: number,

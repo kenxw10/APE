@@ -11,8 +11,8 @@ import {
 } from "../lib/api";
 import {
   MAX_REFERENCE_CHART_POINTS,
-  REFERENCE_CHART_WINDOW_MS,
   capPoints,
+  selectFixedIntervalReferencePoints,
   type PortfolioRange
 } from "../lib/chart";
 import { type ReferencePricePoint, type ScaffoldDashboardData } from "../lib/scaffold-data";
@@ -319,7 +319,7 @@ function createStatusSections(
         label: "Chart Points",
         value: `${referenceChart.pointCount} / ${referenceChart.maxPoints} max`,
         tone: referenceChartTone(referenceChart),
-        detail: `15m rolling ${referenceChartProvenanceLabel(referenceChart)}`
+        detail: `active 15m ${referenceChartProvenanceLabel(referenceChart)}`
       }
     ],
     engine: [
@@ -484,35 +484,39 @@ function createReferenceChartData(
 ): ReferenceChartData {
   const series = snapshot.brtiSeries.ok ? snapshot.brtiSeries.data : null;
   const brtiStatus = snapshot.brtiStatus.data;
-  const livePoints = series
-    ? liveBrtiReferencePoints(
-        series.points,
-        Date.parse(series.generated_at) || Date.parse(snapshot.fetchedAt)
-      )
-    : [];
+  const generatedAtMs = series
+    ? Date.parse(series.generated_at) || Date.parse(snapshot.fetchedAt)
+    : Date.parse(snapshot.fetchedAt);
+  const livePoints = series ? liveBrtiReferencePoints(series.points) : [];
+  const intervalSelection = selectFixedIntervalReferencePoints(livePoints, generatedAtMs);
 
-  if (series && livePoints.length > 0) {
-    const cappedPoints = capPoints(livePoints, Math.min(series.max_points, MAX_REFERENCE_CHART_POINTS));
-    const firstPoint = cappedPoints[0];
+  if (
+    series &&
+    intervalSelection.points.length > 0 &&
+    intervalSelection.intervalOpenPrice !== null &&
+    intervalSelection.currentPrice !== null
+  ) {
+    const cappedPoints = capPoints(
+      intervalSelection.points,
+      Math.min(series.max_points, MAX_REFERENCE_CHART_POINTS)
+    );
     const latestPoint = cappedPoints[cappedPoints.length - 1];
-    const intervalEndMs = Date.parse(series.generated_at) || Date.parse(snapshot.fetchedAt);
-    const intervalStartMs = intervalEndMs - REFERENCE_CHART_WINDOW_MS;
     const status = isLiveBrtiStatus(brtiStatus) ? "live" : "stale";
 
     return {
       points: cappedPoints,
-      intervalStartMs,
-      intervalEndMs,
-      intervalOpenPrice: firstPoint.value,
-      currentPrice: latestPoint.value,
+      intervalStartMs: intervalSelection.domain.startMs,
+      intervalEndMs: intervalSelection.domain.endMs,
+      intervalOpenPrice: intervalSelection.intervalOpenPrice,
+      currentPrice: intervalSelection.currentPrice,
       refSpreadBps: null,
       status,
       note:
         status === "live"
-          ? "Backend /reference/brti/series, sorted by received time. Raw payload excluded."
-          : "Stored /reference/brti/series points are shown, but BRTI status is not live.",
+          ? "Current Kalshi 15-minute interval from /reference/brti/series. Raw payload excluded."
+          : "Current-interval /reference/brti/series points are shown, but BRTI status is not live.",
       sourceAgeLabel: formatDurationMs(
-        brtiStatus?.source_age_ms ?? latestSeriesSourceAge(livePoints)
+        brtiStatus?.source_age_ms ?? latestSeriesSourceAge(intervalSelection.points)
       ),
       backendAgeLabel: formatAge(
         snapshot.fetchedAt,
@@ -541,11 +545,8 @@ function createReferenceChartData(
 }
 
 function liveBrtiReferencePoints(
-  points: readonly BrtiReferenceSeriesPointResponse[],
-  generatedAtMs: number
+  points: readonly BrtiReferenceSeriesPointResponse[]
 ): BrtiReferencePointWithAge[] {
-  const windowStartMs = generatedAtMs - REFERENCE_CHART_WINDOW_MS;
-
   return points
     .map((point) => {
       const tsMs = Date.parse(point.received_at);
@@ -553,8 +554,6 @@ function liveBrtiReferencePoints(
       if (
         !Number.isFinite(tsMs) ||
         !Number.isFinite(value) ||
-        tsMs < windowStartMs ||
-        tsMs > generatedAtMs ||
         point.parse_status !== "valid"
       ) {
         return null;
