@@ -41,7 +41,6 @@ from ape.models.reference import (
     brti_reference_series_response,
     brti_reference_status_response,
 )
-from ape.models.storage import StorageStatusResponse, storage_status_response
 from ape.models.strategy import (
     StrategyDecisionResponse,
     StrategyRecentDecisionsResponse,
@@ -51,7 +50,6 @@ from ape.models.strategy import (
     strategy_status_response,
 )
 from ape.safety import SafetyAssessment, assert_startup_safe, assess_startup_safety
-from ape.storage.retention import build_storage_status
 from ape.strategy.observer import (
     build_latest_strategy_decision,
     build_recent_strategy_decisions,
@@ -154,10 +152,6 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return strategy_recent_decisions_response(
             build_recent_strategy_decisions(settings, limit=limit)
         )
-
-    @app.get("/storage/status", response_model=StorageStatusResponse)
-    def storage_status() -> StorageStatusResponse:
-        return storage_status_response(build_storage_status(settings))
 
     @app.get("/ready", response_model=ReadinessResponse)
     def readiness() -> ReadinessResponse:

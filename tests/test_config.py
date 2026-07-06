@@ -53,22 +53,6 @@ def test_default_config_is_observer_only() -> None:
     assert config.strategy_min_entry_ask == 0.56
     assert config.strategy_max_entry_ask == 0.78
     assert config.strategy_max_spread_cents == 4
-    assert config.storage_retention_enabled is False
-    assert config.storage_retention_interval_seconds == 300
-    assert config.storage_retention_batch_size == 5000
-    assert config.storage_retention_max_run_seconds == 20
-    assert config.storage_retention_dry_run is False
-    assert config.storage_retention_orderbook_seconds == 7200
-    assert config.storage_retention_public_trades_seconds == 86400
-    assert config.storage_retention_reference_ticks_seconds == 86400
-    assert config.storage_retention_worker_heartbeats_seconds == 21600
-    assert config.storage_retention_strategy_decisions_seconds == 1209600
-    assert config.storage_retention_markets_seconds == 2592000
-    assert config.storage_retention_raw_payload_orderbook_seconds == 900
-    assert config.storage_retention_raw_payload_public_trades_seconds == 3600
-    assert config.storage_retention_raw_payload_reference_ticks_seconds == 3600
-    assert config.storage_retention_status_warn_bytes == 40_000_000_000
-    assert config.storage_retention_status_critical_bytes == 47_500_000_000
 
 
 def test_kalshi_credentials_are_not_required() -> None:
@@ -193,46 +177,6 @@ def test_strategy_observer_env_vars_parse_safely() -> None:
     assert config.strategy_max_spread_cents == 5
 
 
-def test_storage_retention_env_vars_parse_safely() -> None:
-    config = load_config(
-        {
-            "STORAGE_RETENTION_ENABLED": "true",
-            "STORAGE_RETENTION_INTERVAL_SECONDS": "301",
-            "STORAGE_RETENTION_BATCH_SIZE": "123",
-            "STORAGE_RETENTION_MAX_RUN_SECONDS": "21",
-            "STORAGE_RETENTION_DRY_RUN": "true",
-            "STORAGE_RETENTION_ORDERBOOK_SECONDS": "7201",
-            "STORAGE_RETENTION_PUBLIC_TRADES_SECONDS": "86401",
-            "STORAGE_RETENTION_REFERENCE_TICKS_SECONDS": "86402",
-            "STORAGE_RETENTION_WORKER_HEARTBEATS_SECONDS": "21601",
-            "STORAGE_RETENTION_STRATEGY_DECISIONS_SECONDS": "1209601",
-            "STORAGE_RETENTION_MARKETS_SECONDS": "2592001",
-            "STORAGE_RETENTION_RAW_PAYLOAD_ORDERBOOK_SECONDS": "901",
-            "STORAGE_RETENTION_RAW_PAYLOAD_PUBLIC_TRADES_SECONDS": "3601",
-            "STORAGE_RETENTION_RAW_PAYLOAD_REFERENCE_TICKS_SECONDS": "3602",
-            "STORAGE_RETENTION_STATUS_WARN_BYTES": "40000000001",
-            "STORAGE_RETENTION_STATUS_CRITICAL_BYTES": "47500000001",
-        }
-    )
-
-    assert config.storage_retention_enabled is True
-    assert config.storage_retention_interval_seconds == 301
-    assert config.storage_retention_batch_size == 123
-    assert config.storage_retention_max_run_seconds == 21
-    assert config.storage_retention_dry_run is True
-    assert config.storage_retention_orderbook_seconds == 7201
-    assert config.storage_retention_public_trades_seconds == 86401
-    assert config.storage_retention_reference_ticks_seconds == 86402
-    assert config.storage_retention_worker_heartbeats_seconds == 21601
-    assert config.storage_retention_strategy_decisions_seconds == 1209601
-    assert config.storage_retention_markets_seconds == 2592001
-    assert config.storage_retention_raw_payload_orderbook_seconds == 901
-    assert config.storage_retention_raw_payload_public_trades_seconds == 3601
-    assert config.storage_retention_raw_payload_reference_ticks_seconds == 3602
-    assert config.storage_retention_status_warn_bytes == 40_000_000_001
-    assert config.storage_retention_status_critical_bytes == 47_500_000_001
-
-
 def test_invalid_kalshi_api_base_url_raises_clear_config_error() -> None:
     with pytest.raises(ConfigError, match="KALSHI_API_BASE_URL"):
         load_config({"KALSHI_API_BASE_URL": "not-a-url"})
@@ -311,11 +255,6 @@ def test_invalid_database_url_raises_clear_config_error() -> None:
         {"DB_POOL_SIZE": "0"},
         {"DB_MAX_OVERFLOW": "-1"},
         {"DB_STATEMENT_TIMEOUT_MS": "0"},
-        {"STORAGE_RETENTION_INTERVAL_SECONDS": "0"},
-        {"STORAGE_RETENTION_BATCH_SIZE": "0"},
-        {"STORAGE_RETENTION_MAX_RUN_SECONDS": "-1"},
-        {"STORAGE_RETENTION_ORDERBOOK_SECONDS": "0"},
-        {"STORAGE_RETENTION_STATUS_WARN_BYTES": "0"},
     ],
 )
 def test_invalid_db_numeric_config_raises_clear_config_error(env: dict[str, str]) -> None:

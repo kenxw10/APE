@@ -13,7 +13,6 @@ from ape.kalshi.ws_collector import KalshiWsCollector, heartbeat_interval_second
 from ape.repositories.inputs import WorkerHeartbeatInput
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import SafetyError, assert_startup_safe, assess_startup_safety
-from ape.storage.retention import StorageRetentionWorker
 from ape.strategy.observer import StrategyObserver
 
 LOGGER = logging.getLogger(__name__)
@@ -43,8 +42,7 @@ def run_worker(
     try:
         LOGGER.info(
             "Starting ape-worker env=%s app_mode=%s safety=%s db_configured=%s "
-            "ws_enabled=%s brti_enabled=%s strategy_observer_enabled=%s "
-            "storage_retention_enabled=%s",
+            "ws_enabled=%s brti_enabled=%s strategy_observer_enabled=%s",
             config.env,
             config.app_mode.value,
             "safe" if safety.is_safe else "blocked",
@@ -52,7 +50,6 @@ def run_worker(
             config.kalshi_ws_enabled,
             config.kalshi_cfbenchmarks_enabled,
             config.strategy_observer_enabled,
-            config.storage_retention_enabled,
         )
 
         event = stop_event or threading.Event()
@@ -60,7 +57,6 @@ def run_worker(
             config.kalshi_ws_enabled
             or _reference_worker_enabled(config)
             or config.strategy_observer_enabled
-            or config.storage_retention_enabled
         ):
             LOGGER.info("APE worker running enabled observer services.")
             tasks = []
@@ -80,14 +76,6 @@ def run_worker(
                     started_at=started_at,
                 )
                 tasks.append(observer.run(stop_event=event, max_iterations=max_iterations))
-            if config.storage_retention_enabled:
-                retention = StorageRetentionWorker(
-                    config=config,
-                    safety=safety,
-                    session_factory=session_factory,
-                    started_at=started_at,
-                )
-                tasks.append(retention.run(stop_event=event, max_iterations=max_iterations))
             asyncio.run(
                 _run_enabled_observer_tasks(
                     *tasks,
@@ -167,20 +155,6 @@ def _record_idle_heartbeat(
                                 "last_primary_reason": None,
                                 "last_decision_id": None,
                                 "warnings": ["strategy_observer_disabled"],
-                                "blockers": [],
-                            }
-                        },
-                        "storage": {
-                            "retention": {
-                                "enabled": config.storage_retention_enabled,
-                                "connection_state": "disabled",
-                                "last_run_id": None,
-                                "last_started_at": None,
-                                "last_finished_at": None,
-                                "last_status": None,
-                                "last_deleted_rows": {},
-                                "last_raw_payload_stripped_rows": {},
-                                "warnings": ["storage_retention_disabled"],
                                 "blockers": [],
                             }
                         },

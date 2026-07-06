@@ -81,22 +81,6 @@ class AppConfig:
     strategy_min_entry_ask: float = 0.56
     strategy_max_entry_ask: float = 0.78
     strategy_max_spread_cents: int = 4
-    storage_retention_enabled: bool = False
-    storage_retention_interval_seconds: float = 300.0
-    storage_retention_batch_size: int = 5000
-    storage_retention_max_run_seconds: float = 20.0
-    storage_retention_dry_run: bool = False
-    storage_retention_orderbook_seconds: int = 7200
-    storage_retention_public_trades_seconds: int = 86400
-    storage_retention_reference_ticks_seconds: int = 86400
-    storage_retention_worker_heartbeats_seconds: int = 21600
-    storage_retention_strategy_decisions_seconds: int = 1209600
-    storage_retention_markets_seconds: int = 2592000
-    storage_retention_raw_payload_orderbook_seconds: int = 900
-    storage_retention_raw_payload_public_trades_seconds: int = 3600
-    storage_retention_raw_payload_reference_ticks_seconds: int = 3600
-    storage_retention_status_warn_bytes: int = 40_000_000_000
-    storage_retention_status_critical_bytes: int = 47_500_000_000
 
 
 TRUE_VALUES = {"1", "true", "t", "yes", "y", "on"}
@@ -279,70 +263,6 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         strategy_max_spread_cents=_parse_int(
             "STRATEGY_MAX_SPREAD_CENTS",
             _get(source, "STRATEGY_MAX_SPREAD_CENTS", "4"),
-        ),
-        storage_retention_enabled=_parse_bool(
-            "STORAGE_RETENTION_ENABLED",
-            _get(source, "STORAGE_RETENTION_ENABLED", "false"),
-        ),
-        storage_retention_interval_seconds=_parse_float(
-            "STORAGE_RETENTION_INTERVAL_SECONDS",
-            _get(source, "STORAGE_RETENTION_INTERVAL_SECONDS", "300"),
-        ),
-        storage_retention_batch_size=_parse_int(
-            "STORAGE_RETENTION_BATCH_SIZE",
-            _get(source, "STORAGE_RETENTION_BATCH_SIZE", "5000"),
-        ),
-        storage_retention_max_run_seconds=_parse_float(
-            "STORAGE_RETENTION_MAX_RUN_SECONDS",
-            _get(source, "STORAGE_RETENTION_MAX_RUN_SECONDS", "20"),
-        ),
-        storage_retention_dry_run=_parse_bool(
-            "STORAGE_RETENTION_DRY_RUN",
-            _get(source, "STORAGE_RETENTION_DRY_RUN", "false"),
-        ),
-        storage_retention_orderbook_seconds=_parse_int(
-            "STORAGE_RETENTION_ORDERBOOK_SECONDS",
-            _get(source, "STORAGE_RETENTION_ORDERBOOK_SECONDS", "7200"),
-        ),
-        storage_retention_public_trades_seconds=_parse_int(
-            "STORAGE_RETENTION_PUBLIC_TRADES_SECONDS",
-            _get(source, "STORAGE_RETENTION_PUBLIC_TRADES_SECONDS", "86400"),
-        ),
-        storage_retention_reference_ticks_seconds=_parse_int(
-            "STORAGE_RETENTION_REFERENCE_TICKS_SECONDS",
-            _get(source, "STORAGE_RETENTION_REFERENCE_TICKS_SECONDS", "86400"),
-        ),
-        storage_retention_worker_heartbeats_seconds=_parse_int(
-            "STORAGE_RETENTION_WORKER_HEARTBEATS_SECONDS",
-            _get(source, "STORAGE_RETENTION_WORKER_HEARTBEATS_SECONDS", "21600"),
-        ),
-        storage_retention_strategy_decisions_seconds=_parse_int(
-            "STORAGE_RETENTION_STRATEGY_DECISIONS_SECONDS",
-            _get(source, "STORAGE_RETENTION_STRATEGY_DECISIONS_SECONDS", "1209600"),
-        ),
-        storage_retention_markets_seconds=_parse_int(
-            "STORAGE_RETENTION_MARKETS_SECONDS",
-            _get(source, "STORAGE_RETENTION_MARKETS_SECONDS", "2592000"),
-        ),
-        storage_retention_raw_payload_orderbook_seconds=_parse_int(
-            "STORAGE_RETENTION_RAW_PAYLOAD_ORDERBOOK_SECONDS",
-            _get(source, "STORAGE_RETENTION_RAW_PAYLOAD_ORDERBOOK_SECONDS", "900"),
-        ),
-        storage_retention_raw_payload_public_trades_seconds=_parse_int(
-            "STORAGE_RETENTION_RAW_PAYLOAD_PUBLIC_TRADES_SECONDS",
-            _get(source, "STORAGE_RETENTION_RAW_PAYLOAD_PUBLIC_TRADES_SECONDS", "3600"),
-        ),
-        storage_retention_raw_payload_reference_ticks_seconds=_parse_int(
-            "STORAGE_RETENTION_RAW_PAYLOAD_REFERENCE_TICKS_SECONDS",
-            _get(source, "STORAGE_RETENTION_RAW_PAYLOAD_REFERENCE_TICKS_SECONDS", "3600"),
-        ),
-        storage_retention_status_warn_bytes=_parse_int(
-            "STORAGE_RETENTION_STATUS_WARN_BYTES",
-            _get(source, "STORAGE_RETENTION_STATUS_WARN_BYTES", "40000000000"),
-        ),
-        storage_retention_status_critical_bytes=_parse_int(
-            "STORAGE_RETENTION_STATUS_CRITICAL_BYTES",
-            _get(source, "STORAGE_RETENTION_STATUS_CRITICAL_BYTES", "47500000000"),
         ),
     )
 

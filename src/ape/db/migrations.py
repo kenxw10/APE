@@ -9,12 +9,8 @@ from ape.config import ConfigError, load_config
 from ape.db.models import Base, SchemaMigration, utc_now
 from ape.db.session import DatabaseConfigError, create_engine_from_config
 
-CURRENT_SCHEMA_VERSION = "0003_storage_retention_lifecycle"
-SCHEMA_VERSIONS = (
-    "0001_initial_schema",
-    "0002_fixed_point_ws_quantities",
-    CURRENT_SCHEMA_VERSION,
-)
+CURRENT_SCHEMA_VERSION = "0002_fixed_point_ws_quantities"
+SCHEMA_VERSIONS = ("0001_initial_schema", CURRENT_SCHEMA_VERSION)
 POSTGRES_MIGRATION_LOCK_ID = 4_150_002
 
 LOGGER = logging.getLogger(__name__)

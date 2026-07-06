@@ -232,30 +232,3 @@ class WorkerHeartbeat(Base):
     app_mode: Mapped[str] = mapped_column(String(32), nullable=False)
     is_safe: Mapped[bool] = mapped_column(Boolean, nullable=False)
     metadata_: Mapped[Any | None] = mapped_column("metadata", JSON)
-
-
-class StorageRetentionRun(Base):
-    __tablename__ = "storage_retention_runs"
-    __table_args__ = (
-        UniqueConstraint("run_id", name="uq_storage_retention_runs_run_id"),
-        Index("ix_storage_retention_runs_started_at", "started_at"),
-        Index("ix_storage_retention_runs_status_started", "status", "started_at"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    run_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    status: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    dry_run: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    duration_ms: Mapped[int | None] = mapped_column(Integer)
-    deleted_rows: Mapped[Any | None] = mapped_column(JSON)
-    raw_payload_stripped_rows: Mapped[Any | None] = mapped_column(JSON)
-    table_row_counts_before: Mapped[Any | None] = mapped_column(JSON)
-    table_row_counts_after: Mapped[Any | None] = mapped_column(JSON)
-    table_sizes_before: Mapped[Any | None] = mapped_column(JSON)
-    table_sizes_after: Mapped[Any | None] = mapped_column(JSON)
-    warnings: Mapped[Any | None] = mapped_column(JSON)
-    blockers: Mapped[Any | None] = mapped_column(JSON)
-    error_type: Mapped[str | None] = mapped_column(String(128))
-    error_message: Mapped[str | None] = mapped_column(Text)
