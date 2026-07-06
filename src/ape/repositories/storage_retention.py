@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import desc, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from ape.db.models import StorageRetentionRun
 from ape.repositories.inputs import StorageRetentionRunInput
@@ -18,6 +20,16 @@ ALLOWED_RETENTION_TABLES = {
     "strategy_decisions",
     "worker_heartbeats",
 }
+JSON_FIELDS = {
+    "deleted_rows",
+    "raw_payload_stripped_rows",
+    "table_row_counts_before",
+    "table_row_counts_after",
+    "table_sizes_before",
+    "table_sizes_after",
+    "warnings",
+    "blockers",
+}
 
 
 class StorageRetentionRepository:
@@ -25,7 +37,7 @@ class StorageRetentionRepository:
         self.session = session
 
     def start_run(self, run: StorageRetentionRunInput) -> StorageRetentionRun:
-        row = StorageRetentionRun(**run.__dict__)
+        row = StorageRetentionRun(**_run_values(run))
         self.session.add(row)
         self.session.flush()
         return row
@@ -33,16 +45,18 @@ class StorageRetentionRepository:
     def finish_run(self, run_id: str, run: StorageRetentionRunInput) -> StorageRetentionRun:
         row = self.get_run_by_run_id(run_id)
         if row is None:
-            row = StorageRetentionRun(**run.__dict__)
+            row = StorageRetentionRun(**_run_values(run))
             self.session.add(row)
             self.session.flush()
             return row
 
-        values = run.__dict__.copy()
+        values = _run_values(run)
         values.pop("run_id", None)
         values.pop("started_at", None)
         for key, value in values.items():
             setattr(row, key, value)
+            if key in JSON_FIELDS:
+                flag_modified(row, key)
         self.session.flush()
         return row
 
@@ -240,6 +254,13 @@ class StorageRetentionRepository:
 def _validate_table_name(table_name: str) -> None:
     if table_name not in ALLOWED_RETENTION_TABLES:
         raise ValueError(f"Unsupported retention table: {table_name}")
+
+
+def _run_values(run: StorageRetentionRunInput) -> dict[str, Any]:
+    values = run.__dict__.copy()
+    for field_name in JSON_FIELDS:
+        values[field_name] = deepcopy(values.get(field_name))
+    return values
 
 
 def _int_or_none(value: Any) -> int | None:

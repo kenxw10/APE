@@ -82,9 +82,13 @@ def test_storage_retention_deletes_old_rows_in_chunks(retention_db) -> None:
         assert session.scalar(select(func.count()).select_from(WorkerHeartbeat)) == 1
         assert session.scalar(select(func.count()).select_from(StrategyDecision)) == 1
         assert session.scalar(select(func.count()).select_from(Market)) == 1
-        assert session.scalar(select(StorageRetentionRun).where(
-            StorageRetentionRun.run_id == result.run_id
-        )).status == RETENTION_SUCCESS
+        audit_row = session.scalar(
+            select(StorageRetentionRun).where(StorageRetentionRun.run_id == result.run_id)
+        )
+        assert audit_row is not None
+        assert audit_row.status == RETENTION_SUCCESS
+        assert audit_row.deleted_rows["orderbook_snapshots"] == 1
+        assert audit_row.deleted_rows["markets"] == 2
 
 
 def test_storage_retention_strips_raw_payload_without_losing_normalized_fields(
@@ -115,6 +119,9 @@ def test_storage_retention_strips_raw_payload_without_losing_normalized_fields(
         assert snapshot.yes_bid == Decimal("48.00000000")
         assert snapshot.raw_payload_hash == "hash-raw"
         assert snapshot.raw_payload is None
+        audit_row = StorageRetentionRepository(session).get_latest_run()
+        assert audit_row is not None
+        assert audit_row.raw_payload_stripped_rows["orderbook_snapshots"] == 1
 
 
 def test_storage_retention_dry_run_reports_counts_without_mutating(retention_db) -> None:
@@ -227,6 +234,35 @@ def test_storage_retention_worker_records_heartbeat_metadata(retention_db) -> No
         assert heartbeat is not None
         assert heartbeat.metadata_["storage"]["retention"]["enabled"] is True
         assert heartbeat.metadata_["storage"]["retention"]["last_status"] == "success"
+
+
+def test_storage_retention_worker_offloads_run_from_event_loop(
+    retention_db,
+    monkeypatch,
+) -> None:
+    database_url, session_factory = retention_db
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    config = _retention_config(database_url)
+    called: dict[str, bool] = {}
+
+    async def fake_to_thread(func, *args, **kwargs):
+        called["used"] = True
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(retention_module.asyncio, "to_thread", fake_to_thread)
+    worker = StorageRetentionWorker(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=now,
+        now=lambda: now,
+    )
+
+    import asyncio
+
+    asyncio.run(worker.run(stop_event=threading_event(), max_iterations=1))
+
+    assert called["used"] is True
 
 
 def _insert_all_retained_tables(session, now: datetime) -> None:

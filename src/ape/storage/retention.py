@@ -236,7 +236,8 @@ class StorageRetentionWorker:
             iterations += 1
             self.status.connection_state = "running"
             self.record_heartbeat()
-            result = run_storage_retention_once(
+            result = await asyncio.to_thread(
+                run_storage_retention_once,
                 self.config,
                 self.session_factory,
                 now=self.now,
