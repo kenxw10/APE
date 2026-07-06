@@ -245,6 +245,34 @@ class StorageRetentionRepository:
 
     def raw_payload_non_null_count(self, table_name: str) -> int | None:
         _validate_table_name(table_name)
+        if self.session.bind is not None and self.session.bind.dialect.name == "postgresql":
+            value = self.session.scalar(
+                text(
+                    """
+                    SELECT
+                        CASE
+                            WHEN stats.null_frac IS NULL OR cls.reltuples < 0
+                                THEN NULL
+                            ELSE GREATEST(
+                                0,
+                                ROUND(cls.reltuples * (1.0 - stats.null_frac))
+                            )::bigint
+                        END AS approximate_count
+                    FROM pg_class cls
+                    JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+                    LEFT JOIN pg_stats stats
+                      ON stats.schemaname = ns.nspname
+                     AND stats.tablename = cls.relname
+                     AND stats.attname = 'raw_payload'
+                    WHERE ns.nspname = current_schema()
+                      AND cls.relname = :table_name
+                    LIMIT 1
+                    """
+                ),
+                {"table_name": table_name},
+            )
+            return None if value is None else int(value)
+
         value = self.session.scalar(
             text(f"SELECT COUNT(*) FROM {table_name} WHERE raw_payload IS NOT NULL")
         )

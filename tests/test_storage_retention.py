@@ -212,6 +212,18 @@ def test_storage_retention_repository_uses_bounded_cte_mutations() -> None:
     assert "RETURNING id" in update_source
 
 
+def test_postgres_raw_payload_count_uses_catalog_estimate() -> None:
+    session = _RecordingPostgresSession(value=42)
+    repository = StorageRetentionRepository(session)  # type: ignore[arg-type]
+
+    assert repository.raw_payload_non_null_count("orderbook_snapshots") == 42
+    sql = " ".join(session.statements)
+    assert "pg_stats" in sql
+    assert "reltuples" in sql
+    assert "COUNT(*)" not in sql
+    assert "raw_payload IS NOT NULL" not in sql
+
+
 def test_storage_retention_worker_records_heartbeat_metadata(retention_db) -> None:
     database_url, session_factory = retention_db
     now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
@@ -367,6 +379,10 @@ def _insert_all_retained_tables(session, now: datetime) -> None:
             close_time=None,
         )
     )
+    no_close_market = session.scalar(
+        select(Market).where(Market.market_ticker == "KXBTC15M-NO-CLOSE")
+    )
+    no_close_market.updated_at = now - timedelta(seconds=120)
 
 
 def _retention_config(
@@ -402,3 +418,19 @@ def threading_event():
     import threading
 
     return threading.Event()
+
+
+class _RecordingPostgresSession:
+    bind = type(
+        "Bind",
+        (),
+        {"dialect": type("Dialect", (), {"name": "postgresql"})()},
+    )()
+
+    def __init__(self, value: int) -> None:
+        self.value = value
+        self.statements: list[str] = []
+
+    def scalar(self, statement, parameters=None):
+        self.statements.append(str(statement))
+        return self.value
