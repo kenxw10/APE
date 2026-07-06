@@ -77,12 +77,11 @@ def build_brti_reference_status(
     heartbeat_metadata: dict[str, Any] = {}
     latest_tick: ReferenceTick | None = None
 
-    enabled = config.kalshi_cfbenchmarks_enabled
-    if not enabled:
+    config_enabled = config.kalshi_cfbenchmarks_enabled
+    if not config_enabled:
         connection_state = "disabled"
     elif not diagnostic.signer_ready:
         connection_state = "not_configured"
-        blockers.append("kalshi_cfbenchmarks_credentials_not_configured_or_not_parseable")
     else:
         connection_state = "waiting_for_worker"
 
@@ -103,9 +102,9 @@ def build_brti_reference_status(
                 engine.dispose()
         except SQLAlchemyError:
             blockers.append("database_unavailable_for_brti_diagnostics")
-            if enabled:
+            if config_enabled:
                 connection_state = "diagnostics_unavailable"
-    elif enabled:
+    elif config_enabled:
         blockers.append("database_not_configured_for_brti_diagnostics")
 
     if heartbeat_metadata:
@@ -115,27 +114,50 @@ def build_brti_reference_status(
         warnings.extend(_string_list(heartbeat_metadata.get("warnings")))
         blockers.extend(_string_list(heartbeat_metadata.get("blockers")))
 
+    enabled = _bool_or_none(heartbeat_metadata.get("enabled"))
+    effective_enabled = config_enabled if enabled is None else enabled
+    configured = _bool_or_none(heartbeat_metadata.get("configured"))
+    effective_configured = diagnostic.configured if configured is None else configured
+    signer_ready = _bool_or_none(heartbeat_metadata.get("signer_ready"))
+    effective_signer_ready = (
+        diagnostic.signer_ready if signer_ready is None else signer_ready
+    )
+    if effective_enabled and not effective_signer_ready:
+        blockers.append("kalshi_cfbenchmarks_credentials_not_configured_or_not_parseable")
+
     last_message_at = _datetime_or_none(heartbeat_metadata.get("last_message_at"))
     latest_received_at = latest_tick.received_at if latest_tick else None
     last_persisted_at = _latest_datetime(
         _datetime_or_none(heartbeat_metadata.get("last_persisted_at")),
         latest_received_at,
     )
-    stale = _is_stale(
-        enabled=enabled and diagnostic.signer_ready and not blockers,
+    latest_source_age_ms = latest_tick.source_age_ms if latest_tick else None
+    stale_receipt = _is_stale(
+        enabled=effective_enabled and effective_signer_ready and not blockers,
         latest_tick_received_at=last_persisted_at,
         checked_at=checked_at,
         stale_after_seconds=config.kalshi_cfbenchmarks_stale_after_seconds,
     )
-    if stale:
+    stale_source_age = _is_source_age_stale(
+        enabled=effective_enabled and effective_signer_ready and not blockers,
+        source_age_ms=latest_source_age_ms,
+        max_source_age_ms=config.kalshi_cfbenchmarks_max_source_age_ms,
+    )
+    stale = stale_receipt or stale_source_age
+    if stale_receipt:
         warnings.append("brti_reference_stale")
+    if stale_source_age:
+        warnings.append("brti_reference_source_age_stale")
 
     return BrtiReferenceStatusSnapshot(
-        configured=diagnostic.configured,
-        enabled=enabled,
-        signer_ready=diagnostic.signer_ready,
+        configured=effective_configured,
+        enabled=effective_enabled,
+        signer_ready=effective_signer_ready,
         source=BRTI_SOURCE,
-        index_ids=list(config.kalshi_cfbenchmarks_index_ids),
+        index_ids=(
+            _string_list(heartbeat_metadata.get("index_ids"))
+            or list(config.kalshi_cfbenchmarks_index_ids)
+        ),
         subscription_id=_int_or_none(heartbeat_metadata.get("subscription_id")),
         connection_state=connection_state,
         latest_tick_received_at=latest_received_at,
@@ -151,7 +173,7 @@ def build_brti_reference_status(
         final_minute_average_status=(
             latest_tick.final_minute_average_status if latest_tick else None
         ),
-        source_age_ms=latest_tick.source_age_ms if latest_tick else None,
+        source_age_ms=latest_source_age_ms,
         stale=stale,
         last_message_at=last_message_at,
         last_persisted_at=last_persisted_at,
@@ -233,6 +255,17 @@ def _is_stale(
     return (checked_at - latest_tick_received_at).total_seconds() > stale_after_seconds
 
 
+def _is_source_age_stale(
+    *,
+    enabled: bool,
+    source_age_ms: int | None,
+    max_source_age_ms: int,
+) -> bool:
+    if not enabled or source_age_ms is None:
+        return False
+    return source_age_ms > max_source_age_ms
+
+
 def _dict_or_empty(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -277,3 +310,9 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    return None
