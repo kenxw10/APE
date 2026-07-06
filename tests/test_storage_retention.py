@@ -1,0 +1,368 @@
+from __future__ import annotations
+
+import inspect
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+import pytest
+from sqlalchemy import func, select
+
+from ape.config import load_config
+from ape.db.migrations import run_migrations
+from ape.db.models import (
+    Market,
+    OrderbookSnapshot,
+    PublicTrade,
+    ReferenceTick,
+    StorageRetentionRun,
+    StrategyDecision,
+    WorkerHeartbeat,
+)
+from ape.db.session import create_engine_from_config, create_session_factory
+from ape.repositories.inputs import (
+    MarketInput,
+    OrderbookSnapshotInput,
+    PublicTradeInput,
+    ReferenceTickInput,
+    StrategyDecisionInput,
+    WorkerHeartbeatInput,
+)
+from ape.repositories.markets import MarketsRepository
+from ape.repositories.orderbook import OrderbookRepository
+from ape.repositories.public_trades import PublicTradesRepository
+from ape.repositories.reference_ticks import ReferenceTicksRepository
+from ape.repositories.storage_retention import StorageRetentionRepository
+from ape.repositories.strategy_decisions import StrategyDecisionsRepository
+from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
+from ape.safety import assess_startup_safety
+from ape.storage import retention as retention_module
+from ape.storage.retention import (
+    RETENTION_SUCCESS,
+    StorageRetentionWorker,
+    run_storage_retention_once,
+)
+
+
+@pytest.fixture
+def retention_db(tmp_path):
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_storage_retention.sqlite'}"
+    config = load_config({"DATABASE_URL": database_url})
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        yield database_url, session_factory
+    finally:
+        engine.dispose()
+
+
+def test_storage_retention_deletes_old_rows_in_chunks(retention_db) -> None:
+    database_url, session_factory = retention_db
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    config = _retention_config(database_url, batch_size=1)
+
+    with session_factory() as session:
+        _insert_all_retained_tables(session, now)
+        session.commit()
+
+    result = run_storage_retention_once(config, session_factory, now=lambda: now)
+
+    assert result.status == RETENTION_SUCCESS
+    assert result.deleted_rows["orderbook_snapshots"] == 1
+    assert result.deleted_rows["public_trades"] == 1
+    assert result.deleted_rows["reference_ticks"] == 1
+    assert result.deleted_rows["worker_heartbeats"] == 1
+    assert result.deleted_rows["strategy_decisions"] == 1
+    assert result.deleted_rows["markets"] == 2
+
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(OrderbookSnapshot)) == 1
+        assert session.scalar(select(func.count()).select_from(PublicTrade)) == 1
+        assert session.scalar(select(func.count()).select_from(ReferenceTick)) == 1
+        assert session.scalar(select(func.count()).select_from(WorkerHeartbeat)) == 1
+        assert session.scalar(select(func.count()).select_from(StrategyDecision)) == 1
+        assert session.scalar(select(func.count()).select_from(Market)) == 1
+        assert session.scalar(select(StorageRetentionRun).where(
+            StorageRetentionRun.run_id == result.run_id
+        )).status == RETENTION_SUCCESS
+
+
+def test_storage_retention_strips_raw_payload_without_losing_normalized_fields(
+    retention_db,
+) -> None:
+    database_url, session_factory = retention_db
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    config = _retention_config(database_url, row_seconds=300, raw_seconds=30)
+
+    with session_factory() as session:
+        OrderbookRepository(session).insert_snapshot(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC15M-RAW",
+                received_at=now - timedelta(seconds=60),
+                yes_bid=Decimal("48"),
+                raw_payload_hash="hash-raw",
+                raw_payload={"book": "large"},
+            )
+        )
+        session.commit()
+
+    result = run_storage_retention_once(config, session_factory, now=lambda: now)
+
+    assert result.raw_payload_stripped_rows["orderbook_snapshots"] == 1
+    with session_factory() as session:
+        snapshot = session.scalar(select(OrderbookSnapshot))
+        assert snapshot is not None
+        assert snapshot.yes_bid == Decimal("48.00000000")
+        assert snapshot.raw_payload_hash == "hash-raw"
+        assert snapshot.raw_payload is None
+
+
+def test_storage_retention_dry_run_reports_counts_without_mutating(retention_db) -> None:
+    database_url, session_factory = retention_db
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    config = _retention_config(database_url, dry_run=True)
+
+    with session_factory() as session:
+        OrderbookRepository(session).insert_snapshot(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC15M-OLD",
+                received_at=now - timedelta(seconds=120),
+                raw_payload={"book": "old"},
+            )
+        )
+        session.commit()
+
+    result = run_storage_retention_once(config, session_factory, now=lambda: now)
+
+    assert result.dry_run is True
+    assert result.deleted_rows["orderbook_snapshots"] == 1
+    assert result.raw_payload_stripped_rows["orderbook_snapshots"] == 1
+    with session_factory() as session:
+        snapshot = session.scalar(select(OrderbookSnapshot))
+        assert snapshot is not None
+        assert snapshot.raw_payload == {"book": "old"}
+
+
+def test_storage_retention_max_duration_stops_before_chunks(
+    retention_db,
+    monkeypatch,
+) -> None:
+    database_url, session_factory = retention_db
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    config = _retention_config(database_url, max_run_seconds=1)
+    monotonic_values = iter([0.0, 2.0, 2.0, 2.0])
+    monkeypatch.setattr(retention_module, "monotonic", lambda: next(monotonic_values))
+
+    with session_factory() as session:
+        OrderbookRepository(session).insert_snapshot(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC15M-OLD",
+                received_at=now - timedelta(seconds=120),
+            )
+        )
+        session.commit()
+
+    result = run_storage_retention_once(config, session_factory, now=lambda: now)
+
+    assert "storage_retention_max_run_seconds_reached" in result.warnings
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(OrderbookSnapshot)) == 1
+
+
+def test_failed_storage_retention_run_records_safe_error(
+    retention_db,
+    monkeypatch,
+) -> None:
+    database_url, session_factory = retention_db
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    config = _retention_config(database_url)
+
+    def fail_row_counts(self, table_names):
+        raise RuntimeError("synthetic failure with no secrets")
+
+    monkeypatch.setattr(StorageRetentionRepository, "row_counts", fail_row_counts)
+
+    result = run_storage_retention_once(config, session_factory, now=lambda: now)
+
+    assert result.status == "failed"
+    assert result.error_type == "RuntimeError"
+    with session_factory() as session:
+        latest = StorageRetentionRepository(session).get_latest_run()
+        assert latest is not None
+        assert latest.status == "failed"
+        assert latest.error_message == "synthetic failure with no secrets"
+
+
+def test_storage_retention_repository_uses_bounded_cte_mutations() -> None:
+    delete_source = inspect.getsource(StorageRetentionRepository.delete_batch)
+    update_source = inspect.getsource(StorageRetentionRepository.strip_raw_payload_batch)
+
+    assert "WITH doomed AS" in delete_source
+    assert "LIMIT :batch_size" in delete_source
+    assert "RETURNING id" in delete_source
+    assert "WITH targets AS" in update_source
+    assert "LIMIT :batch_size" in update_source
+    assert "RETURNING id" in update_source
+
+
+def test_storage_retention_worker_records_heartbeat_metadata(retention_db) -> None:
+    database_url, session_factory = retention_db
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    config = _retention_config(database_url)
+    worker = StorageRetentionWorker(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=now,
+        now=lambda: now,
+    )
+    stop_event = threading_event()
+
+    import asyncio
+
+    asyncio.run(worker.run(stop_event=stop_event, max_iterations=1))
+
+    with session_factory() as session:
+        heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+        assert heartbeat is not None
+        assert heartbeat.metadata_["storage"]["retention"]["enabled"] is True
+        assert heartbeat.metadata_["storage"]["retention"]["last_status"] == "success"
+
+
+def _insert_all_retained_tables(session, now: datetime) -> None:
+    OrderbookRepository(session).insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker="KXBTC15M-OLD",
+            received_at=now - timedelta(seconds=120),
+            raw_payload={"book": "old"},
+        )
+    )
+    OrderbookRepository(session).insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker="KXBTC15M-RECENT",
+            received_at=now - timedelta(seconds=10),
+            raw_payload={"book": "recent"},
+        )
+    )
+    PublicTradesRepository(session).insert_trade(
+        PublicTradeInput(
+            market_ticker="KXBTC15M-OLD",
+            received_at=now - timedelta(seconds=120),
+            executed_at=now - timedelta(seconds=119),
+            raw_payload={"trade": "old"},
+        )
+    )
+    PublicTradesRepository(session).insert_trade(
+        PublicTradeInput(
+            market_ticker="KXBTC15M-RECENT",
+            received_at=now - timedelta(seconds=10),
+            executed_at=now - timedelta(seconds=9),
+            raw_payload={"trade": "recent"},
+        )
+    )
+    ReferenceTicksRepository(session).insert_tick(
+        ReferenceTickInput(
+            source="kalshi_cfbenchmarks_brti",
+            received_at=now - timedelta(seconds=120),
+            parse_status="valid",
+            raw_payload={"value": "old"},
+        )
+    )
+    ReferenceTicksRepository(session).insert_tick(
+        ReferenceTickInput(
+            source="kalshi_cfbenchmarks_brti",
+            received_at=now - timedelta(seconds=10),
+            parse_status="valid",
+            raw_payload={"value": "recent"},
+        )
+    )
+    WorkerHeartbeatRepository(session).record_heartbeat(
+        WorkerHeartbeatInput(
+            service_name="ape-worker",
+            heartbeat_at=now - timedelta(seconds=120),
+            app_mode="OBSERVER",
+            is_safe=True,
+        )
+    )
+    WorkerHeartbeatRepository(session).record_heartbeat(
+        WorkerHeartbeatInput(
+            service_name="ape-worker",
+            heartbeat_at=now - timedelta(seconds=10),
+            app_mode="OBSERVER",
+            is_safe=True,
+        )
+    )
+    StrategyDecisionsRepository(session).insert_decision(
+        StrategyDecisionInput(
+            decision_id="old-decision",
+            evaluated_at=now - timedelta(seconds=120),
+            decision_state="OBSERVE_ONLY_MARKET",
+            primary_reason="old",
+            app_mode="OBSERVER",
+        )
+    )
+    StrategyDecisionsRepository(session).insert_decision(
+        StrategyDecisionInput(
+            decision_id="recent-decision",
+            evaluated_at=now - timedelta(seconds=10),
+            decision_state="OBSERVE_ONLY_MARKET",
+            primary_reason="recent",
+            app_mode="OBSERVER",
+        )
+    )
+    MarketsRepository(session).upsert_market(
+        MarketInput(
+            market_ticker="KXBTC15M-OLD",
+            open_time=now - timedelta(seconds=240),
+            close_time=now - timedelta(seconds=120),
+        )
+    )
+    MarketsRepository(session).upsert_market(
+        MarketInput(
+            market_ticker="KXBTC15M-ACTIVE",
+            open_time=now - timedelta(seconds=60),
+            close_time=now + timedelta(seconds=60),
+        )
+    )
+    MarketsRepository(session).upsert_market(
+        MarketInput(
+            market_ticker="KXBTC15M-NO-CLOSE",
+            open_time=now - timedelta(seconds=240),
+            close_time=None,
+        )
+    )
+
+
+def _retention_config(
+    database_url: str,
+    *,
+    batch_size: int = 50,
+    row_seconds: int = 60,
+    raw_seconds: int = 30,
+    dry_run: bool = False,
+    max_run_seconds: int = 20,
+):
+    return load_config(
+        {
+            "DATABASE_URL": database_url,
+            "STORAGE_RETENTION_ENABLED": "true",
+            "STORAGE_RETENTION_BATCH_SIZE": str(batch_size),
+            "STORAGE_RETENTION_MAX_RUN_SECONDS": str(max_run_seconds),
+            "STORAGE_RETENTION_DRY_RUN": str(dry_run).lower(),
+            "STORAGE_RETENTION_ORDERBOOK_SECONDS": str(row_seconds),
+            "STORAGE_RETENTION_PUBLIC_TRADES_SECONDS": str(row_seconds),
+            "STORAGE_RETENTION_REFERENCE_TICKS_SECONDS": str(row_seconds),
+            "STORAGE_RETENTION_WORKER_HEARTBEATS_SECONDS": str(row_seconds),
+            "STORAGE_RETENTION_STRATEGY_DECISIONS_SECONDS": str(row_seconds),
+            "STORAGE_RETENTION_MARKETS_SECONDS": str(row_seconds),
+            "STORAGE_RETENTION_RAW_PAYLOAD_ORDERBOOK_SECONDS": str(raw_seconds),
+            "STORAGE_RETENTION_RAW_PAYLOAD_PUBLIC_TRADES_SECONDS": str(raw_seconds),
+            "STORAGE_RETENTION_RAW_PAYLOAD_REFERENCE_TICKS_SECONDS": str(raw_seconds),
+        }
+    )
+
+
+def threading_event():
+    import threading
+
+    return threading.Event()
