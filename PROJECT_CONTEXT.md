@@ -13,7 +13,7 @@ Planned platform split:
 - Railway Postgres
 - Vercel dashboard
 
-PR 1 is merged and validated. PR 2 is merged and validated. PR 3 adds Railway backend deployment scaffolding for the API and always-on worker. PR 3a adds Railway runtime dependency packaging. PR 4 adds a Vercel-ready read-only dashboard scaffold. PR 4a adds explicit Vercel build configuration. PR 4b adds dashboard visual polish. PR 5 adds observer-only Kalshi REST auth diagnostics and active BTC15 market resolution. PR 6 adds observer-only Kalshi WebSocket market-data intake for the Railway worker, disabled by default. PR 7 adds observer-only BRTI / CF Benchmarks reference-feed intake for the Railway worker, disabled by default. PR 7a makes BRTI use a dedicated worker WebSocket by default, exposes `/reference/brti/series`, and wires the read-only dashboard Reference Price CF/BRTI chart to live BRTI data when available. PR 8 adds an observer-only strategy decision ledger v0, disabled by default, with read-only strategy status/decision endpoints and dashboard diagnostics. PR 8 also renders the dashboard Reference Price chart as the current fixed Kalshi 15-minute interval instead of a trailing rolling plot.
+PR 1 is merged and validated. PR 2 is merged and validated. PR 3 adds Railway backend deployment scaffolding for the API and always-on worker. PR 3a adds Railway runtime dependency packaging. PR 4 adds a Vercel-ready read-only dashboard scaffold. PR 4a adds explicit Vercel build configuration. PR 4b adds dashboard visual polish. PR 5 adds observer-only Kalshi REST auth diagnostics and active BTC15 market resolution. PR 6 adds observer-only Kalshi WebSocket market-data intake for the Railway worker, disabled by default. PR 7 adds observer-only BRTI / CF Benchmarks reference-feed intake for the Railway worker, disabled by default. PR 7a makes BRTI use a dedicated worker WebSocket by default, exposes `/reference/brti/series`, and wires the read-only dashboard Reference Price CF/BRTI chart to live BRTI data when available. PR 8 adds an observer-only strategy decision ledger v0, disabled by default, with read-only strategy status/decision endpoints and dashboard diagnostics. PR 8 also renders the dashboard Reference Price chart as the current fixed Kalshi 15-minute interval instead of a trailing rolling plot. PR 8a adds worker-owned storage retention and read-only `/storage/status` database lifecycle diagnostics; it is disabled by default, strips old raw payload JSON, deletes old observer rows in bounded batches, writes `storage_retention_runs` audit rows, and never exposes a destructive API endpoint.
 
 Railway API: https://ape-api-production.up.railway.app
 
@@ -71,7 +71,7 @@ Current safety policy blocks startup when:
 - `TRADING_ENABLED=true`
 - `EXECUTE=true`
 
-No live trading, paper trading, Kalshi order placement, strategy execution, or trading-capable dashboard behavior is included. The PR 6 ingestion loop is an observer-only Railway worker WebSocket collector for public Kalshi ticker, orderbook, and trade messages. PR 7/7a adds observer-only BRTI reference ticks through Kalshi's authenticated `cfbenchmarks_value` WebSocket channel for `index_ids=["BRTI"]`; it stores diagnostics and a safe read-only series only. PR 8 writes an observer-only decision ledger to `strategy_decisions`; it never emits enter/order/fill/execution states.
+No live trading, paper trading, Kalshi order placement, strategy execution, or trading-capable dashboard behavior is included. The PR 6 ingestion loop is an observer-only Railway worker WebSocket collector for public Kalshi ticker, orderbook, and trade messages. PR 7/7a adds observer-only BRTI reference ticks through Kalshi's authenticated `cfbenchmarks_value` WebSocket channel for `index_ids=["BRTI"]`; it stores diagnostics and a safe read-only series only. PR 8 writes an observer-only decision ledger to `strategy_decisions`; it never emits enter/order/fill/execution states. PR 8a is storage lifecycle only; it does not change strategy logic, stale/transport semantics, credentials, or trading safety.
 
 Kalshi REST/WebSocket credentials are optional at startup. When missing, `/kalshi/status`, `/markets/active`, and `/ws/status` return safe diagnostics. If configured, credentials belong only in Railway API/worker environment variables, never in Vercel.
 
@@ -87,9 +87,10 @@ This ladder is directional and should be reviewed before each PR.
 6. Kalshi orderbook, ticker, and public trade WebSocket observer. Completed and validated.
 7. BRTI/reference data intake in observer mode. Completed by PR 7.
 7a. Dedicated BRTI WebSocket, live BRTI series endpoint, and dashboard Reference Price chart wiring. Completed by PR 7a.
-8. Observer-only strategy decision ledger v0. Current PR.
+8. Observer-only strategy decision ledger v0. Completed by PR 8.
+8a. Storage lifecycle, retention policy, and database lifecycle controls. Current PR.
 9. Observer state API, health, safety, and SSE diagnostics.
-10. Storage lifecycle, retention policy, and local replay fixtures.
+10. Local replay fixtures.
 11. Deterministic replay harness for captured market/reference data.
 12. Momentum feature calculations without trade decisions.
 13. Dry-run decision interface with execution still blocked.
@@ -100,4 +101,4 @@ This ladder is directional and should be reviewed before each PR.
 18. Manual live-canary safety plan with tiny limits and approvals.
 19. Post-canary monitoring, rollback, alerting, and hardening.
 
-Next manual checkpoint after PR 8: keep `KALSHI_WS_ENABLED=true`, `KALSHI_CFBENCHMARKS_ENABLED=true`, `KALSHI_CFBENCHMARKS_INDEX_IDS=BRTI`, and `KALSHI_CFBENCHMARKS_DEDICATED_CONNECTION=true` on the Railway worker; add `STRATEGY_OBSERVER_ENABLED=true` to the Railway worker only; keep API and worker observer-only; redeploy the worker; and validate worker logs, `/strategy/status`, `/strategy/decisions/latest`, `/strategy/decisions/recent`, `/ws/status`, `/reference/brti/status`, `/reference/brti/latest`, `/reference/brti/series`, `strategy_decisions`, `reference_ticks`, `/health`, `/safety`, `/db/status`, `/ready`, `/kalshi/status`, and `/markets/active`. The dashboard may read the public Railway strategy and BRTI responses but must not receive Kalshi credentials, WebSocket variables, BRTI env vars, or strategy observer env vars.
+Next manual checkpoint after PR 8a: keep `KALSHI_WS_ENABLED=true`, `KALSHI_CFBENCHMARKS_ENABLED=true`, `KALSHI_CFBENCHMARKS_INDEX_IDS=BRTI`, `KALSHI_CFBENCHMARKS_DEDICATED_CONNECTION=true`, and `STRATEGY_OBSERVER_ENABLED=true` on the Railway worker; add `STORAGE_RETENTION_ENABLED=true` and the documented retention windows to the Railway worker only; keep API and worker observer-only; redeploy the worker; and validate worker logs, `/storage/status`, `/strategy/status`, `/strategy/decisions/latest`, `/strategy/decisions/recent`, `/ws/status`, `/reference/brti/status`, `/reference/brti/latest`, `/reference/brti/series`, `storage_retention_runs`, `strategy_decisions`, `reference_ticks`, `/health`, `/safety`, `/db/status`, `/ready`, `/kalshi/status`, and `/markets/active`. The dashboard may read the public Railway API responses but must not receive Kalshi credentials, WebSocket variables, BRTI env vars, strategy observer env vars, or storage retention env vars.

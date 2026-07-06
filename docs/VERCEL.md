@@ -38,6 +38,8 @@ PR 7a BRTI / CF Benchmarks intake is Railway-worker-only. Do not add `KALSHI_CFB
 
 PR 8 strategy observer settings are Railway-worker-only. Do not add `STRATEGY_OBSERVER_ENABLED` or other `STRATEGY_*` env vars to Vercel. The dashboard only reads the public Railway API `/strategy/status` response.
 
+PR 8a storage retention settings are Railway-worker-only. Do not add `STORAGE_RETENTION_*` env vars or database credentials to Vercel. The dashboard may read the public Railway API `/storage/status` response in a later UI PR, but Vercel must not own cleanup behavior.
+
 ## Expected Build Logs
 
 The dashboard build includes a marker that proves Vercel is running from the `dashboard` app:

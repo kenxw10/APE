@@ -31,6 +31,8 @@ After PR 7a merges, BRTI / CF Benchmarks intake is still disabled by default. En
 
 After PR 8 merges, the strategy observer ledger is still disabled by default. Enable it only on the Railway worker service with `STRATEGY_OBSERVER_ENABLED=true` after market WebSocket and BRTI intake are healthy. This records observer-only decisions in the database and does not add paper trading, live trading, orders, fills, private channels, or execution.
 
+After PR 8a merges, storage retention is still disabled by default. Enable it only on the Railway worker service with `STORAGE_RETENTION_ENABLED=true` after `/storage/status` and migrations are validated. Retention deletes old observer data in bounded batches, strips old raw payload JSON, writes audit rows, and does not add public delete controls or automatic `VACUUM FULL`.
+
 ## Create Railway Project
 
 1. Create a new Railway project for APE.
@@ -72,6 +74,7 @@ Useful API endpoints:
 /strategy/status
 /strategy/decisions/latest
 /strategy/decisions/recent
+/storage/status
 ```
 
 `/ready` should return `ready` only when safety is safe and database connectivity works.
@@ -100,6 +103,8 @@ When `KALSHI_WS_ENABLED=false`, the worker records heartbeat-only diagnostics. W
 When `KALSHI_CFBENCHMARKS_ENABLED=true`, the worker also subscribes to Kalshi's authenticated `cfbenchmarks_value` channel with `index_ids=["BRTI"]` and stores observer-only reference ticks in `reference_ticks`. By default this runs on a dedicated BRTI WebSocket connection so BTC15 market rollover/resubscribe does not disconnect the reference feed. This does not add strategy, paper trading, live trading, orders, private channels, or execution.
 
 When `STRATEGY_OBSERVER_ENABLED=true`, the worker also evaluates the observer-only strategy ledger from persisted database rows. It reads active market metadata, BRTI ticks, Kalshi orderbook snapshots, and public trades; then writes a diagnostic row to `strategy_decisions`. It does not call Kalshi REST, subscribe to private channels, place orders, paper trade, live trade, or emit enter/fill/execution states.
+
+When `STORAGE_RETENTION_ENABLED=true`, the worker also runs the storage retention loop. It strips old raw payload JSON and deletes old observer rows in bounded chunks, then records each run in `storage_retention_runs` and worker heartbeat metadata. A failed retention run should not stop market WebSocket, BRTI, or strategy observer loops.
 
 For `/ws/status`, `last_error_type` and `last_error_message` describe a current unresolved worker error. A successful current orderbook or trade database write clears old recovered errors so stale startup failures do not keep the status page red.
 
@@ -308,6 +313,67 @@ Expected behavior:
 - No strategy endpoint returns private keys, signatures, raw Kalshi credentials, enter actions, order actions, fills, paper trades, or live-trading controls.
 - `strategy_decisions` rows are written at no more than the configured poll cadence unless the persisted context changes inside the same bucket.
 - Dashboard remains read-only and may show Strategy Observer status from the public API only.
+
+## Storage Retention Checkpoint After PR 8a
+
+Only after PR 8a is merged and the API/worker migrations are healthy, add these to the Railway worker service:
+
+```text
+STORAGE_RETENTION_ENABLED=true
+STORAGE_RETENTION_INTERVAL_SECONDS=300
+STORAGE_RETENTION_BATCH_SIZE=5000
+STORAGE_RETENTION_MAX_RUN_SECONDS=20
+STORAGE_RETENTION_DRY_RUN=false
+STORAGE_RETENTION_ORDERBOOK_SECONDS=7200
+STORAGE_RETENTION_PUBLIC_TRADES_SECONDS=86400
+STORAGE_RETENTION_REFERENCE_TICKS_SECONDS=86400
+STORAGE_RETENTION_WORKER_HEARTBEATS_SECONDS=21600
+STORAGE_RETENTION_STRATEGY_DECISIONS_SECONDS=1209600
+STORAGE_RETENTION_MARKETS_SECONDS=2592000
+STORAGE_RETENTION_RAW_PAYLOAD_ORDERBOOK_SECONDS=900
+STORAGE_RETENTION_RAW_PAYLOAD_PUBLIC_TRADES_SECONDS=3600
+STORAGE_RETENTION_RAW_PAYLOAD_REFERENCE_TICKS_SECONDS=3600
+STORAGE_RETENTION_STATUS_WARN_BYTES=40000000000
+STORAGE_RETENTION_STATUS_CRITICAL_BYTES=47500000000
+```
+
+Keep:
+
+```text
+APP_MODE=OBSERVER
+TRADING_ENABLED=false
+EXECUTE=false
+KALSHI_WS_ENABLED=true
+KALSHI_CFBENCHMARKS_ENABLED=true
+KALSHI_CFBENCHMARKS_INDEX_IDS=BRTI
+STRATEGY_OBSERVER_ENABLED=true
+```
+
+The API service may keep `STORAGE_RETENTION_ENABLED=false`; `/storage/status` reads audit rows, table stats, and worker heartbeat metadata. Do not add storage retention env vars, database credentials, Kalshi credentials, WebSocket settings, BRTI env vars, or strategy observer env vars to Vercel.
+
+After enabling storage retention on the worker, redeploy the worker and validate:
+
+```powershell
+Invoke-RestMethod https://ape-api-production.up.railway.app/storage/status
+Invoke-RestMethod https://ape-api-production.up.railway.app/strategy/status
+Invoke-RestMethod https://ape-api-production.up.railway.app/ws/status
+Invoke-RestMethod https://ape-api-production.up.railway.app/reference/brti/status
+Invoke-RestMethod https://ape-api-production.up.railway.app/health
+Invoke-RestMethod https://ape-api-production.up.railway.app/safety
+Invoke-RestMethod https://ape-api-production.up.railway.app/db/status
+Invoke-RestMethod https://ape-api-production.up.railway.app/ready
+```
+
+Expected behavior:
+
+- `/storage/status` shows `enabled=true` from worker metadata after the worker has recorded a heartbeat.
+- `latest_run_status` becomes `success` after the first retention pass.
+- `table_stats` reports aggregate table counts/sizes without row contents or raw payloads.
+- `storage_retention_runs` receives audit rows for retention attempts.
+- Old `raw_payload` JSON is stripped before normalized rows expire.
+- Old high-frequency rows are deleted in bounded batches.
+- No endpoint can trigger deletion on request.
+- No `VACUUM FULL` runs automatically. Postgres deletes free space for reuse, but physical disk size may not shrink immediately. Manual `VACUUM FULL` can lock tables and is outside this PR.
 
 ## Explicitly Not Included
 

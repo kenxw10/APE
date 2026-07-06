@@ -851,11 +851,12 @@ class KalshiWsCollector:
                     },
                 }
                 latest_heartbeat = repository.get_latest_heartbeat("ape-worker")
-                if latest_heartbeat is not None and self.config.strategy_observer_enabled:
+                metadata_keys = _enabled_non_collector_metadata_keys(self.config)
+                if latest_heartbeat is not None and metadata_keys:
                     _preserve_existing_worker_metadata(
                         metadata,
                         latest_heartbeat.metadata_,
-                        keys=("strategy",),
+                        keys=metadata_keys,
                     )
                 repository.record_heartbeat(
                     WorkerHeartbeatInput(
@@ -1170,6 +1171,15 @@ def _preserve_existing_worker_metadata(
     for key in keys:
         if key not in metadata and isinstance(existing_metadata.get(key), dict):
             metadata[key] = existing_metadata[key]
+
+
+def _enabled_non_collector_metadata_keys(config: AppConfig) -> tuple[str, ...]:
+    keys: list[str] = []
+    if config.strategy_observer_enabled:
+        keys.append("strategy")
+    if config.storage_retention_enabled:
+        keys.append("storage")
+    return tuple(keys)
 
 
 def _levels_diagnostic_shape(value: Any) -> dict[str, Any]:

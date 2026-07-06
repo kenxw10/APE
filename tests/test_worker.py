@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 
 from ape.config import load_config
 from ape.db.migrations import run_migrations
-from ape.db.models import WorkerHeartbeat
+from ape.db.models import StorageRetentionRun, WorkerHeartbeat
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.worker.main import configure_logging, run_worker
@@ -75,5 +75,33 @@ def test_worker_disabled_websocket_throttles_idle_heartbeats(tmp_path) -> None:
             heartbeat_count = session.scalar(select(func.count()).select_from(WorkerHeartbeat))
 
             assert heartbeat_count == 1
+    finally:
+        engine.dispose()
+
+
+def test_worker_enabled_storage_retention_runs_periodic_task(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_worker_retention.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "STORAGE_RETENTION_ENABLED": "true",
+            "STORAGE_RETENTION_INTERVAL_SECONDS": "300",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+
+    try:
+        run_worker(config, max_iterations=1)
+
+        with session_factory() as session:
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+            run_count = session.scalar(select(func.count()).select_from(StorageRetentionRun))
+
+            assert heartbeat is not None
+            assert heartbeat.metadata_["storage"]["retention"]["enabled"] is True
+            assert heartbeat.metadata_["storage"]["retention"]["last_status"] == "success"
+            assert run_count == 1
     finally:
         engine.dispose()
