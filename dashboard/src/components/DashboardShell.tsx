@@ -217,7 +217,7 @@ function createStatusSections(
       {
         label: "BRTI Age",
         value: formatSourceAge(brtiStatus),
-        tone: brtiStatus?.source_age_ms !== null && brtiStatus?.source_age_ms !== undefined && !brtiStatus.stale ? "green" : "muted"
+        tone: brtiStatus?.latest_tick_received_at && !brtiStatus.stale ? "green" : "muted"
       },
       {
         label: "Final Avg",
@@ -314,8 +314,8 @@ function formatSourceAge(brtiStatus: BrtiReferenceStatusResponse | null): string
   if (!brtiStatus) {
     return "--";
   }
-  if (brtiStatus.source_age_ms !== null && brtiStatus.source_age_ms !== undefined) {
-    return `${Math.max(0, Math.round(brtiStatus.source_age_ms / 1000))}s`;
+  if (brtiStatus.latest_tick_received_at) {
+    return formatAge(brtiStatus.checked_at, brtiStatus.latest_tick_received_at);
   }
-  return formatAge(brtiStatus.checked_at, brtiStatus.latest_tick_received_at);
+  return "--";
 }
