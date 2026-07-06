@@ -124,3 +124,23 @@ class WorkerHeartbeatInput:
     is_safe: bool
     started_at: datetime | None = None
     metadata: JsonPayload | None = None
+
+
+@dataclass(frozen=True)
+class StorageRetentionRunInput:
+    run_id: str
+    started_at: datetime
+    status: str
+    dry_run: bool
+    finished_at: datetime | None = None
+    duration_ms: int | None = None
+    deleted_rows: JsonPayload | None = None
+    raw_payload_stripped_rows: JsonPayload | None = None
+    table_row_counts_before: JsonPayload | None = None
+    table_row_counts_after: JsonPayload | None = None
+    table_sizes_before: JsonPayload | None = None
+    table_sizes_after: JsonPayload | None = None
+    warnings: JsonPayload | None = None
+    blockers: JsonPayload | None = None
+    error_type: str | None = None
+    error_message: str | None = None

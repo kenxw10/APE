@@ -20,6 +20,8 @@ PR 7 adds observer-only BRTI / CF Benchmarks reference-feed intake. It is disabl
 
 PR 8 adds an observer-only strategy decision ledger v0. It is disabled by default, runs only from persisted market/BRTI/orderbook/trade rows when enabled on the Railway worker, writes diagnostic rows to the existing `strategy_decisions` table, and exposes read-only `/strategy/status`, `/strategy/decisions/latest`, and `/strategy/decisions/recent` endpoints. It does not place orders, paper trade, live trade, create fills, use private channels, or add execution controls.
 
+PR 8a adds worker-owned storage retention and read-only database lifecycle status. It is disabled by default, deletes old high-volume observer rows in bounded batches when enabled on the Railway worker, strips raw payload JSON before normalized rows expire, writes audit rows to `storage_retention_runs`, and exposes read-only `/storage/status`. It does not add a destructive public API endpoint and does not run `VACUUM FULL`.
+
 ## Safety Defaults
 
 The default configuration is intentionally non-trading:
@@ -47,6 +49,8 @@ If Kalshi credentials are missing, `/kalshi/status` and `/markets/active` return
 `KALSHI_CFBENCHMARKS_ENABLED=false` by default. BRTI collection is worker-only and does not change trading safety.
 
 `STRATEGY_OBSERVER_ENABLED=false` by default. The strategy observer is a decision ledger only; it records why the system would keep observing and never emits enter/order/execution actions.
+
+`STORAGE_RETENTION_ENABLED=false` by default. Retention is worker-only observer infrastructure; it deletes old persisted diagnostics and raw payload JSON only when explicitly enabled on the Railway worker.
 
 ## Local Setup
 
@@ -99,6 +103,7 @@ Invoke-RestMethod "http://127.0.0.1:8000/reference/brti/series?window_seconds=90
 Invoke-RestMethod http://127.0.0.1:8000/strategy/status
 Invoke-RestMethod http://127.0.0.1:8000/strategy/decisions/latest
 Invoke-RestMethod "http://127.0.0.1:8000/strategy/decisions/recent?limit=100"
+Invoke-RestMethod http://127.0.0.1:8000/storage/status
 ```
 
 Successful health output should report `status` as `ok`, `app_mode` as `OBSERVER`, and `is_safe` as `True`.
@@ -114,6 +119,8 @@ When `KALSHI_WS_ENABLED=false`, `/ws/status` should report `connection_state` as
 When `KALSHI_CFBENCHMARKS_ENABLED=false`, `/reference/brti/status` should report `connection_state` as `disabled` and `stale` as `False`.
 
 When `STRATEGY_OBSERVER_ENABLED=false`, `/strategy/status` should report `connection_state` as `disabled` and `stale` as `False`.
+
+When `STORAGE_RETENTION_ENABLED=false`, `/storage/status` should report retention as disabled while still returning read-only table stats if `DATABASE_URL` is configured.
 
 ## Kalshi REST Resolver
 
@@ -176,7 +183,7 @@ KALSHI_CFBENCHMARKS_KALSHI_RECEIVED_WARN_MS=10000
 KALSHI_CFBENCHMARKS_TRADE_FRESH_MS=2000
 ```
 
-After PR 7a is merged, enable BRTI only on the Railway worker. Do not add Kalshi credentials, WebSocket settings, or BRTI env vars to Vercel. The API remains read-only and the dashboard only reads the public Railway API. `/reference/brti/series` returns a rolling 15-minute BRTI series sorted by `received_at`, capped at 16,000 points, and excludes raw payloads. Source age is upstream CF timestamp lag; it remains visible but is separate from transport and persistence staleness. `trade_ready_fresh` is a future strategy gate and is not used for trading in PR 7a. If Kalshi sends the final-minute 15-minute average, APE stores it for diagnostics only; no position-management, strategy, or trading logic uses it in PR 7a.
+After PR 7a is merged, enable BRTI only on the Railway worker. Do not add Kalshi credentials, WebSocket settings, or BRTI env vars to Vercel. The API remains read-only and the dashboard only reads the public Railway API. `/reference/brti/series` returns BRTI points sorted by `received_at`, capped at 16,000 points, and excludes raw payloads; the dashboard renders those points in the current fixed Kalshi 15-minute interval. Source age is upstream CF timestamp lag; it remains visible but is separate from transport and persistence staleness. `trade_ready_fresh` is a future strategy gate and is not used for trading in PR 7a. If Kalshi sends the final-minute 15-minute average, APE stores it for diagnostics only; no position-management, strategy, or trading logic uses it in PR 7a.
 
 ## Strategy Observer Ledger
 
@@ -210,6 +217,43 @@ The read-only endpoints are:
 
 Expected behavior: the latest decision state is one of the observer-safe diagnostic states such as `OBSERVE_ONLY_MARKET`, `REFERENCE_STALE`, `KALSHI_STALE`, or `TOO_CLOSE_TO_BOUNDARY`. There are no enter, fill, order, paper-trading, or live-trading states.
 
+## Storage Retention
+
+PR 8a is observer infrastructure for Railway Postgres lifecycle control. Retention is disabled by default and should be enabled only on the Railway worker after merge.
+
+Recommended Railway worker settings:
+
+```text
+STORAGE_RETENTION_ENABLED=true
+STORAGE_RETENTION_INTERVAL_SECONDS=300
+STORAGE_RETENTION_BATCH_SIZE=5000
+STORAGE_RETENTION_MAX_RUN_SECONDS=20
+STORAGE_RETENTION_DRY_RUN=false
+STORAGE_RETENTION_ORDERBOOK_SECONDS=7200
+STORAGE_RETENTION_PUBLIC_TRADES_SECONDS=86400
+STORAGE_RETENTION_REFERENCE_TICKS_SECONDS=86400
+STORAGE_RETENTION_WORKER_HEARTBEATS_SECONDS=21600
+STORAGE_RETENTION_STRATEGY_DECISIONS_SECONDS=1209600
+STORAGE_RETENTION_MARKETS_SECONDS=2592000
+STORAGE_RETENTION_RAW_PAYLOAD_ORDERBOOK_SECONDS=900
+STORAGE_RETENTION_RAW_PAYLOAD_PUBLIC_TRADES_SECONDS=3600
+STORAGE_RETENTION_RAW_PAYLOAD_REFERENCE_TICKS_SECONDS=3600
+STORAGE_RETENTION_STATUS_WARN_BYTES=40000000000
+STORAGE_RETENTION_STATUS_CRITICAL_BYTES=47500000000
+```
+
+Retention deletes old `orderbook_snapshots`, `public_trades`, `reference_ticks`, `worker_heartbeats`, `strategy_decisions`, and old closed `markets` rows in bounded batches. It strips `raw_payload` JSON from orderbook, public trade, and reference tick rows earlier than it deletes the normalized row, while preserving `raw_payload_hash` and parsed fields. Strategy decisions and markets are retained longer because they are lower volume and useful for audit.
+
+The read-only endpoint is:
+
+```text
+/storage/status
+```
+
+It returns aggregate table stats, latest retention-run audit information, warning/critical database-size status, and retention config summary. It does not expose raw payload contents, secrets, or any delete controls.
+
+Postgres deletes do not immediately shrink physical disk usage. Normal autovacuum should make freed table space reusable. A manual `VACUUM FULL` can shrink files but locks tables and is intentionally out of scope; APE never runs `VACUUM FULL` automatically.
+
 ## Database Setup
 
 PR 2 uses SQLAlchemy for the schema and repository layer. Railway Postgres is the production direction for a later PR, but local tests use SQLite so you do not need to install Postgres manually.
@@ -221,7 +265,7 @@ $env:DATABASE_URL="sqlite+pysqlite:///./local-ape.sqlite"
 python -m ape.db.migrations
 ```
 
-Successful output should say the database schema is current. The command does not print the database URL.
+Successful output should say the database schema is current. The command does not print the database URL. PR 8a adds the `storage_retention_runs` audit table.
 
 ## Railway Deployment
 
