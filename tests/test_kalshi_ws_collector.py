@@ -16,12 +16,14 @@ from ape.config import load_config
 from ape.db.migrations import run_migrations
 from ape.db.models import WorkerHeartbeat
 from ape.db.session import create_engine_from_config, create_session_factory
+from ape.kalshi.reference_messages import BRTI_SOURCE
 from ape.kalshi.resolver import ResolverResult, ResolverState
 from ape.kalshi.ws_collector import KalshiWsCollector
 from ape.kalshi.ws_status import build_kalshi_ws_status
 from ape.repositories.inputs import MarketInput
 from ape.repositories.orderbook import OrderbookRepository
 from ape.repositories.public_trades import PublicTradesRepository
+from ape.repositories.reference_ticks import ReferenceTicksRepository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import assess_startup_safety
 
@@ -170,6 +172,261 @@ def test_collector_subscribes_and_persists_mock_messages(tmp_path) -> None:
                 },
             },
         ]
+    finally:
+        engine.dispose()
+
+
+def test_collector_subscribes_to_brti_with_market_channels_and_persists_tick(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_market.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket([_brti_payload()])
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            latest_tick = ReferenceTicksRepository(session).get_latest_tick(BRTI_SOURCE)
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert latest_tick is not None
+            assert latest_tick.parsed_value == Decimal("68000.12000000")
+            assert latest_tick.trailing_60s_avg == Decimal("67999.50000000")
+            assert latest_tick.final_minute_average_status == "absent"
+            assert heartbeat is not None
+            brti_metadata = heartbeat.metadata_["reference"]["brti"]
+            assert brti_metadata["connection_state"] == "subscribed"
+            assert brti_metadata["subscription_id"] == 3
+            assert brti_metadata["latest_value"] == "68000.12"
+
+        assert websocket.sent[-1] == {
+            "id": 3,
+            "cmd": "subscribe",
+            "params": {
+                "channels": ["cfbenchmarks_value"],
+                "index_ids": ["BRTI"],
+            },
+        }
+        assert "market_ticker" not in websocket.sent[-1]["params"]
+    finally:
+        engine.dispose()
+
+
+def test_collector_can_persist_brti_without_market_websocket_enabled(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_only.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket([_brti_payload()])
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    def resolver(**_kwargs) -> ResolverResult:
+        raise AssertionError("market resolver should not run for BRTI-only collection")
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=resolver,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            latest_tick = ReferenceTicksRepository(session).get_latest_tick(BRTI_SOURCE)
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert latest_tick is not None
+            assert latest_tick.parse_status == "valid"
+            assert heartbeat is not None
+            assert heartbeat.metadata_["mode"] == "reference_ws"
+            assert heartbeat.metadata_["ws"]["connection_state"] == "disabled"
+            assert heartbeat.metadata_["reference"]["brti"]["connection_state"] == "subscribed"
+
+        assert websocket.sent == [
+            {
+                "id": 1,
+                "cmd": "subscribe",
+                "params": {
+                    "channels": ["cfbenchmarks_value"],
+                    "index_ids": ["BRTI"],
+                },
+            }
+        ]
+    finally:
+        engine.dispose()
+
+
+def test_collector_persists_malformed_brti_tick_without_crashing(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_malformed.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket([_brti_payload(value="bad")])
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            latest_tick = ReferenceTicksRepository(session).get_latest_tick(BRTI_SOURCE)
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert latest_tick is not None
+            assert latest_tick.parse_status == "malformed_value"
+            assert latest_tick.parsed_value is None
+            assert heartbeat is not None
+            assert "brti_malformed_value" in heartbeat.metadata_["reference"]["brti"]["warnings"]
+    finally:
+        engine.dispose()
+
+
+def test_collector_skips_duplicate_or_out_of_order_brti_source_timestamp(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_duplicate.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket([_brti_payload(seq=1), _brti_payload(seq=2)])
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            ticks = ReferenceTicksRepository(session).get_recent_ticks(BRTI_SOURCE, limit=10)
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert len(ticks) == 1
+            assert ticks[0].sequence_number == 1
+            assert heartbeat is not None
+            assert (
+                "brti_duplicate_or_out_of_order_source_ts"
+                in heartbeat.metadata_["reference"]["brti"]["warnings"]
+            )
+    finally:
+        engine.dispose()
+
+
+def test_collector_clears_stale_brti_error_after_successful_persist(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_error_clear.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket([_brti_payload()])
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        now=lambda: NOW,
+    )
+    collector.brti_status.last_error_type = "SQLAlchemyError"
+    collector.brti_status.last_error_message = "old reference persistence failure"
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert heartbeat is not None
+            brti_metadata = heartbeat.metadata_["reference"]["brti"]
+            assert brti_metadata["last_error_type"] is None
+            assert brti_metadata["last_error_message"] is None
+            assert brti_metadata["warnings"] == []
     finally:
         engine.dispose()
 
@@ -1147,6 +1404,34 @@ def _resolved_market(*, close_time: datetime | None = None, **_kwargs) -> Resolv
         persisted=False,
         resolved_at=NOW,
     )
+
+
+def _brti_payload(*, seq: int = 7, value: str = "68000.12") -> dict[str, Any]:
+    source_ts = NOW.replace(second=0)
+    source_ts_ms = int(source_ts.timestamp() * 1000)
+    return {
+        "type": "cfbenchmarks_value",
+        "sid": 3,
+        "seq": seq,
+        "msg": {
+            "index_id": "BRTI",
+            "received_at": "2026-07-05T14:35:00Z",
+            "data": json.dumps(
+                {
+                    "type": "value",
+                    "id": "BRTI",
+                    "time": source_ts_ms,
+                    "value": value,
+                }
+            ),
+            "avg_60s_data": {
+                "value": "67999.50",
+                "window_size": 60,
+                "window_start_ts_ms": source_ts_ms - 60_000,
+                "window_end_ts_exclusive": source_ts_ms,
+            },
+        },
+    }
 
 
 def _test_private_key_pem() -> str:

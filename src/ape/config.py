@@ -13,6 +13,7 @@ DEFAULT_KALSHI_API_BASE_URL = "https://external-api.kalshi.com/trade-api/v2"
 DEFAULT_KALSHI_WS_BASE_URL = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
 DEFAULT_KALSHI_BTC15_SERIES_TICKER = "KXBTC15M"
 DEFAULT_KALSHI_RESOLVER_PARSER_VERSION = "btc15_resolver_v1"
+DEFAULT_KALSHI_CFBENCHMARKS_INDEX_IDS = ("BRTI",)
 
 
 class ConfigError(ValueError):
@@ -57,6 +58,12 @@ class AppConfig:
     kalshi_ws_subscribe_orderbook: bool = True
     kalshi_ws_subscribe_ticker: bool = True
     kalshi_ws_subscribe_trades: bool = True
+    kalshi_cfbenchmarks_enabled: bool = False
+    kalshi_cfbenchmarks_index_ids: tuple[str, ...] = DEFAULT_KALSHI_CFBENCHMARKS_INDEX_IDS
+    kalshi_cfbenchmarks_stale_after_seconds: float = 3.0
+    kalshi_cfbenchmarks_max_source_age_ms: int = 3000
+    kalshi_cfbenchmarks_subscribe_on_worker: bool = True
+    kalshi_cfbenchmarks_persist_raw_payload: bool = True
 
 
 TRUE_VALUES = {"1", "true", "t", "yes", "y", "on"}
@@ -147,6 +154,30 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         kalshi_ws_subscribe_trades=_parse_bool(
             "KALSHI_WS_SUBSCRIBE_TRADES",
             _get(source, "KALSHI_WS_SUBSCRIBE_TRADES", "true"),
+        ),
+        kalshi_cfbenchmarks_enabled=_parse_bool(
+            "KALSHI_CFBENCHMARKS_ENABLED",
+            _get(source, "KALSHI_CFBENCHMARKS_ENABLED", "false"),
+        ),
+        kalshi_cfbenchmarks_index_ids=_parse_csv_values(
+            "KALSHI_CFBENCHMARKS_INDEX_IDS",
+            _get(source, "KALSHI_CFBENCHMARKS_INDEX_IDS", "BRTI"),
+        ),
+        kalshi_cfbenchmarks_stale_after_seconds=_parse_float(
+            "KALSHI_CFBENCHMARKS_STALE_AFTER_SECONDS",
+            _get(source, "KALSHI_CFBENCHMARKS_STALE_AFTER_SECONDS", "3"),
+        ),
+        kalshi_cfbenchmarks_max_source_age_ms=_parse_int(
+            "KALSHI_CFBENCHMARKS_MAX_SOURCE_AGE_MS",
+            _get(source, "KALSHI_CFBENCHMARKS_MAX_SOURCE_AGE_MS", "3000"),
+        ),
+        kalshi_cfbenchmarks_subscribe_on_worker=_parse_bool(
+            "KALSHI_CFBENCHMARKS_SUBSCRIBE_ON_WORKER",
+            _get(source, "KALSHI_CFBENCHMARKS_SUBSCRIBE_ON_WORKER", "true"),
+        ),
+        kalshi_cfbenchmarks_persist_raw_payload=_parse_bool(
+            "KALSHI_CFBENCHMARKS_PERSIST_RAW_PAYLOAD",
+            _get(source, "KALSHI_CFBENCHMARKS_PERSIST_RAW_PAYLOAD", "true"),
         ),
     )
 
@@ -258,3 +289,10 @@ def _parse_float(name: str, raw_value: str) -> float:
     if value <= 0:
         raise ConfigError(f"{name} must be greater than 0.")
     return value
+
+
+def _parse_csv_values(name: str, raw_value: str) -> tuple[str, ...]:
+    values = tuple(item.strip().upper() for item in raw_value.split(",") if item.strip())
+    if not values:
+        raise ConfigError(f"{name} must contain at least one value.")
+    return values

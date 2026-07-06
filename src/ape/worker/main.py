@@ -40,16 +40,18 @@ def run_worker(
 
     try:
         LOGGER.info(
-            "Starting ape-worker env=%s app_mode=%s safety=%s db_configured=%s ws_enabled=%s",
+            "Starting ape-worker env=%s app_mode=%s safety=%s db_configured=%s "
+            "ws_enabled=%s brti_enabled=%s",
             config.env,
             config.app_mode.value,
             "safe" if safety.is_safe else "blocked",
             bool(config.database_url),
             config.kalshi_ws_enabled,
+            config.kalshi_cfbenchmarks_enabled,
         )
 
         event = stop_event or threading.Event()
-        if config.kalshi_ws_enabled:
+        if config.kalshi_ws_enabled or _reference_worker_enabled(config):
             LOGGER.info("APE worker running Kalshi WebSocket collector in OBSERVER mode.")
             collector = KalshiWsCollector(
                 config=config,
@@ -113,6 +115,16 @@ def _record_idle_heartbeat(
                             "warnings": ["kalshi_ws_disabled"],
                             "blockers": [],
                         },
+                        "reference": {
+                            "brti": {
+                                "enabled": config.kalshi_cfbenchmarks_enabled,
+                                "source": "kalshi_cfbenchmarks_brti",
+                                "index_ids": list(config.kalshi_cfbenchmarks_index_ids),
+                                "connection_state": "disabled",
+                                "warnings": [],
+                                "blockers": [],
+                            }
+                        },
                     },
                 )
             )
@@ -132,6 +144,13 @@ def _idle_heartbeat_due(
         return True
     elapsed = (heartbeat_at.astimezone(UTC) - last_heartbeat_at.astimezone(UTC)).total_seconds()
     return elapsed >= heartbeat_interval_seconds(config)
+
+
+def _reference_worker_enabled(config: AppConfig) -> bool:
+    return (
+        config.kalshi_cfbenchmarks_enabled
+        and config.kalshi_cfbenchmarks_subscribe_on_worker
+    )
 
 
 def main() -> int:

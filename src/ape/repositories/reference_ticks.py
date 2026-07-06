@@ -27,3 +27,10 @@ class ReferenceTicksRepository:
             )
         )
 
+    def get_latest_tick(self, source: str) -> ReferenceTick | None:
+        return self.session.scalar(
+            select(ReferenceTick)
+            .where(ReferenceTick.source == source)
+            .order_by(desc(ReferenceTick.received_at), desc(ReferenceTick.id))
+            .limit(1)
+        )

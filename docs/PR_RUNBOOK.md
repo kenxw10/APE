@@ -16,7 +16,8 @@ Rules:
 - Do not move to the next PR until the current PR has been reviewed, merged, and validated.
 - Do not introduce live trading, paper trading, execution, secrets, external market data calls, or deployment behavior unless that PR explicitly authorizes it.
 - Kalshi REST resolver PRs may add read-only authenticated diagnostics only when explicitly scoped; they must not add order placement, paper trading, strategy decisions, WebSocket ingestion, or BRTI ingestion.
-- Kalshi WebSocket PRs may add observer-only public ticker/orderbook/trade capture only when explicitly scoped; they must not add BRTI/CF Benchmarks, private user channels, order placement, paper trading, strategy decisions, or execution.
+- Kalshi WebSocket PRs may add observer-only public ticker/orderbook/trade capture only when explicitly scoped; they must not add private user channels, order placement, paper trading, strategy decisions, or execution.
+- BRTI/CF Benchmarks PRs may add observer-only reference-feed capture only when explicitly scoped; they must not add strategy decisions, paper trading, live trading, order placement, private/user channels, or execution controls.
 - Database schema/repository changes are allowed only in PRs that explicitly authorize storage work.
 - Railway worker services should be always-on processes, not cron jobs, unless a later PR explicitly changes that decision.
 
@@ -53,3 +54,19 @@ PR 6 post-merge checkpoint:
 - Dashboard validation should use the `Kalshi WS` / `WS Channels` status or a
   successful `/ws/status` response. Do not require literal browser WebSocket access
   from the Vercel dashboard.
+
+PR 7 post-merge checkpoint:
+
+- Set `KALSHI_CFBENCHMARKS_ENABLED=true` on the Railway worker only.
+- Set `KALSHI_CFBENCHMARKS_INDEX_IDS=BRTI` on the Railway worker only.
+- Keep `KALSHI_CFBENCHMARKS_SUBSCRIBE_ON_WORKER=true`.
+- Keep API and worker `APP_MODE=OBSERVER`, `TRADING_ENABLED=false`, and `EXECUTE=false`.
+- Do not add BRTI env vars, Kalshi credentials, or WebSocket settings to Vercel.
+- Redeploy the Railway worker.
+- Validate worker logs, `/reference/brti/status`, `/reference/brti/latest`, `/ws/status`,
+  `/health`, `/safety`, `/db/status`, and `/ready`.
+- Confirm `reference_ticks` rows are being written when Kalshi emits BRTI
+  `cfbenchmarks_value` events.
+- BRTI final-minute averages may be stored when present, but no strategy,
+  position-management, paper trading, live trading, order, fill, or decision-ledger
+  logic is enabled by PR 7.

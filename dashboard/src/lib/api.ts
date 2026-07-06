@@ -58,6 +58,32 @@ export interface WebSocketStatusResponse {
   checked_at: string;
 }
 
+export interface BrtiReferenceStatusResponse {
+  configured: boolean;
+  enabled: boolean;
+  signer_ready: boolean;
+  source: string;
+  index_ids: string[];
+  subscription_id: number | null;
+  connection_state: string;
+  latest_tick_received_at: string | null;
+  latest_source_ts: string | null;
+  latest_parsed_value: string | number | null;
+  latest_trailing_60s_avg: string | number | null;
+  latest_trailing_60s_window_size: number | null;
+  latest_final_minute_average: string | number | null;
+  final_minute_average_status: string | null;
+  source_age_ms: number | null;
+  stale: boolean;
+  last_message_at: string | null;
+  last_persisted_at: string | null;
+  last_error_type: string | null;
+  last_error_message: string | null;
+  warnings: string[];
+  blockers: string[];
+  checked_at: string;
+}
+
 export interface EndpointResult<T> {
   path: string;
   ok: boolean;
@@ -74,6 +100,7 @@ export interface OperationalSnapshot {
   database: EndpointResult<DatabaseStatusResponse>;
   readiness: EndpointResult<ReadinessResponse>;
   wsStatus: EndpointResult<WebSocketStatusResponse>;
+  brtiStatus: EndpointResult<BrtiReferenceStatusResponse>;
 }
 
 export function getApiBaseUrl(): string {
@@ -112,12 +139,13 @@ async function fetchEndpoint<T>(apiBaseUrl: string, path: string): Promise<Endpo
 
 export async function fetchOperationalSnapshot(): Promise<OperationalSnapshot> {
   const apiBaseUrl = getApiBaseUrl();
-  const [health, safety, database, readiness, wsStatus] = await Promise.all([
+  const [health, safety, database, readiness, wsStatus, brtiStatus] = await Promise.all([
     fetchEndpoint<HealthResponse>(apiBaseUrl, "/health"),
     fetchEndpoint<SafetyResponse>(apiBaseUrl, "/safety"),
     fetchEndpoint<DatabaseStatusResponse>(apiBaseUrl, "/db/status"),
     fetchEndpoint<ReadinessResponse>(apiBaseUrl, "/ready"),
-    fetchEndpoint<WebSocketStatusResponse>(apiBaseUrl, "/ws/status")
+    fetchEndpoint<WebSocketStatusResponse>(apiBaseUrl, "/ws/status"),
+    fetchEndpoint<BrtiReferenceStatusResponse>(apiBaseUrl, "/reference/brti/status")
   ]);
 
   return {
@@ -128,6 +156,7 @@ export async function fetchOperationalSnapshot(): Promise<OperationalSnapshot> {
     safety,
     database,
     readiness,
-    wsStatus
+    wsStatus,
+    brtiStatus
   };
 }

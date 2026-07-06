@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ape.kalshi.ws_client import (
+    build_cfbenchmarks_subscribe_message,
     build_subscribe_message,
     create_websocket_auth_headers,
     websocket_signature_path,
@@ -62,3 +63,20 @@ def test_subscribe_command_payloads_for_public_channels() -> None:
         "cmd": "subscribe",
         "params": {"channels": ["ticker", "trade"], "market_ticker": "KXBTC15M-TEST"},
     }
+
+
+def test_cfbenchmarks_subscribe_command_uses_index_ids_without_market_ticker() -> None:
+    message = build_cfbenchmarks_subscribe_message(request_id=3, index_ids=["BRTI"])
+
+    assert message == {
+        "id": 3,
+        "cmd": "subscribe",
+        "params": {
+            "channels": ["cfbenchmarks_value"],
+            "index_ids": ["BRTI"],
+        },
+    }
+    assert "market_ticker" not in message["params"]
+    assert "market_tickers" not in message["params"]
+    assert "market_id" not in message["params"]
+    assert "market_ids" not in message["params"]

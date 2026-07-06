@@ -83,6 +83,7 @@ def test_reference_ticks_repository_inserts_and_reads_recent_ticks(session) -> N
     assert len(recent) == 1
     assert recent[0].source == "BRTI"
     assert recent[0].parse_status == "parsed"
+    assert repository.get_latest_tick("BRTI").parse_status == "parsed"
 
 
 def test_orderbook_repository_inserts_and_reads_latest_snapshot(session) -> None:

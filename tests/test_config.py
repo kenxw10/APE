@@ -30,6 +30,12 @@ def test_default_config_is_observer_only() -> None:
     assert config.kalshi_ws_subscribe_orderbook is True
     assert config.kalshi_ws_subscribe_ticker is True
     assert config.kalshi_ws_subscribe_trades is True
+    assert config.kalshi_cfbenchmarks_enabled is False
+    assert config.kalshi_cfbenchmarks_index_ids == ("BRTI",)
+    assert config.kalshi_cfbenchmarks_stale_after_seconds == 3
+    assert config.kalshi_cfbenchmarks_max_source_age_ms == 3000
+    assert config.kalshi_cfbenchmarks_subscribe_on_worker is True
+    assert config.kalshi_cfbenchmarks_persist_raw_payload is True
 
 
 def test_kalshi_credentials_are_not_required() -> None:
@@ -85,6 +91,31 @@ def test_kalshi_websocket_env_vars_parse_safely() -> None:
     assert config.kalshi_ws_subscribe_orderbook is False
     assert config.kalshi_ws_subscribe_ticker is True
     assert config.kalshi_ws_subscribe_trades is False
+
+
+def test_kalshi_cfbenchmarks_env_vars_parse_safely() -> None:
+    config = load_config(
+        {
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_INDEX_IDS": "BRTI",
+            "KALSHI_CFBENCHMARKS_STALE_AFTER_SECONDS": "4",
+            "KALSHI_CFBENCHMARKS_MAX_SOURCE_AGE_MS": "4000",
+            "KALSHI_CFBENCHMARKS_SUBSCRIBE_ON_WORKER": "false",
+            "KALSHI_CFBENCHMARKS_PERSIST_RAW_PAYLOAD": "false",
+        }
+    )
+
+    assert config.kalshi_cfbenchmarks_enabled is True
+    assert config.kalshi_cfbenchmarks_index_ids == ("BRTI",)
+    assert config.kalshi_cfbenchmarks_stale_after_seconds == 4
+    assert config.kalshi_cfbenchmarks_max_source_age_ms == 4000
+    assert config.kalshi_cfbenchmarks_subscribe_on_worker is False
+    assert config.kalshi_cfbenchmarks_persist_raw_payload is False
+
+
+def test_invalid_kalshi_cfbenchmarks_index_ids_raise_clear_config_error() -> None:
+    with pytest.raises(ConfigError, match="KALSHI_CFBENCHMARKS_INDEX_IDS"):
+        load_config({"KALSHI_CFBENCHMARKS_INDEX_IDS": " , "})
 
 
 def test_invalid_kalshi_api_base_url_raises_clear_config_error() -> None:
