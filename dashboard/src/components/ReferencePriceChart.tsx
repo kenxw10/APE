@@ -19,7 +19,7 @@ interface ReferencePriceChartProps {
   intervalStartMs: number;
   intervalEndMs: number;
   note: string;
-  provenanceLabel: "live BRTI" | "fallback scaffold";
+  provenanceLabel: "live BRTI" | "stale BRTI" | "fallback scaffold";
   sourceAgeLabel: string;
   backendAgeLabel: string;
 }

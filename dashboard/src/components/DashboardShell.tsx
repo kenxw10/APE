@@ -33,7 +33,7 @@ interface ReferenceChartData {
   intervalOpenPrice: number;
   currentPrice: number;
   refSpreadBps: number | null;
-  status: "live" | "fallback";
+  status: "live" | "stale" | "fallback";
   note: string;
   sourceAgeLabel: string;
   backendAgeLabel: string;
@@ -139,7 +139,7 @@ export function DashboardShell({ snapshot, scaffold }: DashboardShellProps) {
           intervalStartMs={referenceChart.intervalStartMs}
           intervalEndMs={referenceChart.intervalEndMs}
           note={referenceChart.note}
-          provenanceLabel={referenceChart.status === "live" ? "live BRTI" : "fallback scaffold"}
+          provenanceLabel={referenceChartProvenanceLabel(referenceChart)}
           sourceAgeLabel={referenceChart.sourceAgeLabel}
           backendAgeLabel={referenceChart.backendAgeLabel}
         />
@@ -197,7 +197,7 @@ function BenchmarkSummary({
     ["Current CF/BRTI", formatUsd(reference.currentPrice)],
     ["Move Since Open", `${move >= 0 ? "+" : ""}${move.toFixed(2)}%`],
     ["Ref Spread", reference.refSpreadBps === null ? "--" : `${reference.refSpreadBps.toFixed(1)} bps`],
-    ["Source Coverage", reference.status === "live" ? "LIVE BRTI" : "FALLBACK"],
+    ["Source Coverage", referenceChartCoverageLabel(reference)],
     ["Status", reference.status.toUpperCase()]
   ];
 
@@ -210,7 +210,7 @@ function BenchmarkSummary({
         {rows.map(([label, value]) => (
           <div key={label}>
             <dt>{label}</dt>
-            <dd className={label === "Status" ? (reference.status === "live" ? "tone-green" : "tone-amber") : undefined}>{value}</dd>
+            <dd className={label === "Status" ? referenceChartToneClass(reference) : undefined}>{value}</dd>
           </div>
         ))}
       </dl>
@@ -268,8 +268,8 @@ function createStatusSections(
       },
       {
         label: "BRTI Source Age",
-        value: brtiStatus?.source_stale ? "LAGGING" : brtiStatus?.source_age_ms === null ? "--" : "FRESH",
-        tone: brtiStatus?.source_stale ? "amber" : brtiStatus?.source_age_ms === null ? "muted" : "green",
+        value: brtiSourceAgeStatusLabel(brtiStatus),
+        tone: brtiSourceAgeStatusTone(brtiStatus),
         detail: formatDurationMs(brtiStatus?.source_age_ms ?? null)
       },
       {
@@ -284,8 +284,8 @@ function createStatusSections(
       },
       {
         label: "Provenance",
-        value: referenceChart.status === "live" ? "LIVE BRTI" : "FALLBACK",
-        tone: referenceChart.status === "live" ? "green" : "amber"
+        value: referenceChartCoverageLabel(referenceChart),
+        tone: referenceChartTone(referenceChart)
       }
     ],
     system: [
@@ -316,8 +316,8 @@ function createStatusSections(
       {
         label: "Chart Points",
         value: `${referenceChart.pointCount} / ${referenceChart.maxPoints} max`,
-        tone: referenceChart.status === "live" ? "green" : "amber",
-        detail: `15m rolling ${referenceChart.status === "live" ? "live BRTI" : "fallback"}`
+        tone: referenceChartTone(referenceChart),
+        detail: `15m rolling ${referenceChartProvenanceLabel(referenceChart)}`
       }
     ],
     engine: [
@@ -406,6 +406,7 @@ function createReferenceChartData(
     const latestPoint = cappedPoints[cappedPoints.length - 1];
     const intervalEndMs = Date.parse(series.generated_at) || Date.parse(snapshot.fetchedAt);
     const intervalStartMs = intervalEndMs - REFERENCE_CHART_WINDOW_MS;
+    const status = isLiveBrtiStatus(brtiStatus) ? "live" : "stale";
 
     return {
       points: cappedPoints,
@@ -414,8 +415,11 @@ function createReferenceChartData(
       intervalOpenPrice: firstPoint.value,
       currentPrice: latestPoint.value,
       refSpreadBps: null,
-      status: "live",
-      note: "Backend /reference/brti/series, sorted by received time. Raw payload excluded.",
+      status,
+      note:
+        status === "live"
+          ? "Backend /reference/brti/series, sorted by received time. Raw payload excluded."
+          : "Stored /reference/brti/series points are shown, but BRTI status is not live.",
       sourceAgeLabel: formatDurationMs(
         brtiStatus?.source_age_ms ?? latestSeriesSourceAge(livePoints)
       ),
@@ -517,4 +521,62 @@ function brtiTransportLabel(brtiStatus: BrtiReferenceStatusResponse | null): str
     return "LIVE";
   }
   return brtiStatus.connection_state.toUpperCase();
+}
+
+function isLiveBrtiStatus(brtiStatus: BrtiReferenceStatusResponse | null): boolean {
+  return (
+    brtiStatus !== null &&
+    brtiStatus.enabled &&
+    brtiStatus.connection_state === "subscribed" &&
+    !brtiStatus.stale &&
+    !brtiStatus.transport_stale &&
+    !brtiStatus.persistence_stale &&
+    brtiStatus.last_error_type === null &&
+    brtiStatus.last_error_message === null &&
+    brtiStatus.blockers.length === 0
+  );
+}
+
+function brtiSourceAgeStatusLabel(brtiStatus: BrtiReferenceStatusResponse | null): string {
+  if (!brtiStatus || brtiStatus.source_age_ms === null || brtiStatus.source_age_ms === undefined) {
+    return "--";
+  }
+  return brtiStatus.source_stale ? "LAGGING" : "FRESH";
+}
+
+function brtiSourceAgeStatusTone(brtiStatus: BrtiReferenceStatusResponse | null): StatusRow["tone"] {
+  if (!brtiStatus || brtiStatus.source_age_ms === null || brtiStatus.source_age_ms === undefined) {
+    return "muted";
+  }
+  return brtiStatus.source_stale ? "amber" : "green";
+}
+
+function referenceChartCoverageLabel(referenceChart: ReferenceChartData): string {
+  if (referenceChart.status === "live") {
+    return "LIVE BRTI";
+  }
+  if (referenceChart.status === "stale") {
+    return "STALE BRTI";
+  }
+  return "FALLBACK";
+}
+
+function referenceChartProvenanceLabel(
+  referenceChart: ReferenceChartData
+): "live BRTI" | "stale BRTI" | "fallback scaffold" {
+  if (referenceChart.status === "live") {
+    return "live BRTI";
+  }
+  if (referenceChart.status === "stale") {
+    return "stale BRTI";
+  }
+  return "fallback scaffold";
+}
+
+function referenceChartTone(referenceChart: ReferenceChartData): StatusRow["tone"] {
+  return referenceChart.status === "live" ? "green" : "amber";
+}
+
+function referenceChartToneClass(referenceChart: ReferenceChartData): string {
+  return referenceChart.status === "live" ? "tone-green" : "tone-amber";
 }
