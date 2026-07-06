@@ -296,6 +296,128 @@ def test_collector_can_persist_brti_without_market_websocket_enabled(tmp_path) -
         engine.dispose()
 
 
+def test_collector_starts_brti_when_market_resolution_fails(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_no_market.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket([_brti_payload()])
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_no_active_market,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            latest_tick = ReferenceTicksRepository(session).get_latest_tick(BRTI_SOURCE)
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert latest_tick is not None
+            assert latest_tick.parse_status == "valid"
+            assert heartbeat is not None
+            assert heartbeat.metadata_["ws"]["connection_state"] == "no_active_market"
+            assert "no_active_market" in heartbeat.metadata_["ws"]["blockers"]
+            brti_metadata = heartbeat.metadata_["reference"]["brti"]
+            assert brti_metadata["connection_state"] == "subscribed"
+            assert brti_metadata["latest_value"] == "68000.12"
+
+        assert websocket.sent == [
+            {
+                "id": 1,
+                "cmd": "subscribe",
+                "params": {
+                    "channels": ["cfbenchmarks_value"],
+                    "index_ids": ["BRTI"],
+                },
+            }
+        ]
+    finally:
+        engine.dispose()
+
+
+def test_collector_surfaces_brti_subscription_error_without_market_ticker(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_error.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket(
+        [
+            {
+                "type": "error",
+                "sid": 1,
+                "seq": 1,
+                "msg": {
+                    "code": 403,
+                    "msg": "missing entitlement for BRTI",
+                },
+            }
+        ]
+    )
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            latest_tick = ReferenceTicksRepository(session).get_latest_tick(BRTI_SOURCE)
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert latest_tick is None
+            assert heartbeat is not None
+            brti_metadata = heartbeat.metadata_["reference"]["brti"]
+            assert brti_metadata["connection_state"] == "error"
+            assert (
+                brti_metadata["last_error_type"]
+                == "kalshi_cfbenchmarks_subscription_error"
+            )
+            assert "missing entitlement" in brti_metadata["last_error_message"]
+            assert "kalshi_cfbenchmarks_subscription_error" in brti_metadata["warnings"]
+            assert "kalshi_cfbenchmarks_subscription_error" in brti_metadata["blockers"]
+    finally:
+        engine.dispose()
+
+
 def test_collector_persists_malformed_brti_tick_without_crashing(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_malformed.sqlite'}"
     config = load_config(
@@ -1399,6 +1521,25 @@ def _resolved_market(*, close_time: datetime | None = None, **_kwargs) -> Resolv
         blockers=[],
         warnings=[],
         resolver_decision_reason="test_resolved_market",
+        parser_version="test",
+        raw_payload_hash=None,
+        persisted=False,
+        resolved_at=NOW,
+    )
+
+
+def _no_active_market(**_kwargs) -> ResolverResult:
+    return ResolverResult(
+        state=ResolverState.NO_ACTIVE_MARKET,
+        configured=True,
+        signer_ready=True,
+        series_ticker="KXBTC15M",
+        query_scope={},
+        market=None,
+        boundary=None,
+        blockers=["no_active_market"],
+        warnings=[],
+        resolver_decision_reason="test_no_active_market",
         parser_version="test",
         raw_payload_hash=None,
         persisted=False,
