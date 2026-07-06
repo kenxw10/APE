@@ -922,6 +922,8 @@ def _enabled_collector_metadata_keys(config: AppConfig) -> tuple[str, ...]:
         and config.kalshi_cfbenchmarks_subscribe_on_worker
     ):
         keys.append("reference")
+    if config.storage_retention_enabled:
+        keys.append("storage")
     return tuple(keys)
 
 
