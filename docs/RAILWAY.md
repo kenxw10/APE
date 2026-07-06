@@ -29,6 +29,8 @@ After PR 6 merges, Kalshi WebSocket intake is still disabled by default. Enable 
 
 After PR 7a merges, BRTI / CF Benchmarks intake is still disabled by default. Enable it only on the Railway worker service with `KALSHI_CFBENCHMARKS_ENABLED=true` and `KALSHI_CFBENCHMARKS_INDEX_IDS=BRTI`. BRTI uses a dedicated worker-owned WebSocket connection by default. Do not add BRTI env vars or Kalshi credentials to Vercel.
 
+After PR 8 merges, the strategy observer ledger is still disabled by default. Enable it only on the Railway worker service with `STRATEGY_OBSERVER_ENABLED=true` after market WebSocket and BRTI intake are healthy. This records observer-only decisions in the database and does not add paper trading, live trading, orders, fills, private channels, or execution.
+
 ## Create Railway Project
 
 1. Create a new Railway project for APE.
@@ -67,6 +69,9 @@ Useful API endpoints:
 /reference/brti/status
 /reference/brti/latest
 /reference/brti/series
+/strategy/status
+/strategy/decisions/latest
+/strategy/decisions/recent
 ```
 
 `/ready` should return `ready` only when safety is safe and database connectivity works.
@@ -93,6 +98,8 @@ The worker is an always-on observer process. Do not configure a Railway cron job
 When `KALSHI_WS_ENABLED=false`, the worker records heartbeat-only diagnostics. When `KALSHI_WS_ENABLED=true`, the worker owns the observer-only Kalshi WebSocket collector for the active BTC15 market.
 
 When `KALSHI_CFBENCHMARKS_ENABLED=true`, the worker also subscribes to Kalshi's authenticated `cfbenchmarks_value` channel with `index_ids=["BRTI"]` and stores observer-only reference ticks in `reference_ticks`. By default this runs on a dedicated BRTI WebSocket connection so BTC15 market rollover/resubscribe does not disconnect the reference feed. This does not add strategy, paper trading, live trading, orders, private channels, or execution.
+
+When `STRATEGY_OBSERVER_ENABLED=true`, the worker also evaluates the observer-only strategy ledger from persisted database rows. It reads active market metadata, BRTI ticks, Kalshi orderbook snapshots, and public trades; then writes a diagnostic row to `strategy_decisions`. It does not call Kalshi REST, subscribe to private channels, place orders, paper trade, live trade, or emit enter/fill/execution states.
 
 For `/ws/status`, `last_error_type` and `last_error_message` describe a current unresolved worker error. A successful current orderbook or trade database write clears old recovered errors so stale startup failures do not keep the status page red.
 
@@ -249,13 +256,65 @@ Expected behavior:
 - BRTI final-minute averages are stored when present, but no strategy or position-management logic uses them in PR 7a.
 - Dashboard remains read-only and may show live BRTI status and the rolling 15-minute CF/BRTI chart from the public API only.
 
+## Strategy Observer Checkpoint After PR 8
+
+Only after PR 8 is merged and the PR 7a BRTI/reference validation is healthy, add these to the Railway worker service:
+
+```text
+STRATEGY_OBSERVER_ENABLED=true
+STRATEGY_OBSERVER_POLL_SECONDS=1.0
+STRATEGY_OBSERVER_DECISION_TTL_SECONDS=5
+STRATEGY_MIN_BOUNDARY_DISTANCE_BPS=3.5
+STRATEGY_REFERENCE_MAX_AGE_MS=2000
+STRATEGY_KALSHI_BOOK_MAX_AGE_MS=2000
+STRATEGY_NO_ENTRY_FIRST_SECONDS=300
+STRATEGY_NO_ENTRY_LAST_SECONDS=60
+STRATEGY_MIN_ENTRY_ASK=0.56
+STRATEGY_MAX_ENTRY_ASK=0.78
+STRATEGY_MAX_SPREAD_CENTS=4
+```
+
+Keep:
+
+```text
+APP_MODE=OBSERVER
+TRADING_ENABLED=false
+EXECUTE=false
+KALSHI_WS_ENABLED=true
+KALSHI_CFBENCHMARKS_ENABLED=true
+KALSHI_CFBENCHMARKS_INDEX_IDS=BRTI
+```
+
+The API service may keep `STRATEGY_OBSERVER_ENABLED=false`; `/strategy/status` reads latest decision rows and worker heartbeat metadata. Do not add strategy observer env vars, WebSocket settings, BRTI env vars, or Kalshi credentials to Vercel.
+
+After enabling the strategy observer on the worker, redeploy the worker and validate:
+
+```powershell
+Invoke-RestMethod https://ape-api-production.up.railway.app/strategy/status
+Invoke-RestMethod https://ape-api-production.up.railway.app/strategy/decisions/latest
+Invoke-RestMethod "https://ape-api-production.up.railway.app/strategy/decisions/recent?limit=100"
+Invoke-RestMethod https://ape-api-production.up.railway.app/ws/status
+Invoke-RestMethod https://ape-api-production.up.railway.app/reference/brti/status
+Invoke-RestMethod https://ape-api-production.up.railway.app/health
+Invoke-RestMethod https://ape-api-production.up.railway.app/safety
+Invoke-RestMethod https://ape-api-production.up.railway.app/db/status
+Invoke-RestMethod https://ape-api-production.up.railway.app/ready
+```
+
+Expected behavior:
+
+- `/strategy/status` shows `enabled=true`, `is_safe=true`, a recent latest decision, and `stale=false` when the worker is evaluating.
+- `/strategy/decisions/latest` returns a diagnostic state such as `OBSERVE_ONLY_MARKET`, `REFERENCE_STALE`, `KALSHI_STALE`, `TOO_EARLY`, or `TOO_CLOSE_TO_BOUNDARY`.
+- No strategy endpoint returns private keys, signatures, raw Kalshi credentials, enter actions, order actions, fills, paper trades, or live-trading controls.
+- `strategy_decisions` rows are written at no more than the configured poll cadence unless the persisted context changes inside the same bucket.
+- Dashboard remains read-only and may show Strategy Observer status from the public API only.
+
 ## Explicitly Not Included
 
 - Live trading
 - Paper trading
 - Order placement
 - Strategy execution
-- Strategy use of BRTI/reference data
 - Private/user WebSocket subscriptions
 - Vercel secrets or trading controls
 - Railway cron

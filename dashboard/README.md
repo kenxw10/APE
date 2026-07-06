@@ -11,8 +11,9 @@ It reads the live Railway observer API for operational status:
 - `/ws/status`
 - `/reference/brti/status`
 - `/reference/brti/series`
+- `/strategy/status`
 
-Portfolio and position sections are scaffold placeholders until backend endpoints exist. The Reference Price CF/BRTI chart reads live `/reference/brti/series` data when available, polls once per second, shows only the rolling 15-minute window, and caps rendering at 16,000 points. If the backend series is unavailable, it falls back to clearly labeled scaffold data. This is not live trading data.
+Portfolio and position sections are scaffold placeholders until backend endpoints exist. The Reference Price CF/BRTI chart reads live `/reference/brti/series` data when available, polls once per second, shows only the rolling 15-minute window, and caps rendering at 16,000 points. The Engine Status panel reads `/strategy/status` for the observer-only strategy ledger. If the backend series is unavailable, it falls back to clearly labeled scaffold data. This is not live trading data.
 
 ## Local Development
 
@@ -51,8 +52,8 @@ Required:
 NEXT_PUBLIC_API_BASE_URL=https://ape-api-production.up.railway.app
 ```
 
-Do not add secrets to the dashboard. Do not add `DATABASE_URL`, Kalshi credentials, private keys, WebSocket settings, or BRTI env vars.
-Kalshi WebSocket and BRTI collection are Railway-worker-only; the dashboard only reads public Railway API status and series endpoints.
+Do not add secrets to the dashboard. Do not add `DATABASE_URL`, Kalshi credentials, private keys, WebSocket settings, BRTI env vars, or strategy observer env vars.
+Kalshi WebSocket, BRTI collection, and the strategy observer are Railway-worker-only; the dashboard only reads public Railway API status and series endpoints.
 
 ## Current Scaffold Limits
 
@@ -61,6 +62,7 @@ Kalshi WebSocket and BRTI collection are Railway-worker-only; the dashboard only
 - No Kalshi client.
 - No websocket collectors.
 - No order placement.
+- No strategy controls.
 - No portfolio ledger endpoint yet.
 - No raw CF/BRTI payload endpoint.
 - No real open or closed positions endpoint yet.

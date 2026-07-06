@@ -6,7 +6,8 @@ import { useRouter } from "next/navigation";
 import {
   type BrtiReferenceSeriesPointResponse,
   type BrtiReferenceStatusResponse,
-  type OperationalSnapshot
+  type OperationalSnapshot,
+  type StrategyStatusResponse
 } from "../lib/api";
 import {
   MAX_REFERENCE_CHART_POINTS,
@@ -228,6 +229,7 @@ function createStatusSections(
   const safety = snapshot.safety.data ?? snapshot.health.data?.safety ?? snapshot.readiness.data?.safety ?? null;
   const wsStatus = snapshot.wsStatus.data;
   const brtiStatus = snapshot.brtiStatus.data;
+  const strategyStatus = snapshot.strategyStatus.data;
   const wsConnected = wsStatus?.connection_state === "subscribed" && !wsStatus.stale;
   const wsTone = !snapshot.wsStatus.ok
     ? "red"
@@ -321,8 +323,37 @@ function createStatusSections(
       }
     ],
     engine: [
-      { label: "Market Resolver", value: "DISABLED", tone: "amber" },
-      { label: "Signal Engine", value: "DISABLED", tone: "green" },
+      {
+        label: "Strategy Observer",
+        value: strategyObserverLabel(snapshot.strategyStatus.ok, strategyStatus),
+        tone: strategyObserverTone(snapshot.strategyStatus.ok, strategyStatus)
+      },
+      {
+        label: "Latest Decision",
+        value: strategyStatus?.latest_decision_state ?? "--",
+        tone: strategyDecisionTone(strategyStatus),
+        detail: strategyStatus?.latest_primary_reason ?? undefined
+      },
+      {
+        label: "Candidate",
+        value: strategyStatus?.candidate_side ?? "--",
+        tone: strategyStatus?.candidate_side ? "green" : "muted",
+        detail: strategyDistanceLabel(strategyStatus)
+      },
+      {
+        label: "Seconds Left",
+        value: strategyStatus?.seconds_left === null || strategyStatus?.seconds_left === undefined
+          ? "--"
+          : `${strategyStatus.seconds_left}s`,
+        tone: strategyStatus?.seconds_left === null || strategyStatus?.seconds_left === undefined ? "muted" : "green"
+      },
+      {
+        label: "Decision Age",
+        value: strategyStatus?.decision_age_seconds === null || strategyStatus?.decision_age_seconds === undefined
+          ? "--"
+          : `${Math.round(strategyStatus.decision_age_seconds)}s`,
+        tone: strategyStatus?.stale ? "amber" : strategyStatus?.latest_decision_id ? "green" : "muted"
+      },
       { label: "Execution", value: "DISABLED", tone: "green" }
     ],
     safety: [
@@ -385,6 +416,66 @@ function formatSourceAge(brtiStatus: BrtiReferenceStatusResponse | null): string
     return formatAge(brtiStatus.checked_at, brtiStatus.latest_tick_received_at);
   }
   return "--";
+}
+
+function strategyObserverLabel(
+  endpointOk: boolean,
+  strategyStatus: StrategyStatusResponse | null
+): string {
+  if (!endpointOk || !strategyStatus) {
+    return "UNREACHABLE";
+  }
+  if (!strategyStatus.enabled) {
+    return "DISABLED";
+  }
+  if (strategyStatus.blockers.length > 0 || !strategyStatus.is_safe) {
+    return "BLOCKED";
+  }
+  if (strategyStatus.stale) {
+    return "STALE";
+  }
+  return "RUNNING";
+}
+
+function strategyObserverTone(
+  endpointOk: boolean,
+  strategyStatus: StrategyStatusResponse | null
+): StatusRow["tone"] {
+  const label = strategyObserverLabel(endpointOk, strategyStatus);
+  if (label === "RUNNING" || label === "DISABLED") {
+    return "green";
+  }
+  if (label === "UNREACHABLE" || label === "BLOCKED") {
+    return "red";
+  }
+  return "amber";
+}
+
+function strategyDecisionTone(strategyStatus: StrategyStatusResponse | null): StatusRow["tone"] {
+  if (!strategyStatus?.latest_decision_state) {
+    return "muted";
+  }
+  if (strategyStatus.latest_decision_state === "OBSERVE_ONLY_MARKET") {
+    return "green";
+  }
+  if (
+    strategyStatus.latest_decision_state === "LIVE_GUARD_BLOCKED" ||
+    strategyStatus.latest_decision_state === "BOOK_UNUSABLE"
+  ) {
+    return "red";
+  }
+  return "amber";
+}
+
+function strategyDistanceLabel(strategyStatus: StrategyStatusResponse | null): string | undefined {
+  if (strategyStatus?.distance_bps === null || strategyStatus?.distance_bps === undefined) {
+    return undefined;
+  }
+  const distance = Number(strategyStatus.distance_bps);
+  if (!Number.isFinite(distance)) {
+    return undefined;
+  }
+  return `${distance.toFixed(2)} bps`;
 }
 
 function createReferenceChartData(

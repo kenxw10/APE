@@ -70,6 +70,17 @@ class AppConfig:
     kalshi_cfbenchmarks_source_age_warn_ms: int = 45_000
     kalshi_cfbenchmarks_kalshi_received_warn_ms: int = 10_000
     kalshi_cfbenchmarks_trade_fresh_ms: int = 2_000
+    strategy_observer_enabled: bool = False
+    strategy_observer_poll_seconds: float = 1.0
+    strategy_observer_decision_ttl_seconds: float = 5.0
+    strategy_min_boundary_distance_bps: float = 3.5
+    strategy_reference_max_age_ms: int = 2_000
+    strategy_kalshi_book_max_age_ms: int = 2_000
+    strategy_no_entry_first_seconds: int = 300
+    strategy_no_entry_last_seconds: int = 60
+    strategy_min_entry_ask: float = 0.56
+    strategy_max_entry_ask: float = 0.78
+    strategy_max_spread_cents: int = 4
 
 
 TRUE_VALUES = {"1", "true", "t", "yes", "y", "on"}
@@ -208,6 +219,50 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         kalshi_cfbenchmarks_trade_fresh_ms=_parse_int(
             "KALSHI_CFBENCHMARKS_TRADE_FRESH_MS",
             _get(source, "KALSHI_CFBENCHMARKS_TRADE_FRESH_MS", "2000"),
+        ),
+        strategy_observer_enabled=_parse_bool(
+            "STRATEGY_OBSERVER_ENABLED",
+            _get(source, "STRATEGY_OBSERVER_ENABLED", "false"),
+        ),
+        strategy_observer_poll_seconds=_parse_float(
+            "STRATEGY_OBSERVER_POLL_SECONDS",
+            _get(source, "STRATEGY_OBSERVER_POLL_SECONDS", "1.0"),
+        ),
+        strategy_observer_decision_ttl_seconds=_parse_float(
+            "STRATEGY_OBSERVER_DECISION_TTL_SECONDS",
+            _get(source, "STRATEGY_OBSERVER_DECISION_TTL_SECONDS", "5"),
+        ),
+        strategy_min_boundary_distance_bps=_parse_float(
+            "STRATEGY_MIN_BOUNDARY_DISTANCE_BPS",
+            _get(source, "STRATEGY_MIN_BOUNDARY_DISTANCE_BPS", "3.5"),
+        ),
+        strategy_reference_max_age_ms=_parse_int(
+            "STRATEGY_REFERENCE_MAX_AGE_MS",
+            _get(source, "STRATEGY_REFERENCE_MAX_AGE_MS", "2000"),
+        ),
+        strategy_kalshi_book_max_age_ms=_parse_int(
+            "STRATEGY_KALSHI_BOOK_MAX_AGE_MS",
+            _get(source, "STRATEGY_KALSHI_BOOK_MAX_AGE_MS", "2000"),
+        ),
+        strategy_no_entry_first_seconds=_parse_int(
+            "STRATEGY_NO_ENTRY_FIRST_SECONDS",
+            _get(source, "STRATEGY_NO_ENTRY_FIRST_SECONDS", "300"),
+        ),
+        strategy_no_entry_last_seconds=_parse_int(
+            "STRATEGY_NO_ENTRY_LAST_SECONDS",
+            _get(source, "STRATEGY_NO_ENTRY_LAST_SECONDS", "60"),
+        ),
+        strategy_min_entry_ask=_parse_float(
+            "STRATEGY_MIN_ENTRY_ASK",
+            _get(source, "STRATEGY_MIN_ENTRY_ASK", "0.56"),
+        ),
+        strategy_max_entry_ask=_parse_float(
+            "STRATEGY_MAX_ENTRY_ASK",
+            _get(source, "STRATEGY_MAX_ENTRY_ASK", "0.78"),
+        ),
+        strategy_max_spread_cents=_parse_int(
+            "STRATEGY_MAX_SPREAD_CENTS",
+            _get(source, "STRATEGY_MAX_SPREAD_CENTS", "4"),
         ),
     )
 

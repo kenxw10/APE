@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   calculateReferencePriceDomain,
+  CHART_PLOT,
+  REFERENCE_OPEN_LABEL_LEFT_PERCENT,
   getYPercent,
   portfolioSegmentTone,
   type TimeValuePoint
@@ -35,4 +37,9 @@ test("portfolio segment color follows movement and starting-value plateau rules"
   assert.equal(portfolioSegmentTone(501, 500, 500), "red");
   assert.equal(portfolioSegmentTone(500, 500, 500), "green");
   assert.equal(portfolioSegmentTone(499, 499, 500), "red");
+});
+
+test("reference open label sits outside the plotted grid", () => {
+  assert.ok(REFERENCE_OPEN_LABEL_LEFT_PERCENT > CHART_PLOT.right);
+  assert.ok(REFERENCE_OPEN_LABEL_LEFT_PERCENT < 100);
 });

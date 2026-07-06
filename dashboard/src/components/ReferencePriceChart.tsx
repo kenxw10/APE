@@ -3,6 +3,7 @@
 import {
   CHART_PLOT,
   MAX_REFERENCE_CHART_POINTS,
+  REFERENCE_OPEN_LABEL_LEFT_PERCENT,
   calculateReferencePriceDomain,
   capPoints,
   createPolylinePoints,
@@ -88,7 +89,10 @@ export function ReferencePriceChart({
             </span>
           ))}
         </div>
-        <span className="open-label" style={{ top: `${openY}%` }}>
+        <span
+          className="open-label"
+          style={{ top: `${openY}%`, left: `${REFERENCE_OPEN_LABEL_LEFT_PERCENT}%` }}
+        >
           Open
         </span>
       </div>

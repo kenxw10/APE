@@ -22,6 +22,13 @@ class StrategyDecisionsRepository:
             select(StrategyDecision).where(StrategyDecision.decision_id == decision_id)
         )
 
+    def get_latest_decision(self) -> StrategyDecision | None:
+        return self.session.scalar(
+            select(StrategyDecision)
+            .order_by(desc(StrategyDecision.evaluated_at), desc(StrategyDecision.id))
+            .limit(1)
+        )
+
     def list_recent_decisions(self, limit: int = 100) -> list[StrategyDecision]:
         return list(
             self.session.scalars(
@@ -30,4 +37,3 @@ class StrategyDecisionsRepository:
                 .limit(limit)
             )
         )
-

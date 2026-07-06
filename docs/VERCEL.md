@@ -36,6 +36,8 @@ PR 6 Kalshi WebSocket intake is Railway-worker-only. Do not add `KALSHI_WS_ENABL
 
 PR 7a BRTI / CF Benchmarks intake is Railway-worker-only. Do not add `KALSHI_CFBENCHMARKS_ENABLED`, `KALSHI_CFBENCHMARKS_INDEX_IDS`, WebSocket settings, Kalshi credentials, or any BRTI-related secrets/settings to Vercel. The dashboard only reads the public Railway API `/reference/brti/status` and `/reference/brti/series` responses.
 
+PR 8 strategy observer settings are Railway-worker-only. Do not add `STRATEGY_OBSERVER_ENABLED` or other `STRATEGY_*` env vars to Vercel. The dashboard only reads the public Railway API `/strategy/status` response.
+
 ## Expected Build Logs
 
 The dashboard build includes a marker that proves Vercel is running from the `dashboard` app:
@@ -72,6 +74,7 @@ Open the Vercel dashboard and confirm:
 - Source/Data panels show BRTI status from `/reference/brti/status` when the Railway API is reachable.
 - Reference Price CF/BRTI chart uses live `/reference/brti/series` data when available.
 - Reference Price CF/BRTI chart shows only a rolling 15-minute window and a 16,000-point maximum.
+- Engine Status shows Strategy Observer status from `/strategy/status` when the Railway API is reachable.
 - If live BRTI series data is unavailable, the chart is clearly labeled as fallback/scaffold.
 - Safety panel shows `Mode: OBSERVER`.
 - Safety panel shows `Trading: DISABLED`.

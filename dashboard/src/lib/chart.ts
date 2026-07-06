@@ -10,6 +10,8 @@ export const CHART_PLOT = {
   bottom: 82
 } as const;
 
+export const REFERENCE_OPEN_LABEL_LEFT_PERCENT = CHART_PLOT.right + 0.7;
+
 export type PortfolioRange = "today" | "12h" | "1d" | "1w" | "1m" | "all";
 
 export const PORTFOLIO_RANGE_OPTIONS: readonly { value: PortfolioRange; label: string }[] = [

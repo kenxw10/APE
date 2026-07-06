@@ -18,6 +18,8 @@ PR 6 adds an observer-only Kalshi WebSocket market-data intake foundation for th
 
 PR 7 adds observer-only BRTI / CF Benchmarks reference-feed intake. It is disabled by default, subscribes to Kalshi's authenticated `cfbenchmarks_value` WebSocket channel for `index_ids=["BRTI"]` only on the Railway worker, stores safe reference ticks in the existing `reference_ticks` table, and exposes read-only `/reference/brti/status` and `/reference/brti/latest` diagnostics. PR 7a makes BRTI use a dedicated worker-owned WebSocket connection by default and adds `/reference/brti/series` for the read-only dashboard reference chart. It does not add strategy decisions, paper trading, live trading, orders, fills, private channels, or execution controls.
 
+PR 8 adds an observer-only strategy decision ledger v0. It is disabled by default, runs only from persisted market/BRTI/orderbook/trade rows when enabled on the Railway worker, writes diagnostic rows to the existing `strategy_decisions` table, and exposes read-only `/strategy/status`, `/strategy/decisions/latest`, and `/strategy/decisions/recent` endpoints. It does not place orders, paper trade, live trade, create fills, use private channels, or add execution controls.
+
 ## Safety Defaults
 
 The default configuration is intentionally non-trading:
@@ -43,6 +45,8 @@ If Kalshi credentials are missing, `/kalshi/status` and `/markets/active` return
 `KALSHI_WS_ENABLED=false` by default. The worker only connects to Kalshi WebSocket when this is set to `true` on the Railway worker service.
 
 `KALSHI_CFBENCHMARKS_ENABLED=false` by default. BRTI collection is worker-only and does not change trading safety.
+
+`STRATEGY_OBSERVER_ENABLED=false` by default. The strategy observer is a decision ledger only; it records why the system would keep observing and never emits enter/order/execution actions.
 
 ## Local Setup
 
@@ -92,6 +96,9 @@ Invoke-RestMethod http://127.0.0.1:8000/ws/status
 Invoke-RestMethod http://127.0.0.1:8000/reference/brti/status
 Invoke-RestMethod http://127.0.0.1:8000/reference/brti/latest
 Invoke-RestMethod "http://127.0.0.1:8000/reference/brti/series?window_seconds=900&max_points=16000"
+Invoke-RestMethod http://127.0.0.1:8000/strategy/status
+Invoke-RestMethod http://127.0.0.1:8000/strategy/decisions/latest
+Invoke-RestMethod "http://127.0.0.1:8000/strategy/decisions/recent?limit=100"
 ```
 
 Successful health output should report `status` as `ok`, `app_mode` as `OBSERVER`, and `is_safe` as `True`.
@@ -105,6 +112,8 @@ When Kalshi credentials are unset, `/kalshi/status` should report `configured` a
 When `KALSHI_WS_ENABLED=false`, `/ws/status` should report `connection_state` as `disabled` and `stale` as `False`.
 
 When `KALSHI_CFBENCHMARKS_ENABLED=false`, `/reference/brti/status` should report `connection_state` as `disabled` and `stale` as `False`.
+
+When `STRATEGY_OBSERVER_ENABLED=false`, `/strategy/status` should report `connection_state` as `disabled` and `stale` as `False`.
 
 ## Kalshi REST Resolver
 
@@ -169,6 +178,38 @@ KALSHI_CFBENCHMARKS_TRADE_FRESH_MS=2000
 
 After PR 7a is merged, enable BRTI only on the Railway worker. Do not add Kalshi credentials, WebSocket settings, or BRTI env vars to Vercel. The API remains read-only and the dashboard only reads the public Railway API. `/reference/brti/series` returns a rolling 15-minute BRTI series sorted by `received_at`, capped at 16,000 points, and excludes raw payloads. Source age is upstream CF timestamp lag; it remains visible but is separate from transport and persistence staleness. `trade_ready_fresh` is a future strategy gate and is not used for trading in PR 7a. If Kalshi sends the final-minute 15-minute average, APE stores it for diagnostics only; no position-management, strategy, or trading logic uses it in PR 7a.
 
+## Strategy Observer Ledger
+
+PR 8 is observer-only. The strategy observer reads only persisted active market metadata, BRTI ticks, Kalshi orderbook snapshots, and public trades from the database. It never calls Kalshi REST, never subscribes to private channels, and never places or simulates orders.
+
+Optional Railway worker settings:
+
+```text
+STRATEGY_OBSERVER_ENABLED=false
+STRATEGY_OBSERVER_POLL_SECONDS=1.0
+STRATEGY_OBSERVER_DECISION_TTL_SECONDS=5
+STRATEGY_MIN_BOUNDARY_DISTANCE_BPS=3.5
+STRATEGY_REFERENCE_MAX_AGE_MS=2000
+STRATEGY_KALSHI_BOOK_MAX_AGE_MS=2000
+STRATEGY_NO_ENTRY_FIRST_SECONDS=300
+STRATEGY_NO_ENTRY_LAST_SECONDS=60
+STRATEGY_MIN_ENTRY_ASK=0.56
+STRATEGY_MAX_ENTRY_ASK=0.78
+STRATEGY_MAX_SPREAD_CENTS=4
+```
+
+After PR 8 is merged and market/BRTI WebSocket intake is healthy, enable the ledger only on the Railway worker with `STRATEGY_OBSERVER_ENABLED=true`. Keep `APP_MODE=OBSERVER`, `TRADING_ENABLED=false`, and `EXECUTE=false`. Do not add strategy observer env vars to Vercel.
+
+The read-only endpoints are:
+
+```text
+/strategy/status
+/strategy/decisions/latest
+/strategy/decisions/recent?limit=100
+```
+
+Expected behavior: the latest decision state is one of the observer-safe diagnostic states such as `OBSERVE_ONLY_MARKET`, `REFERENCE_STALE`, `KALSHI_STALE`, or `TOO_CLOSE_TO_BOUNDARY`. There are no enter, fill, order, paper-trading, or live-trading states.
+
 ## Database Setup
 
 PR 2 uses SQLAlchemy for the schema and repository layer. Railway Postgres is the production direction for a later PR, but local tests use SQLite so you do not need to install Postgres manually.
@@ -230,9 +271,8 @@ Successful startup should log that the worker is running in observer mode. Stop 
 - Paper trading
 - Kalshi order placement
 - Order executor
-- Strategy decision engine
 - Kalshi WebSocket ingestion beyond observer-only public market/reference capture
-- Strategy use of BRTI/reference data
+- Trading strategy execution
 - CF Benchmarks/BRTI REST intake
 - Real dashboard portfolio/ledger endpoints
 - Railway cron

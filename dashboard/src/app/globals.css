@@ -307,6 +307,15 @@ button:disabled {
   right: 12px;
 }
 
+.reference-chart {
+  overflow: visible;
+}
+
+.open-label {
+  right: auto;
+  transform: translate(0, -50%);
+}
+
 .chart-note,
 .panel-note {
   margin: 10px 18px 16px;
