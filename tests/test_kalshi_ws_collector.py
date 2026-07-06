@@ -236,6 +236,64 @@ def test_collector_subscribes_to_brti_with_market_channels_and_persists_tick(tmp
         engine.dispose()
 
 
+def test_collector_does_not_consume_sidless_market_error_as_brti(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_sidless_market_error.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket(
+        [
+            {
+                "type": "error",
+                "msg": {
+                    "code": 403,
+                    "msg": "market subscription rejected",
+                },
+            }
+        ]
+    )
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert heartbeat is not None
+            ws_metadata = heartbeat.metadata_["ws"]
+            assert "kalshi_websocket_error" in ws_metadata["warnings"]
+            brti_metadata = heartbeat.metadata_["reference"]["brti"]
+            assert brti_metadata["connection_state"] == "subscribed"
+            assert brti_metadata["last_error_type"] is None
+            assert "kalshi_cfbenchmarks_subscription_error" not in brti_metadata["warnings"]
+            assert "kalshi_cfbenchmarks_subscription_error" not in brti_metadata["blockers"]
+    finally:
+        engine.dispose()
+
+
 def test_collector_can_persist_brti_without_market_websocket_enabled(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_only.sqlite'}"
     config = load_config(

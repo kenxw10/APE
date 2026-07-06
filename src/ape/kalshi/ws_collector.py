@@ -429,7 +429,11 @@ class KalshiWsCollector:
                 self.record_heartbeat(force=self._consume_force_next_heartbeat())
                 continue
 
-            if self._handle_reference_control_payload(parsed_json, received_at=received_at):
+            if self._handle_reference_control_payload(
+                parsed_json,
+                received_at=received_at,
+                market_ticker=market_ticker,
+            ):
                 self.record_heartbeat(force=self._consume_force_next_heartbeat())
                 continue
 
@@ -549,6 +553,8 @@ class KalshiWsCollector:
                 self._add_warning("orderbook_reset_after_buffer_overflow")
                 self._add_warning(message.reason)
                 return "orderbook_reset_after_buffer_overflow"
+            if message.reason == "kalshi_websocket_error":
+                self._force_next_heartbeat = True
             if self._record_parse_diagnostic(message):
                 self._force_next_heartbeat = True
             self._add_warning(message.reason or "invalid_websocket_message")
@@ -561,6 +567,7 @@ class KalshiWsCollector:
         payload: Any,
         *,
         received_at: datetime,
+        market_ticker: str | None,
     ) -> bool:
         if not self._reference_collection_enabled() or not isinstance(payload, dict):
             return False
@@ -570,8 +577,11 @@ class KalshiWsCollector:
             return False
 
         sid = _int_or_none(payload.get("sid"))
+        if sid is None and market_ticker is not None:
+            return False
+
         subscription_id = self.brti_status.subscription_id
-        if subscription_id is not None and sid not in {None, subscription_id}:
+        if subscription_id is not None and sid != subscription_id:
             return False
 
         self.brti_status.last_message_at = received_at

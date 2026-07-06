@@ -10,6 +10,7 @@ from ape.kalshi.ws_messages import parse_decimal, raw_payload_hash
 from ape.repositories.inputs import JsonPayload, ReferenceTickInput
 
 BRTI_SOURCE = "kalshi_cfbenchmarks_brti"
+BRTI_INDEX_ID = "BRTI"
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,13 @@ def parse_cfbenchmarks_value_message(
             kind="ignored",
             index_id=index_id,
             reason="non_target_cfbenchmarks_index",
+            raw_payload_hash=raw_hash,
+        )
+    if index_id != BRTI_INDEX_ID:
+        return ParsedReferenceMessage(
+            kind="ignored",
+            index_id=index_id,
+            reason="non_brti_cfbenchmarks_index",
             raw_payload_hash=raw_hash,
         )
 

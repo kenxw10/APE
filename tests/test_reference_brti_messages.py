@@ -129,6 +129,21 @@ def test_non_target_index_is_ignored() -> None:
     assert result.tick is None
 
 
+def test_allowed_non_brti_index_is_ignored() -> None:
+    payload = _payload(index_id="OTHER")
+
+    result = parse_cfbenchmarks_value_message(
+        payload,
+        received_at=RECEIVED_AT,
+        allowed_index_ids=("BRTI", "OTHER"),
+        persist_raw_payload=True,
+    )
+
+    assert result.kind == "ignored"
+    assert result.reason == "non_brti_cfbenchmarks_index"
+    assert result.tick is None
+
+
 def _payload(**overrides):
     msg = {
         "index_id": overrides.pop("index_id", "BRTI"),
