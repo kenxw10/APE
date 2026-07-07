@@ -1217,6 +1217,9 @@ def build_strategy_dry_run_status(
     warnings: list[str] = []
     blockers: list[str] = []
 
+    if config.strategy_dry_run_enabled and not config.strategy_observer_enabled:
+        blockers.append("strategy_dry_run_requires_strategy_observer_enabled")
+
     if not config.database_url:
         if config.strategy_dry_run_enabled:
             blockers.append("database_not_configured_for_strategy_dry_run")

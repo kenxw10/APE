@@ -43,6 +43,31 @@ def test_strategy_status_is_disabled_without_database() -> None:
     assert dry_run_status["latest_event"]["found"] is False
 
 
+def test_strategy_dry_run_status_reports_missing_observer_flag(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_strategy_dry_run_flag.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+            "STRATEGY_OBSERVER_ENABLED": "false",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    try:
+        app = create_app(config)
+        with TestClient(app) as client:
+            response = client.get("/strategy/dry-run/status")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["enabled"] is False
+        assert "strategy_dry_run_requires_strategy_observer_enabled" in body["blockers"]
+    finally:
+        engine.dispose()
+
+
 def test_strategy_status_reports_latest_decision_and_worker_metadata(tmp_path) -> None:
     now = datetime.now(UTC)
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_strategy_api.sqlite'}"
