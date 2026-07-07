@@ -27,7 +27,10 @@ from ape.safety import assess_startup_safety
 from ape.strategy.observer import (
     STATE_CONTRACT_NOT_CONFIRMED,
     STATE_ENTER_DRY_RUN,
+    STATE_EXIT_SIGNAL,
+    STATE_FORCE_EXIT,
     STATE_IMPULSE_TOO_WEAK,
+    STATE_MANAGE_POSITION,
     STATE_OBSERVE_ONLY_MARKET,
     STATE_REFERENCE_STALE,
     STATE_SPREAD_TOO_WIDE,
@@ -224,6 +227,207 @@ def test_strategy_dry_run_allows_additional_entry_when_multi_position_enabled(
     assert decision.decision_state == STATE_ENTER_DRY_RUN
     assert decision.primary_reason == "dry_run_entry_signal"
     assert decision.measurements["managed_position_id"] is None
+
+
+def test_strategy_dry_run_prioritizes_older_expired_position_before_new_entry(
+    session,
+) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config(
+        {
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+            "STRATEGY_DRY_RUN_MAX_OPEN_POSITIONS": "3",
+            "STRATEGY_DRY_RUN_ONE_ENTRY_PER_MARKET": "false",
+        }
+    )
+    safety = assess_startup_safety(config)
+    _seed_observable_context(session, now=now)
+    MarketsRepository(session).upsert_market(
+        MarketInput(
+            market_ticker="KXBTC15M-OLD",
+            event_ticker="KXBTC15M-26JUL051145",
+            series_ticker="KXBTC15M",
+            open_time=now - timedelta(minutes=25),
+            close_time=now - timedelta(minutes=10),
+            functional_strike=Decimal("62000"),
+            resolver_decision_reason="market_interval_contains_now",
+        )
+    )
+    repository = StrategyDryRunRepository(session)
+    repository.insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="dryrun-expired-position",
+            strategy_id=config.strategy_id,
+            market_ticker="KXBTC15M-OLD",
+            decision_id="strategy-old-enter",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now - timedelta(minutes=20),
+            open_price=Decimal("0.63"),
+            contract_count=1,
+            boundary=Decimal("62000"),
+            brti_at_entry=Decimal("62100"),
+            distance_bps_at_entry=Decimal("16.10305958"),
+            entry_reason="dry_run_entry_signal",
+            status="OPEN",
+            measurements={"desired_side_ask": "0.62"},
+        )
+    )
+    repository.insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="dryrun-active-position",
+            strategy_id=config.strategy_id,
+            market_ticker="KXBTC15M-ACTIVE",
+            decision_id="strategy-active-enter",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now - timedelta(seconds=30),
+            open_price=Decimal("0.63"),
+            contract_count=1,
+            boundary=Decimal("62000"),
+            brti_at_entry=Decimal("62100"),
+            distance_bps_at_entry=Decimal("16.10305958"),
+            entry_reason="dry_run_entry_signal",
+            status="OPEN",
+            measurements={"desired_side_ask": "0.62"},
+        )
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_FORCE_EXIT
+    assert decision.primary_reason == "dry_run_position_market_closed_or_expired"
+    assert decision.measurements["managed_position_id"] == "dryrun-expired-position"
+
+
+def test_strategy_dry_run_prioritizes_older_profit_target_before_new_entry(
+    session,
+) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config(
+        {
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+            "STRATEGY_DRY_RUN_MAX_OPEN_POSITIONS": "3",
+            "STRATEGY_DRY_RUN_ONE_ENTRY_PER_MARKET": "false",
+        }
+    )
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        yes_bid=Decimal("0.74"),
+        yes_ask=Decimal("0.76"),
+    )
+    repository = StrategyDryRunRepository(session)
+    repository.insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="dryrun-older-profit-position",
+            strategy_id=config.strategy_id,
+            market_ticker="KXBTC15M-ACTIVE",
+            decision_id="strategy-older-enter",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now - timedelta(minutes=3),
+            open_price=Decimal("0.63"),
+            contract_count=1,
+            boundary=Decimal("62000"),
+            brti_at_entry=Decimal("62100"),
+            distance_bps_at_entry=Decimal("16.10305958"),
+            entry_reason="dry_run_entry_signal",
+            status="OPEN",
+            measurements={"desired_side_ask": "0.62"},
+        )
+    )
+    repository.insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="dryrun-newer-open-position",
+            strategy_id=config.strategy_id,
+            market_ticker="KXBTC15M-ACTIVE",
+            decision_id="strategy-newer-enter",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now - timedelta(seconds=30),
+            open_price=Decimal("0.72"),
+            contract_count=1,
+            boundary=Decimal("62000"),
+            brti_at_entry=Decimal("62100"),
+            distance_bps_at_entry=Decimal("16.10305958"),
+            entry_reason="dry_run_entry_signal",
+            status="OPEN",
+            measurements={"desired_side_ask": "0.71"},
+        )
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_EXIT_SIGNAL
+    assert decision.primary_reason == "dry_run_profit_target_reached"
+    assert decision.measurements["managed_position_id"] == (
+        "dryrun-older-profit-position"
+    )
+
+
+def test_strategy_dry_run_management_uses_exit_bid_depth(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config(
+        {
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+        }
+    )
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        yes_bid_count=Decimal("3"),
+        yes_ask_count=Decimal("0"),
+    )
+    StrategyDryRunRepository(session).insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="dryrun-managed-position",
+            strategy_id=config.strategy_id,
+            market_ticker="KXBTC15M-ACTIVE",
+            decision_id="strategy-managed-enter",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now - timedelta(seconds=30),
+            open_price=Decimal("0.63"),
+            contract_count=1,
+            boundary=Decimal("62000"),
+            brti_at_entry=Decimal("62100"),
+            distance_bps_at_entry=Decimal("16.10305958"),
+            entry_reason="dry_run_entry_signal",
+            status="OPEN",
+            measurements={"desired_side_ask": "0.62"},
+        )
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_MANAGE_POSITION
+    assert decision.primary_reason == "dry_run_position_open"
+    assert decision.measurements["desired_top_book_size"] == "3"
+    assert decision.measurements["managed_position_id"] == "dryrun-managed-position"
 
 
 def test_strategy_dry_run_mode_without_flag_stays_observe_only(session) -> None:
@@ -472,6 +676,10 @@ def _seed_observable_context(
     yes_spread: Decimal = Decimal("0.02"),
     initial_yes_bid: Decimal = Decimal("0.55"),
     initial_yes_ask: Decimal = Decimal("0.57"),
+    yes_bid_count: Decimal = Decimal("3"),
+    yes_ask_count: Decimal = Decimal("3"),
+    no_bid_count: Decimal = Decimal("3"),
+    no_ask_count: Decimal = Decimal("3"),
 ) -> None:
     _seed_market(session, now=now)
     reference_repository = ReferenceTicksRepository(session)
@@ -501,8 +709,10 @@ def _seed_observable_context(
             no_ask=Decimal("0.45"),
             yes_spread=Decimal("0.02"),
             no_spread=Decimal("0.02"),
-            yes_ask_count=Decimal("3"),
-            no_ask_count=Decimal("3"),
+            yes_bid_count=yes_bid_count,
+            yes_ask_count=yes_ask_count,
+            no_bid_count=no_bid_count,
+            no_ask_count=no_ask_count,
             book_status="ok",
         )
     )
@@ -517,8 +727,10 @@ def _seed_observable_context(
             no_ask=Decimal("0.40"),
             yes_spread=yes_spread,
             no_spread=Decimal("0.02"),
-            yes_ask_count=Decimal("3"),
-            no_ask_count=Decimal("3"),
+            yes_bid_count=yes_bid_count,
+            yes_ask_count=yes_ask_count,
+            no_bid_count=no_bid_count,
+            no_ask_count=no_ask_count,
             book_status="ok",
         )
     )

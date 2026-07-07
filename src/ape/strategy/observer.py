@@ -453,6 +453,7 @@ def evaluate_strategy_observer(
     dry_run_intended_contract_count: int | None = None
     dry_run_position_id: str | None = None
     managing_position: StrategyDryRunPosition | None = None
+    open_positions: list[StrategyDryRunPosition] = []
 
     def decision(
         state: str,
@@ -572,34 +573,38 @@ def evaluate_strategy_observer(
         series_ticker=config.kalshi_btc15_series_ticker,
     )
     if _dry_run_runtime_enabled(config, safety):
-        latest_open_position = dry_run_repository.get_latest_open_position(
+        open_positions = dry_run_repository.list_open_positions(
             strategy_id=config.strategy_id
         )
-        if latest_open_position is not None:
-            open_position_count = dry_run_repository.count_open_positions(
-                strategy_id=config.strategy_id
-            )
-            active_market_position = (
-                None
-                if active_market is None
-                else dry_run_repository.get_open_position_by_market(
-                    strategy_id=config.strategy_id,
-                    market_ticker=active_market.market_ticker,
+        if open_positions:
+            stale_positions = [
+                position
+                for position in open_positions
+                if (
+                    active_market is None
+                    or position.market_ticker != active_market.market_ticker
                 )
+            ]
+            active_market_position = next(
+                (
+                    position
+                    for position in open_positions
+                    if active_market is not None
+                    and position.market_ticker == active_market.market_ticker
+                ),
+                None,
             )
             can_open_additional = (
-                open_position_count < config.strategy_dry_run_max_open_positions
+                len(open_positions) < config.strategy_dry_run_max_open_positions
                 and (
                     not config.strategy_dry_run_one_entry_per_market
                     or active_market_position is None
                 )
             )
-            latest_position_is_active_market = (
-                active_market is not None
-                and latest_open_position.market_ticker == active_market.market_ticker
-            )
-            if not can_open_additional or not latest_position_is_active_market:
-                managing_position = latest_open_position
+            if stale_positions:
+                managing_position = _oldest_dry_run_position(stale_positions)
+            elif not can_open_additional:
+                managing_position = _oldest_dry_run_position(open_positions)
 
         if managing_position is not None:
             dry_run_position_id = managing_position.position_id
@@ -746,6 +751,28 @@ def evaluate_strategy_observer(
         limit=250,
     )
 
+    if (
+        managing_position is None
+        and open_positions
+        and active_market is not None
+        and brti_value is not None
+        and brti_value > 0
+    ):
+        at_risk_position = _select_active_dry_run_position_needing_management(
+            config=config,
+            positions=open_positions,
+            active_market_ticker=active_market.market_ticker,
+            orderbook=orderbook,
+            evaluated_at=evaluated_at,
+            seconds_left=seconds_left,
+            boundary=boundary,
+            brti_value=brti_value,
+        )
+        if at_risk_position is not None:
+            managing_position = at_risk_position
+            dry_run_position_id = managing_position.position_id
+            candidate_side = managing_position.side_candidate
+
     if managing_position is None:
         if (
             seconds_since_open is not None
@@ -782,7 +809,11 @@ def evaluate_strategy_observer(
         None if desired_spread is None else desired_spread * Decimal("100")
     )
     desired_mid = _midpoint(desired_bid, desired_ask)
-    desired_top_book_size = _desired_top_book_size(orderbook, candidate_side)
+    desired_top_book_size = (
+        _desired_exit_book_size(orderbook, candidate_side)
+        if managing_position is not None
+        else _desired_top_book_size(orderbook, candidate_side)
+    )
     if (
         desired_bid is None
         or desired_ask is None
@@ -1874,6 +1905,21 @@ def _desired_top_book_size(
     return None
 
 
+def _desired_exit_book_size(
+    orderbook: OrderbookSnapshot,
+    candidate_side: str | None,
+) -> Decimal | None:
+    if candidate_side == "YES":
+        return _decimal_or_none(orderbook.yes_bid_count) or _decimal_or_none(
+            orderbook.yes_bid_size
+        )
+    if candidate_side == "NO":
+        return _decimal_or_none(orderbook.no_bid_count) or _decimal_or_none(
+            orderbook.no_bid_size
+        )
+    return None
+
+
 def _midpoint(
     bid: Decimal | None,
     ask: Decimal | None,
@@ -2063,6 +2109,77 @@ def _trade_confirmation_metrics(
         "trade_count": len(relevant),
         "candidate_trade_ratio": Decimal(candidate_count) / Decimal(len(relevant)),
     }
+
+
+def _oldest_dry_run_position(
+    positions: list[StrategyDryRunPosition],
+) -> StrategyDryRunPosition:
+    return min(
+        positions,
+        key=lambda position: (
+            _as_utc(position.opened_at),
+            int(position.id or 0),
+        ),
+    )
+
+
+def _select_active_dry_run_position_needing_management(
+    *,
+    config: AppConfig,
+    positions: list[StrategyDryRunPosition],
+    active_market_ticker: str,
+    orderbook: OrderbookSnapshot,
+    evaluated_at: datetime,
+    seconds_left: int | None,
+    boundary: Decimal,
+    brti_value: Decimal,
+) -> StrategyDryRunPosition | None:
+    active_positions = [
+        position
+        for position in positions
+        if position.market_ticker == active_market_ticker
+    ]
+    for position in sorted(
+        active_positions,
+        key=lambda row: (_as_utc(row.opened_at), int(row.id or 0)),
+    ):
+        desired_bid, desired_ask, desired_spread = _desired_book(
+            orderbook,
+            position.side_candidate,
+        )
+        if (
+            desired_bid is None
+            or desired_ask is None
+            or desired_spread is None
+            or desired_ask < desired_bid
+            or desired_spread < 0
+        ):
+            return position
+
+        desired_spread_cents = desired_spread * Decimal("100")
+        if desired_spread_cents > Decimal(str(config.strategy_max_spread_cents)):
+            return position
+
+        desired_exit_size = _desired_exit_book_size(orderbook, position.side_candidate)
+        if desired_exit_size is None or desired_exit_size < Decimal(
+            str(config.strategy_min_top_book_size_contracts)
+        ):
+            return position
+
+        management_state, _ = _dry_run_management_decision(
+            config=config,
+            position=position,
+            evaluated_at=evaluated_at,
+            seconds_left=seconds_left,
+            candidate_side=position.side_candidate,
+            boundary=boundary,
+            brti_value=brti_value,
+            desired_bid=desired_bid,
+        )
+        if management_state in {STATE_EXIT_SIGNAL, STATE_FORCE_EXIT}:
+            return position
+
+    return None
 
 
 def _dry_run_management_decision(
