@@ -562,6 +562,52 @@ def evaluate_strategy_observer(
             raw_context_hash=context_hash,
         )
 
+    def load_managed_exit_quote() -> None:
+        nonlocal desired_ask
+        nonlocal desired_bid
+        nonlocal desired_mid
+        nonlocal desired_spread
+        nonlocal desired_spread_cents
+        nonlocal desired_top_book_size
+        nonlocal latest_trade
+        nonlocal latest_trade_age_ms
+        nonlocal orderbook
+        nonlocal orderbook_age_ms
+
+        if market is None or candidate_side is None:
+            return
+
+        exit_orderbook = OrderbookRepository(session).get_latest_snapshot(
+            market.market_ticker
+        )
+        orderbook = exit_orderbook
+        orderbook_age_ms = (
+            None
+            if exit_orderbook is None
+            else _age_ms(exit_orderbook.received_at, evaluated_at)
+        )
+        if (
+            exit_orderbook is None
+            or orderbook_age_ms is None
+            or orderbook_age_ms > config.strategy_kalshi_book_max_age_ms
+        ):
+            return
+
+        desired_bid, desired_ask, desired_spread = _desired_book(
+            exit_orderbook,
+            candidate_side,
+        )
+        desired_spread_cents = (
+            None if desired_spread is None else desired_spread * Decimal("100")
+        )
+        desired_mid = _midpoint(desired_bid, desired_ask)
+        desired_top_book_size = _desired_exit_book_size(exit_orderbook, candidate_side)
+        latest_trade = PublicTradesRepository(session).get_latest_trade(
+            market.market_ticker
+        )
+        if latest_trade is not None:
+            latest_trade_age_ms = _age_ms(latest_trade.received_at, evaluated_at)
+
     if not safety.is_safe:
         return decision(
             STATE_LIVE_GUARD_BLOCKED,
@@ -682,6 +728,7 @@ def evaluate_strategy_observer(
     reference_tick = ReferenceTicksRepository(session).get_latest_tick(BRTI_SOURCE)
     if not _valid_reference_tick(reference_tick):
         if managing_position is not None:
+            load_managed_exit_quote()
             return decision(
                 STATE_FORCE_EXIT,
                 "dry_run_position_reference_unusable",
@@ -699,6 +746,7 @@ def evaluate_strategy_observer(
     )
     if brti_age_ms > config.strategy_reference_max_age_ms:
         if managing_position is not None:
+            load_managed_exit_quote()
             return decision(
                 STATE_FORCE_EXIT,
                 "dry_run_position_reference_stale",
@@ -968,7 +1016,10 @@ def evaluate_strategy_observer(
     candidate_trade_ratio = trade_confirmation["candidate_trade_ratio"]
     warnings: list[str] = []
     if recent_trade_count < config.strategy_trade_confirmation_min_trades:
-        warnings.append("trade_confirmation_insufficient_trades_warning")
+        return decision(
+            STATE_CONTRACT_NOT_CONFIRMED,
+            "recent_trade_confirmation_insufficient_trades",
+        )
     elif (
         candidate_trade_ratio is not None
         and candidate_trade_ratio < Decimal(str(config.strategy_trade_confirmation_min_ratio))

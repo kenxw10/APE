@@ -187,6 +187,31 @@ def test_strategy_entry_bounds_allow_offset_to_reach_minimum(session) -> None:
     assert decision.measurements["dry_run_intended_entry_price"] == "0.56"
 
 
+def test_strategy_blocks_entry_when_trade_confirmation_sample_too_small(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config(
+        {
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+            "STRATEGY_TRADE_CONFIRMATION_MIN_TRADES": "4",
+        }
+    )
+    safety = assess_startup_safety(config)
+    _seed_observable_context(session, now=now)
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_CONTRACT_NOT_CONFIRMED
+    assert decision.primary_reason == "recent_trade_confirmation_insufficient_trades"
+    assert decision.measurements["recent_trade_count"] == 3
+
+
 def test_strategy_dry_run_allows_additional_entry_when_multi_position_enabled(
     session,
 ) -> None:
@@ -486,6 +511,90 @@ def test_strategy_dry_run_management_uses_exit_bid_depth(session) -> None:
     assert decision.blockers == []
     assert decision.measurements["desired_top_book_size"] == "3"
     assert decision.measurements["managed_position_id"] == "dryrun-managed-position"
+
+
+def test_strategy_dry_run_force_exit_prices_stale_reference_with_fresh_book(
+    tmp_path,
+) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_strategy_force_exit.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    position_id = "dryrun-managed-stale-reference"
+    try:
+        with session_factory() as session:
+            _seed_observable_context(session, now=now)
+            ReferenceTicksRepository(session).insert_tick(
+                ReferenceTickInput(
+                    source="kalshi_cfbenchmarks_brti",
+                    received_at=now,
+                    source_ts=now - timedelta(seconds=20),
+                    raw_value="62100",
+                    parsed_value=Decimal("62100"),
+                    source_age_ms=20_000,
+                    parse_status="valid",
+                )
+            )
+            StrategyDryRunRepository(session).insert_position_if_absent(
+                StrategyDryRunPositionInput(
+                    position_id=position_id,
+                    strategy_id=config.strategy_id,
+                    market_ticker="KXBTC15M-ACTIVE",
+                    decision_id="strategy-managed-enter",
+                    side_candidate="YES",
+                    economic_side="YES",
+                    opened_at=now - timedelta(seconds=30),
+                    open_price=Decimal("0.50"),
+                    contract_count=1,
+                    boundary=Decimal("62000"),
+                    brti_at_entry=Decimal("62100"),
+                    distance_bps_at_entry=Decimal("16.10305958"),
+                    entry_reason="dry_run_entry_signal",
+                    status="OPEN",
+                    measurements={"desired_side_ask": "0.62"},
+                )
+            )
+            session.commit()
+
+        observer = StrategyObserver(
+            config=config,
+            safety=assess_startup_safety(config),
+            session_factory=session_factory,
+            started_at=now - timedelta(minutes=1),
+            now=lambda: now,
+        )
+        decision = observer.evaluate_once()
+
+        with session_factory() as session:
+            dry_run_repository = StrategyDryRunRepository(session)
+            position = dry_run_repository.get_position_by_id(position_id)
+            events = dry_run_repository.list_recent_events(
+                limit=10,
+                strategy_id=config.strategy_id,
+            )
+
+        assert decision is not None
+        assert decision.decision_state == STATE_FORCE_EXIT
+        assert decision.primary_reason == "dry_run_position_reference_stale"
+        assert decision.measurements["desired_side_bid"] == "0.6"
+        assert position is not None
+        assert position.status == "FORCE_CLOSED"
+        assert position.close_price == Decimal("0.60")
+        assert position.realized_pnl_cents == Decimal("10")
+        assert len(events) == 1
+        assert events[0].event_type == STATE_FORCE_EXIT
+        assert events[0].price == Decimal("0.60")
+    finally:
+        engine.dispose()
 
 
 def test_strategy_dry_run_mode_without_flag_stays_observe_only(session) -> None:
