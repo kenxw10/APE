@@ -884,8 +884,10 @@ class KalshiWsCollector:
                 ),
             )
         self.brti_status.last_persisted_at = row.received_at
-        self.brti_status.last_valid_tick_at = row.received_at
-        self.brti_status.last_healthy_at = row.received_at
+        reference_tick_valid = _reference_tick_valid(row)
+        if reference_tick_valid:
+            self.brti_status.last_valid_tick_at = row.received_at
+            self.brti_status.last_healthy_at = row.received_at
         self.brti_status.latest_source_ts = row.source_ts
         self.brti_status.latest_value = _decimal_text_or_none(row.parsed_value)
         self.brti_status.latest_trailing_60s_avg = _decimal_text_or_none(
@@ -897,7 +899,8 @@ class KalshiWsCollector:
         )
         self.brti_status.final_minute_average_status = row.final_minute_average_status
         self.brti_status.source_age_ms = row.source_age_ms
-        self._mark_reference_fresh(row.received_at)
+        if reference_tick_valid:
+            self._mark_reference_fresh(row.received_at)
         return True
 
     def _seconds_until_reference_check(self, checked_at: datetime) -> float | None:
@@ -913,10 +916,7 @@ class KalshiWsCollector:
         if self._reference_subscription_error_active():
             return None
 
-        last_valid = _latest_datetime(
-            self.brti_status.last_valid_tick_at,
-            self.brti_status.last_persisted_at,
-        )
+        last_valid = self.brti_status.last_valid_tick_at
         last_connected = self.brti_status.last_connected_at
         if last_connected is not None and (
             last_valid is None or _as_utc(last_valid) < _as_utc(last_connected)
@@ -952,10 +952,7 @@ class KalshiWsCollector:
         if self._reference_subscription_error_active():
             return None
 
-        last_valid = _latest_datetime(
-            self.brti_status.last_valid_tick_at,
-            self.brti_status.last_persisted_at,
-        )
+        last_valid = self.brti_status.last_valid_tick_at
         last_connected = self.brti_status.last_connected_at
         if last_connected is not None and (
             last_valid is None or _as_utc(last_valid) < _as_utc(last_connected)
@@ -1324,6 +1321,14 @@ def _reference_reconnect_result(value: str | None) -> bool:
         "brti_reference_first_tick_timeout",
         "brti_reference_no_valid_tick_timeout",
     }
+
+
+def _reference_tick_valid(value: Any) -> bool:
+    return (
+        getattr(value, "parse_status", None) == "valid"
+        and getattr(value, "parsed_value", None) is not None
+        and getattr(value, "received_at", None) is not None
+    )
 
 
 def _invalid_message_diagnostic_sample(message: ParsedWsMessage) -> dict[str, Any] | None:

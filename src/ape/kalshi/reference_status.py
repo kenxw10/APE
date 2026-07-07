@@ -296,6 +296,7 @@ def build_brti_reference_status(
             config.kalshi_cfbenchmarks_kalshi_received_warn_ms
         ),
         metadata_stale_since=_datetime_or_none(heartbeat_metadata.get("stale_since")),
+        metadata_warnings=_string_list(heartbeat_metadata.get("warnings")),
     )
     recovery_state = _str_or_none(heartbeat_metadata.get("recovery_state"))
     status_category = _status_category(
@@ -562,6 +563,7 @@ def _stale_details(
     kalshi_age_ms: int | None,
     kalshi_received_warn_ms: int,
     metadata_stale_since: datetime | None,
+    metadata_warnings: list[str],
 ) -> tuple[str | None, int | None, datetime | None]:
     if worker_heartbeat_stale:
         return _time_stale_details(
@@ -571,6 +573,10 @@ def _stale_details(
             stale_after_seconds=worker_heartbeat_stale_after_seconds,
             metadata_stale_since=metadata_stale_since,
         )
+    worker_timeout_reason = _worker_timeout_reason(metadata_warnings)
+    if worker_timeout_reason is not None:
+        stale_age_ms = _age_ms(checked_at, metadata_stale_since)
+        return worker_timeout_reason, stale_age_ms, metadata_stale_since
     if transport_stale:
         return _time_stale_details(
             "brti_reference_transport_stale",
@@ -602,6 +608,16 @@ def _stale_details(
             metadata_stale_since,
         )
     return None, None, None
+
+
+def _worker_timeout_reason(warnings: list[str]) -> str | None:
+    for warning in (
+        "brti_reference_first_tick_timeout",
+        "brti_reference_no_valid_tick_timeout",
+    ):
+        if warning in warnings:
+            return warning
+    return None
 
 
 def _time_stale_details(

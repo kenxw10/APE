@@ -520,6 +520,68 @@ def test_brti_status_reports_transport_stale_without_recent_backend_message(tmp_
         engine.dispose()
 
 
+def test_brti_status_prefers_worker_timeout_reason_over_transport_lag(tmp_path) -> None:
+    now = datetime.now(UTC)
+    stale_since = now - timedelta(seconds=20)
+    old_message_time = now - timedelta(seconds=30)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_brti_timeout_reason.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_TRANSPORT_STALE_AFTER_SECONDS": "3",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        with session_factory() as session:
+            WorkerHeartbeatRepository(session).record_heartbeat(
+                WorkerHeartbeatInput(
+                    service_name="ape-worker",
+                    started_at=now - timedelta(minutes=1),
+                    heartbeat_at=now,
+                    app_mode="OBSERVER",
+                    is_safe=True,
+                    metadata={
+                        "reference": {
+                            "brti": {
+                                "enabled": True,
+                                "configured": True,
+                                "signer_ready": True,
+                                "connection_state": "reconnect_pending",
+                                "recovery_state": "reconnecting",
+                                "last_message_at": _isoformat_z(old_message_time),
+                                "stale_since": _isoformat_z(stale_since),
+                                "warnings": [
+                                    "brti_reference_no_valid_tick_timeout",
+                                    "brti_reference_reconnect_requested",
+                                ],
+                                "blockers": [],
+                            }
+                        }
+                    },
+                )
+            )
+            session.commit()
+
+        app = create_app(config)
+        with TestClient(app) as client:
+            response = client.get("/reference/brti/status")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["transport_stale"] is True
+        assert body["stale_reason"] == "brti_reference_no_valid_tick_timeout"
+        assert body["stale_since"] == _isoformat_z(stale_since)
+        assert body["recommended_action"] == "inspect_cfbenchmarks_websocket_subscription"
+    finally:
+        engine.dispose()
+
+
 def test_brti_status_reports_stale_worker_heartbeat(tmp_path) -> None:
     now = datetime.now(UTC)
     old_heartbeat_time = now - timedelta(seconds=30)

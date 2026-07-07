@@ -953,6 +953,66 @@ def test_collector_persists_malformed_brti_tick_without_crashing(tmp_path) -> No
         engine.dispose()
 
 
+def test_collector_malformed_brti_ticks_do_not_reset_valid_tick_timer(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_malformed_timeout.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "0.01",
+            "KALSHI_WS_MAX_RECONNECT_SECONDS": "0.01",
+            "KALSHI_CFBENCHMARKS_FIRST_TICK_TIMEOUT_SECONDS": "0.01",
+            "KALSHI_CFBENCHMARKS_STATUS_GRACE_SECONDS": "0.001",
+            "KALSHI_CFBENCHMARKS_MAX_CONSECUTIVE_STALE_BEFORE_RECONNECT": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    current_time = NOW
+
+    def advance_time() -> None:
+        nonlocal current_time
+        current_time = current_time + timedelta(seconds=1)
+
+    websocket = AdvancingFakeWebSocket([_brti_payload(value="bad")], advance_time)
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        now=lambda: current_time,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            latest_tick = ReferenceTicksRepository(session).get_latest_tick(BRTI_SOURCE)
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert latest_tick is not None
+            assert latest_tick.parse_status == "malformed_value"
+            assert latest_tick.parsed_value is None
+            assert heartbeat is not None
+            brti_metadata = heartbeat.metadata_["reference"]["brti"]
+            assert brti_metadata["last_persisted_at"] is not None
+            assert brti_metadata["last_valid_tick_at"] is None
+            assert brti_metadata["connection_state"] == "reconnect_pending"
+            assert "brti_malformed_value" in brti_metadata["warnings"]
+            assert "brti_reference_first_tick_timeout" in brti_metadata["warnings"]
+            assert "brti_reference_reconnect_requested" in brti_metadata["warnings"]
+    finally:
+        engine.dispose()
+
+
 def test_collector_skips_duplicate_or_out_of_order_brti_source_timestamp(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_duplicate.sqlite'}"
     config = load_config(
