@@ -278,6 +278,7 @@ class StrategyDryRunEvent(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    strategy_id: Mapped[str | None] = mapped_column(String(128), index=True)
     position_id: Mapped[str | None] = mapped_column(String(128), index=True)
     decision_id: Mapped[str | None] = mapped_column(String(128), index=True)
     event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)

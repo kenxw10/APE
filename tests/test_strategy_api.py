@@ -68,6 +68,83 @@ def test_strategy_dry_run_status_reports_missing_observer_flag(tmp_path) -> None
         engine.dispose()
 
 
+def test_strategy_dry_run_events_remain_visible_after_position_retention(
+    tmp_path,
+) -> None:
+    now = datetime.now(UTC)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_strategy_event_retention.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        with session_factory() as session:
+            repository = StrategyDryRunRepository(session)
+            position = repository.insert_position_if_absent(
+                StrategyDryRunPositionInput(
+                    position_id="dryrun-retained-api-position",
+                    strategy_id=config.strategy_id,
+                    market_ticker="KXBTC15M-CURRENT",
+                    decision_id="strategy-KXBTC15M-CURRENT-1-enter",
+                    side_candidate="YES",
+                    economic_side="YES",
+                    opened_at=now,
+                    open_price=Decimal("0.63"),
+                    contract_count=1,
+                    boundary=Decimal("62000"),
+                    brti_at_entry=Decimal("62100"),
+                    distance_bps_at_entry=Decimal("16.10305958"),
+                    entry_reason="dry_run_entry_signal",
+                    status="CLOSED",
+                    closed_at=now + timedelta(seconds=30),
+                    close_price=Decimal("0.73"),
+                    close_reason="dry_run_profit_target_reached",
+                    realized_pnl_cents=Decimal("10"),
+                    measurements={"desired_side_ask": "0.62"},
+                )
+            )
+            repository.insert_event_if_absent(
+                StrategyDryRunEventInput(
+                    event_id="dryrun-retained-api-event",
+                    position_id=position.position_id,
+                    decision_id=position.decision_id,
+                    event_type="ENTER_DRY_RUN",
+                    market_ticker=position.market_ticker,
+                    occurred_at=now,
+                    side_candidate="YES",
+                    price=Decimal("0.63"),
+                    contract_count=1,
+                    reason="dry_run_entry_signal",
+                    measurements={"desired_side_ask": "0.62"},
+                )
+            )
+            session.delete(position)
+            session.commit()
+
+        app = create_app(config)
+        with TestClient(app) as client:
+            status_response = client.get("/strategy/dry-run/status")
+            events_response = client.get("/strategy/dry-run/events/recent?limit=10")
+
+        assert status_response.status_code == 200
+        assert events_response.status_code == 200
+        status = status_response.json()
+        assert status["open_position_count"] == 0
+        assert status["latest_event"]["event_id"] == "dryrun-retained-api-event"
+        events = events_response.json()
+        assert events["count"] == 1
+        assert events["events"][0]["event_id"] == "dryrun-retained-api-event"
+    finally:
+        engine.dispose()
+
+
 def test_strategy_status_reports_latest_decision_and_worker_metadata(tmp_path) -> None:
     now = datetime.now(UTC)
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_strategy_api.sqlite'}"

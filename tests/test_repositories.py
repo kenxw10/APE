@@ -300,6 +300,68 @@ def test_strategy_dry_run_repository_is_idempotent_and_closes_position(session) 
     assert repository.list_recent_events(limit=10)[0].event_id == "dryrun-event-enter-1"
 
 
+def test_strategy_dry_run_events_remain_queryable_after_position_delete(session) -> None:
+    repository = StrategyDryRunRepository(session)
+    now = datetime.now(UTC)
+    position = repository.insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="dryrun-retained-event-position",
+            strategy_id="btc15_momentum_v1",
+            market_ticker="KXBTC-TEST-001",
+            decision_id="decision-enter",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now,
+            open_price=Decimal("0.63"),
+            contract_count=1,
+            boundary=Decimal("62000"),
+            brti_at_entry=Decimal("62100"),
+            distance_bps_at_entry=Decimal("16.1"),
+            entry_reason="dry_run_entry_signal",
+            status="CLOSED",
+            closed_at=now + timedelta(seconds=30),
+            close_price=Decimal("0.73"),
+            close_reason="dry_run_profit_target_reached",
+            realized_pnl_cents=Decimal("10"),
+            measurements={"desired_side_ask": "0.62"},
+        )
+    )
+    repository.insert_event_if_absent(
+        StrategyDryRunEventInput(
+            event_id="dryrun-retained-event-enter",
+            event_type="ENTER_DRY_RUN",
+            occurred_at=now,
+            position_id=position.position_id,
+            decision_id=position.decision_id,
+            market_ticker=position.market_ticker,
+            side_candidate="YES",
+            price=Decimal("0.63"),
+            contract_count=1,
+            reason="dry_run_entry_signal",
+            measurements={"desired_side_ask": "0.62"},
+        )
+    )
+    session.delete(position)
+    session.flush()
+
+    latest_event = repository.get_latest_event(strategy_id="btc15_momentum_v1")
+    latest_enter_id = repository.get_latest_enter_decision_id(
+        strategy_id="btc15_momentum_v1"
+    )
+    recent_events = repository.list_recent_events(
+        limit=10,
+        strategy_id="btc15_momentum_v1",
+    )
+
+    assert latest_event is not None
+    assert latest_event.event_id == "dryrun-retained-event-enter"
+    assert latest_event.strategy_id == "btc15_momentum_v1"
+    assert latest_enter_id == "decision-enter"
+    assert [event.event_id for event in recent_events] == [
+        "dryrun-retained-event-enter"
+    ]
+
+
 def test_worker_heartbeat_repository_records_and_reads_latest(session) -> None:
     repository = WorkerHeartbeatRepository(session)
     now = datetime.now(UTC)

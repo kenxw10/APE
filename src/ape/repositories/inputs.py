@@ -144,6 +144,7 @@ class StrategyDryRunEventInput:
     event_id: str
     event_type: str
     occurred_at: datetime
+    strategy_id: str | None = None
     position_id: str | None = None
     decision_id: str | None = None
     market_ticker: str | None = None

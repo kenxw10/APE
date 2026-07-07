@@ -137,7 +137,11 @@ class StrategyDryRunRepository:
         if existing is not None:
             return existing
 
-        row = StrategyDryRunEvent(**_event_values(event))
+        values = _event_values(event)
+        if values.get("strategy_id") is None and event.position_id is not None:
+            values["strategy_id"] = self._strategy_id_for_position(event.position_id)
+
+        row = StrategyDryRunEvent(**values)
         self.session.add(row)
         self.session.flush()
         return row
@@ -156,10 +160,7 @@ class StrategyDryRunRepository:
     ) -> StrategyDryRunEvent | None:
         statement = select(StrategyDryRunEvent)
         if strategy_id is not None:
-            statement = statement.join(
-                StrategyDryRunPosition,
-                StrategyDryRunEvent.position_id == StrategyDryRunPosition.position_id,
-            ).where(StrategyDryRunPosition.strategy_id == strategy_id)
+            statement = statement.where(StrategyDryRunEvent.strategy_id == strategy_id)
         return self.session.scalar(
             statement.order_by(
                 desc(StrategyDryRunEvent.occurred_at),
@@ -172,10 +173,7 @@ class StrategyDryRunRepository:
             StrategyDryRunEvent.event_type == "ENTER_DRY_RUN"
         )
         if strategy_id is not None:
-            statement = statement.join(
-                StrategyDryRunPosition,
-                StrategyDryRunEvent.position_id == StrategyDryRunPosition.position_id,
-            ).where(StrategyDryRunPosition.strategy_id == strategy_id)
+            statement = statement.where(StrategyDryRunEvent.strategy_id == strategy_id)
         row = self.session.scalar(
             statement.order_by(
                 desc(StrategyDryRunEvent.occurred_at),
@@ -229,10 +227,7 @@ class StrategyDryRunRepository:
     ) -> list[StrategyDryRunEvent]:
         statement = select(StrategyDryRunEvent)
         if strategy_id is not None:
-            statement = statement.join(
-                StrategyDryRunPosition,
-                StrategyDryRunEvent.position_id == StrategyDryRunPosition.position_id,
-            ).where(StrategyDryRunPosition.strategy_id == strategy_id)
+            statement = statement.where(StrategyDryRunEvent.strategy_id == strategy_id)
         return list(
             self.session.scalars(
                 statement.order_by(
@@ -240,6 +235,13 @@ class StrategyDryRunRepository:
                     desc(StrategyDryRunEvent.id),
                 ).limit(limit)
             )
+        )
+
+    def _strategy_id_for_position(self, position_id: str) -> str | None:
+        return self.session.scalar(
+            select(StrategyDryRunPosition.strategy_id)
+            .where(StrategyDryRunPosition.position_id == position_id)
+            .limit(1)
         )
 
 
