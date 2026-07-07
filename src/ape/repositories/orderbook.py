@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import asc, desc, select
+from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from ape.db.models import OrderbookSnapshot
@@ -41,14 +41,15 @@ class OrderbookRepository:
         *,
         limit: int,
     ) -> list[OrderbookSnapshot]:
-        return list(
+        rows = list(
             self.session.scalars(
                 select(OrderbookSnapshot)
                 .where(
                     OrderbookSnapshot.market_ticker == market_ticker,
                     OrderbookSnapshot.received_at >= since,
                 )
-                .order_by(asc(OrderbookSnapshot.received_at), asc(OrderbookSnapshot.id))
+                .order_by(desc(OrderbookSnapshot.received_at), desc(OrderbookSnapshot.id))
                 .limit(limit)
             )
         )
+        return list(reversed(rows))

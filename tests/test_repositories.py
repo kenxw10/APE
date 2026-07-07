@@ -153,6 +153,32 @@ def test_orderbook_repository_inserts_and_reads_latest_snapshot(session) -> None
     assert repository.get_latest_snapshot_any().market_ticker == "KXBTC-TEST-001"
 
 
+def test_orderbook_repository_limits_to_newest_snapshots_since(session) -> None:
+    repository = OrderbookRepository(session)
+    now = datetime.now(UTC)
+    for offset_seconds, bid in ((3, "47"), (2, "48"), (1, "49"), (0, "50")):
+        repository.insert_snapshot(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC-TEST-001",
+                received_at=now - timedelta(seconds=offset_seconds),
+                yes_bid=Decimal(bid),
+                book_status="ok",
+            )
+        )
+
+    rows = repository.get_snapshots_since(
+        "KXBTC-TEST-001",
+        now - timedelta(seconds=10),
+        limit=2,
+    )
+
+    assert [row.yes_bid for row in rows] == [
+        Decimal("49.00000000"),
+        Decimal("50.00000000"),
+    ]
+    assert rows[0].received_at <= rows[1].received_at
+
+
 def test_public_trades_repository_inserts_and_reads_recent_trades(session) -> None:
     repository = PublicTradesRepository(session)
     now = datetime.now(UTC)
