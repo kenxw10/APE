@@ -231,6 +231,7 @@ function createStatusSections(
   const brtiStatus = snapshot.brtiStatus.data;
   const strategyStatus = snapshot.strategyStatus.data;
   const wsConnected = wsStatus?.connection_state === "subscribed" && !wsStatus.stale;
+  const brtiLive = isLiveBrtiStatus(brtiStatus);
   const wsTone = !snapshot.wsStatus.ok
     ? "red"
     : !wsStatus?.enabled
@@ -244,7 +245,7 @@ function createStatusSections(
     ? "red"
     : !brtiStatus?.enabled
       ? "muted"
-      : brtiStatus.connection_state === "subscribed" && !brtiStatus.stale
+      : brtiLive
         ? "green"
         : brtiStatus.connection_state === "error"
           ? "red"
@@ -604,10 +605,20 @@ function brtiTransportLabel(brtiStatus: BrtiReferenceStatusResponse | null): str
   if (brtiStatus.connection_state === "error") {
     return "ERROR";
   }
-  if (brtiStatus.transport_stale) {
+  if (brtiStatus.status_category === "waiting") {
+    return "WAITING";
+  }
+  if (
+    brtiStatus.transport_stale ||
+    brtiStatus.status_category === "stale_transport" ||
+    brtiStatus.status_category === "stale_persistence"
+  ) {
     return "STALE";
   }
-  if (brtiStatus.connection_state === "subscribed") {
+  if (brtiStatus.status_category === "upstream_lag") {
+    return "LAGGING";
+  }
+  if (brtiStatus.connection_state === "subscribed" && brtiStatus.status_category === "healthy") {
     return "LIVE";
   }
   return brtiStatus.connection_state.toUpperCase();
@@ -617,6 +628,7 @@ function isLiveBrtiStatus(brtiStatus: BrtiReferenceStatusResponse | null): boole
   return (
     brtiStatus !== null &&
     brtiStatus.enabled &&
+    brtiStatus.status_category === "healthy" &&
     brtiStatus.connection_state === "subscribed" &&
     !brtiStatus.stale &&
     !brtiStatus.transport_stale &&

@@ -306,12 +306,27 @@ def build_brti_reference_status(
         metadata_warnings=metadata_warnings,
     )
     recovery_state = _str_or_none(heartbeat_metadata.get("recovery_state"))
+    last_connected_at = _datetime_or_none(heartbeat_metadata.get("last_connected_at"))
+    last_successful_subscribe_at = _datetime_or_none(
+        heartbeat_metadata.get("last_successful_subscribe_at")
+    )
+    last_subscription_ack_at = _datetime_or_none(
+        heartbeat_metadata.get("last_subscription_ack_at")
+    )
+    current_subscription_at = _latest_datetime(
+        last_connected_at,
+        last_successful_subscribe_at,
+        last_subscription_ack_at,
+    )
     status_category = _status_category(
         enabled=effective_enabled,
         signer_ready=effective_signer_ready,
         blockers=blockers,
         connection_state=connection_state,
         latest_tick=latest_tick,
+        last_valid_tick_at=last_valid_tick_at,
+        current_subscription_at=current_subscription_at,
+        recovery_state=recovery_state,
         worker_heartbeat_stale=worker_heartbeat_stale,
         transport_stale=transport_stale,
         persistence_stale=persistence_stale,
@@ -352,13 +367,9 @@ def build_brti_reference_status(
         worker_heartbeat_age_ms=worker_heartbeat_age_ms,
         worker_started_at=worker_started_at,
         worker_heartbeat_stale=worker_heartbeat_stale,
-        last_connected_at=_datetime_or_none(heartbeat_metadata.get("last_connected_at")),
-        last_successful_subscribe_at=_datetime_or_none(
-            heartbeat_metadata.get("last_successful_subscribe_at")
-        ),
-        last_subscription_ack_at=_datetime_or_none(
-            heartbeat_metadata.get("last_subscription_ack_at")
-        ),
+        last_connected_at=last_connected_at,
+        last_successful_subscribe_at=last_successful_subscribe_at,
+        last_subscription_ack_at=last_subscription_ack_at,
         latest_tick_received_at=latest_received_at,
         last_valid_tick_at=last_valid_tick_at,
         last_healthy_at=_datetime_or_none(heartbeat_metadata.get("last_healthy_at")),
@@ -650,6 +661,9 @@ def _status_category(
     blockers: list[str],
     connection_state: str,
     latest_tick: ReferenceTick | None,
+    last_valid_tick_at: datetime | None,
+    current_subscription_at: datetime | None,
+    recovery_state: str | None,
     worker_heartbeat_stale: bool,
     transport_stale: bool,
     persistence_stale: bool,
@@ -679,6 +693,12 @@ def _status_category(
         return "stale_persistence"
     if source_stale or kalshi_received_stale:
         return "upstream_lag"
+    if recovery_state in {"connecting", "waiting_for_fresh_tick", "recovering"}:
+        return "waiting"
+    if current_subscription_at is not None and (
+        last_valid_tick_at is None or _as_utc(last_valid_tick_at) < current_subscription_at
+    ):
+        return "waiting"
     if latest_tick is None or not _reference_tick_valid(latest_tick) or connection_state in {
         "waiting_for_worker",
         "waiting_for_fresh_tick",
