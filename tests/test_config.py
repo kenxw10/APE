@@ -79,6 +79,9 @@ def test_default_config_is_observer_only() -> None:
     assert config.strategy_dry_run_min_entry_price == 0.56
     assert config.strategy_min_boundary_distance_bps == 3.5
     assert config.strategy_reference_max_age_ms == 2000
+    assert config.strategy_reference_source_max_age_ms == 45000
+    assert config.strategy_reference_source_warn_ms == 10000
+    assert config.strategy_reference_require_trade_ready_fresh is True
     assert config.strategy_kalshi_book_max_age_ms == 2000
     assert config.strategy_no_entry_first_seconds == 300
     assert config.strategy_no_entry_last_seconds == 60
@@ -249,6 +252,9 @@ def test_strategy_observer_env_vars_parse_safely() -> None:
             "STRATEGY_MIN_ENTRY_ASK": "0.57",
             "STRATEGY_MAX_ENTRY_ASK": "0.79",
             "STRATEGY_MAX_SPREAD_CENTS": "5",
+            "STRATEGY_REFERENCE_SOURCE_MAX_AGE_MS": "46000",
+            "STRATEGY_REFERENCE_SOURCE_WARN_MS": "11000",
+            "STRATEGY_REFERENCE_REQUIRE_TRADE_READY_FRESH": "false",
         }
     )
 
@@ -283,6 +289,9 @@ def test_strategy_observer_env_vars_parse_safely() -> None:
     assert config.strategy_dry_run_min_entry_price == 0.55
     assert config.strategy_min_boundary_distance_bps == 4.5
     assert config.strategy_reference_max_age_ms == 2500
+    assert config.strategy_reference_source_max_age_ms == 46000
+    assert config.strategy_reference_source_warn_ms == 11000
+    assert config.strategy_reference_require_trade_ready_fresh is False
     assert config.strategy_kalshi_book_max_age_ms == 2600
     assert config.strategy_no_entry_first_seconds == 301
     assert config.strategy_no_entry_last_seconds == 61
@@ -299,6 +308,8 @@ def test_strategy_observer_env_vars_parse_safely() -> None:
         ("STRATEGY_DRY_RUN_POSITION_SIZE_CONTRACTS", "-1"),
         ("STRATEGY_DRY_RUN_ENTRY_PRICE_OFFSET_CENTS", "-1"),
         ("STRATEGY_MIN_TOP_BOOK_SIZE_CONTRACTS", "-1"),
+        ("STRATEGY_REFERENCE_SOURCE_MAX_AGE_MS", "-1"),
+        ("STRATEGY_REFERENCE_SOURCE_WARN_MS", "-1"),
     ],
 )
 def test_invalid_strategy_dry_run_env_vars_fail(key: str, value: str) -> None:

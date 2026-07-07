@@ -76,6 +76,7 @@ Useful API endpoints:
 /strategy/status
 /strategy/decisions/latest
 /strategy/decisions/recent
+/strategy/gates/recent
 /strategy/dry-run/status
 /strategy/dry-run/positions/open
 /strategy/dry-run/positions/recent
@@ -388,7 +389,7 @@ Expected behavior:
 
 ## Dry-Run Strategy Checkpoint After PR 9
 
-Only after PR 9 is merged and market WebSocket, BRTI, strategy observer, and storage retention are healthy, update the Railway worker service:
+Only after PR 9a is merged and market WebSocket, BRTI, strategy observer, and storage retention are healthy, update the Railway worker service:
 
 ```text
 APP_MODE=DRY_RUN
@@ -420,6 +421,11 @@ STRATEGY_TRADE_CONFIRMATION_MIN_TRADES=3
 STRATEGY_MIN_TOP_BOOK_SIZE_CONTRACTS=2
 STRATEGY_DRY_RUN_MAX_ENTRY_PRICE=0.78
 STRATEGY_DRY_RUN_MIN_ENTRY_PRICE=0.56
+STRATEGY_REFERENCE_MAX_AGE_MS=2000
+STRATEGY_REFERENCE_SOURCE_WARN_MS=10000
+STRATEGY_REFERENCE_SOURCE_MAX_AGE_MS=45000
+STRATEGY_REFERENCE_REQUIRE_TRADE_READY_FRESH=true
+STRATEGY_KALSHI_BOOK_MAX_AGE_MS=2000
 ```
 
 To disable dry-run, set:
@@ -438,6 +444,8 @@ Invoke-RestMethod "https://ape-api-production.up.railway.app/strategy/dry-run/po
 Invoke-RestMethod "https://ape-api-production.up.railway.app/strategy/dry-run/events/recent?limit=100"
 Invoke-RestMethod https://ape-api-production.up.railway.app/strategy/status
 Invoke-RestMethod https://ape-api-production.up.railway.app/strategy/decisions/latest
+Invoke-RestMethod "https://ape-api-production.up.railway.app/strategy/decisions/recent?limit=100"
+Invoke-RestMethod "https://ape-api-production.up.railway.app/strategy/gates/recent?limit=100"
 Invoke-RestMethod https://ape-api-production.up.railway.app/storage/status
 Invoke-RestMethod https://ape-api-production.up.railway.app/ws/status
 Invoke-RestMethod https://ape-api-production.up.railway.app/reference/brti/status
@@ -450,7 +458,9 @@ Invoke-RestMethod https://ape-api-production.up.railway.app/ready
 Expected behavior:
 
 - `/strategy/dry-run/status` shows `enabled=true`, `app_mode=DRY_RUN`, `trading_enabled=false`, `execute=false`, and no safety blockers.
-- `ENTER_DRY_RUN` appears only when all safety, data-quality, timing, BRTI impulse, anti-chop, contract, trade-confirmation, and dry-run risk gates pass.
+- `/strategy/gates/recent` summarizes recent decision gate outcomes by state, reason, and gate without raw payloads or execution controls.
+- `ENTER_DRY_RUN` appears only when all safety, data-quality, timing, BRTI impulse, anti-chop, contract, and dry-run risk gates pass; too-few public trades are surfaced as a trade-confirmation warning.
+- BRTI backend receipt age over `STRATEGY_REFERENCE_MAX_AGE_MS` blocks dry-run readiness; upstream source age over `STRATEGY_REFERENCE_SOURCE_WARN_MS` warns, and over `STRATEGY_REFERENCE_SOURCE_MAX_AGE_MS` blocks.
 - Dry-run positions/events are hypothetical ledger rows only and contain no order IDs, client order IDs, account data, credentials, raw payloads, or execution controls.
 - `ENTER_PAPER` and `ENTER_LIVE` must not appear.
 - If dry-run is disabled or `APP_MODE=OBSERVER`, the evaluator should return observer/diagnostic states rather than `ENTER_DRY_RUN`.

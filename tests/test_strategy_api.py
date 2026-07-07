@@ -27,6 +27,7 @@ def test_strategy_status_is_disabled_without_database() -> None:
         status_response = client.get("/strategy/status")
         latest_response = client.get("/strategy/decisions/latest")
         recent_response = client.get("/strategy/decisions/recent")
+        gate_summary_response = client.get("/strategy/gates/recent")
         dry_run_status_response = client.get("/strategy/dry-run/status")
 
     assert status_response.status_code == 200
@@ -37,6 +38,8 @@ def test_strategy_status_is_disabled_without_database() -> None:
     assert status["latest_decision_id"] is None
     assert latest_response.json()["found"] is False
     assert recent_response.json()["count"] == 0
+    assert gate_summary_response.json()["count"] == 0
+    assert gate_summary_response.json()["latest_decision"]["found"] is False
     dry_run_status = dry_run_status_response.json()
     assert dry_run_status["enabled"] is False
     assert dry_run_status["open_position_count"] == 0
@@ -174,9 +177,17 @@ def test_strategy_status_reports_latest_decision_and_worker_metadata(tmp_path) -
                         "candidate_side": "YES",
                         "seconds_left": 300,
                         "desired_side_ask": "0.62",
+                        "gate_results": {
+                            "reference": {"status": "pass", "reason": None},
+                            "book": {"status": "pass", "reason": None},
+                            "trade_confirmation": {
+                                "status": "warn",
+                                "reason": "recent_trade_confirmation_insufficient_trades",
+                            },
+                        },
                     },
                     blockers=[],
-                    warnings=[],
+                    warnings=["recent_trade_confirmation_insufficient_trades"],
                     raw_context_hash="abc",
                 )
             )
@@ -211,6 +222,7 @@ def test_strategy_status_reports_latest_decision_and_worker_metadata(tmp_path) -
             status_response = client.get("/strategy/status")
             latest_response = client.get("/strategy/decisions/latest")
             recent_response = client.get("/strategy/decisions/recent?limit=1")
+            gate_summary_response = client.get("/strategy/gates/recent?limit=10")
 
         assert status_response.status_code == 200
         status = status_response.json()
@@ -222,11 +234,23 @@ def test_strategy_status_reports_latest_decision_and_worker_metadata(tmp_path) -
         assert status["candidate_side"] == "YES"
         assert status["stale"] is False
         assert status["latest_measurements_summary"]["desired_side_ask"] == "0.62"
+        assert status["gate_results_summary"]["trade_confirmation"]["status"] == "warn"
 
         assert latest_response.json()["found"] is True
         recent = recent_response.json()
         assert recent["count"] == 1
         assert recent["decisions"][0]["decision_state"] == "OBSERVE_ONLY_MARKET"
+        gate_summary = gate_summary_response.json()
+        assert gate_summary["count"] == 1
+        assert gate_summary["by_state"]["OBSERVE_ONLY_MARKET"] == 1
+        assert gate_summary["by_gate"]["trade_confirmation"]["status_counts"]["warn"] == 1
+        assert (
+            gate_summary["by_gate"]["trade_confirmation"]["reason_counts"][
+                "recent_trade_confirmation_insufficient_trades"
+            ]
+            == 1
+        )
+        assert gate_summary["latest_blockers"] == []
     finally:
         engine.dispose()
 

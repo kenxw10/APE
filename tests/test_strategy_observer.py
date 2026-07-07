@@ -152,8 +152,9 @@ def test_strategy_entry_bounds_use_offset_adjusted_dry_run_price(session) -> Non
     )
 
     assert decision.decision_state == STATE_CONTRACT_NOT_CONFIRMED
-    assert decision.primary_reason == "dry_run_intended_entry_price_outside_range"
+    assert decision.primary_reason == "dry_run_intended_entry_price_too_high"
     assert decision.measurements["dry_run_intended_entry_price"] == "0.79"
+    assert decision.measurements["gate_results"]["entry_price"]["status"] == "block"
 
 
 def test_strategy_entry_bounds_allow_offset_to_reach_minimum(session) -> None:
@@ -187,7 +188,7 @@ def test_strategy_entry_bounds_allow_offset_to_reach_minimum(session) -> None:
     assert decision.measurements["dry_run_intended_entry_price"] == "0.56"
 
 
-def test_strategy_blocks_entry_when_trade_confirmation_sample_too_small(session) -> None:
+def test_strategy_warns_when_trade_confirmation_sample_too_small(session) -> None:
     now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
     config = load_config(
         {
@@ -207,9 +208,77 @@ def test_strategy_blocks_entry_when_trade_confirmation_sample_too_small(session)
         now=now,
     )
 
-    assert decision.decision_state == STATE_CONTRACT_NOT_CONFIRMED
-    assert decision.primary_reason == "recent_trade_confirmation_insufficient_trades"
+    assert decision.decision_state == STATE_ENTER_DRY_RUN
+    assert decision.primary_reason == "dry_run_entry_signal"
+    assert "recent_trade_confirmation_insufficient_trades" in decision.warnings
     assert decision.measurements["recent_trade_count"] == 3
+    assert decision.measurements["gate_results"]["trade_confirmation"]["status"] == "warn"
+    assert (
+        decision.measurements["gate_results"]["trade_confirmation"]["reason"]
+        == "recent_trade_confirmation_insufficient_trades"
+    )
+
+
+def test_strategy_warns_but_enters_when_brti_source_age_is_warning_only(
+    session,
+) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config(
+        {
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+            "STRATEGY_REFERENCE_SOURCE_WARN_MS": "10000",
+            "STRATEGY_REFERENCE_SOURCE_MAX_AGE_MS": "45000",
+        }
+    )
+    safety = assess_startup_safety(config)
+    _seed_observable_context(session, now=now)
+    ReferenceTicksRepository(session).insert_tick(
+        ReferenceTickInput(
+            source="kalshi_cfbenchmarks_brti",
+            received_at=now,
+            source_ts=now - timedelta(seconds=12),
+            raw_value="62110",
+            parsed_value=Decimal("62110"),
+            source_age_ms=12_000,
+            parse_status="valid",
+        )
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_ENTER_DRY_RUN
+    assert "brti_reference_source_age_warning" in decision.warnings
+    assert decision.measurements["brti_reference_trade_ready_fresh"] is True
+    assert decision.measurements["gate_results"]["reference"]["status"] == "warn"
+
+
+def test_strategy_blocks_when_brti_backend_age_exceeds_limit(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"STRATEGY_REFERENCE_MAX_AGE_MS": "2000"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        reference_received_lag_ms=3_000,
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_REFERENCE_STALE
+    assert decision.primary_reason == "brti_reference_backend_age_exceeds_limit"
+    assert decision.measurements["gate_results"]["reference"]["status"] == "block"
 
 
 def test_strategy_dry_run_allows_additional_entry_when_multi_position_enabled(
@@ -597,10 +666,10 @@ def test_strategy_dry_run_force_exit_prices_stale_reference_with_fresh_book(
                 ReferenceTickInput(
                     source="kalshi_cfbenchmarks_brti",
                     received_at=now,
-                    source_ts=now - timedelta(seconds=20),
+                    source_ts=now - timedelta(seconds=50),
                     raw_value="62100",
                     parsed_value=Decimal("62100"),
-                    source_age_ms=20_000,
+                    source_age_ms=50_000,
                     parse_status="valid",
                 )
             )
@@ -782,7 +851,7 @@ def test_strategy_observer_prioritizes_reference_before_book(session) -> None:
     )
 
     assert decision.decision_state == STATE_REFERENCE_STALE
-    assert decision.primary_reason == "brti_reference_missing_or_invalid"
+    assert decision.primary_reason == "brti_reference_first_tick_timeout"
     assert (
         decision.measurements["brti_reference_stale_reason"]
         == "brti_reference_first_tick_timeout"
@@ -961,12 +1030,16 @@ def _seed_observable_context(
     no_bid_count: Decimal = Decimal("3"),
     no_ask_count: Decimal = Decimal("3"),
     latest_orderbook_received_at: datetime | None = None,
+    reference_received_lag_ms: int = 500,
 ) -> None:
     _seed_market(session, now=now)
     reference_repository = ReferenceTicksRepository(session)
     for seconds_ago in range(180, -1, -5):
         value = Decimal("62020") + Decimal(180 - seconds_ago) * Decimal("0.5")
-        received_at = now - timedelta(seconds=seconds_ago, milliseconds=500)
+        received_at = now - timedelta(
+            seconds=seconds_ago,
+            milliseconds=reference_received_lag_ms,
+        )
         reference_repository.insert_tick(
             ReferenceTickInput(
                 source="kalshi_cfbenchmarks_brti",

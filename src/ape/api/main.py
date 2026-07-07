@@ -47,12 +47,14 @@ from ape.models.strategy import (
     StrategyDryRunEventsResponse,
     StrategyDryRunPositionsResponse,
     StrategyDryRunStatusResponse,
+    StrategyGateSummaryResponse,
     StrategyRecentDecisionsResponse,
     StrategyStatusResponse,
     strategy_decision_response,
     strategy_dry_run_events_response,
     strategy_dry_run_positions_response,
     strategy_dry_run_status_response,
+    strategy_gate_summary_response,
     strategy_recent_decisions_response,
     strategy_status_response,
 )
@@ -64,6 +66,7 @@ from ape.strategy.observer import (
     build_recent_strategy_decisions,
     build_recent_strategy_dry_run_events,
     build_recent_strategy_dry_run_positions,
+    build_recent_strategy_gate_summary,
     build_strategy_dry_run_status,
     build_strategy_status,
 )
@@ -163,6 +166,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     ) -> StrategyRecentDecisionsResponse:
         return strategy_recent_decisions_response(
             build_recent_strategy_decisions(settings, limit=limit)
+        )
+
+    @app.get("/strategy/gates/recent", response_model=StrategyGateSummaryResponse)
+    def strategy_gates_recent(
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> StrategyGateSummaryResponse:
+        return strategy_gate_summary_response(
+            build_recent_strategy_gate_summary(settings, limit=limit)
         )
 
     @app.get("/strategy/dry-run/status", response_model=StrategyDryRunStatusResponse)

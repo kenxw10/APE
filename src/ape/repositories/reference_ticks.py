@@ -37,6 +37,19 @@ class ReferenceTicksRepository:
             .limit(1)
         )
 
+    def get_latest_valid_tick(self, source: str) -> ReferenceTick | None:
+        return self.session.scalar(
+            select(ReferenceTick)
+            .where(
+                ReferenceTick.source == source,
+                ReferenceTick.parse_status == "valid",
+                ReferenceTick.parsed_value.is_not(None),
+                ReferenceTick.received_at.is_not(None),
+            )
+            .order_by(desc(ReferenceTick.received_at), desc(ReferenceTick.id))
+            .limit(1)
+        )
+
     def get_latest_tick_with_source_ts(self, source: str) -> ReferenceTick | None:
         return self.session.scalar(
             select(ReferenceTick)

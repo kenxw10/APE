@@ -181,11 +181,26 @@ class StrategyStatusSnapshot:
     distance_bps: Decimal | None
     seconds_left: int | None
     latest_measurements_summary: JsonPayload | None
+    gate_results_summary: JsonPayload | None
     decision_age_seconds: float | None
     stale: bool
     warnings: list[str]
     blockers: list[str]
     checked_at: datetime
+
+
+@dataclass(frozen=True)
+class StrategyGateSummarySnapshot:
+    limit: int
+    count: int
+    checked_at: datetime
+    by_state: JsonPayload
+    by_reason: JsonPayload
+    by_gate: JsonPayload
+    latest_decision: StrategyDecisionSnapshot
+    latest_enter_dry_run: StrategyDecisionSnapshot
+    latest_blockers: list[str]
+    current_open_position_count: int
 
 
 @dataclass(frozen=True)
@@ -417,6 +432,17 @@ def evaluate_strategy_observer(
     brti_backend_age_ms: int | None = None
     brti_source_age_ms: int | None = None
     brti_age_ms: int | None = None
+    brti_strategy_fresh_age_ms: int | None = None
+    brti_reference_source_warn_ms = config.strategy_reference_source_warn_ms
+    brti_reference_source_hard_limit_ms = config.strategy_reference_source_max_age_ms
+    brti_reference_status_category: str | None = None
+    brti_reference_transport_stale = False
+    brti_reference_persistence_stale = False
+    brti_reference_worker_heartbeat_stale = False
+    brti_reference_trade_ready_fresh = False
+    brti_reference_backend_transport_lag_ms: int | None = None
+    brti_reference_time_since_last_valid_tick_ms: int | None = None
+    brti_reference_stale_reason: str | None = None
     orderbook_age_ms: int | None = None
     latest_trade_age_ms: int | None = None
     seconds_since_open: int | None = None
@@ -455,6 +481,7 @@ def evaluate_strategy_observer(
     managing_position: StrategyDryRunPosition | None = None
     feed_failure_position: StrategyDryRunPosition | None = None
     open_positions: list[StrategyDryRunPosition] = []
+    accumulated_warnings: list[str] = []
 
     def decision(
         state: str,
@@ -463,9 +490,13 @@ def evaluate_strategy_observer(
         blockers: list[str] | None = None,
         warnings: list[str] | None = None,
     ) -> StrategyDecisionInput:
+        decision_warnings = warnings if warnings is not None else list(accumulated_warnings)
         measurements = _measurements(
             config=config,
             safety=safety,
+            decision_state=state,
+            primary_reason=reason,
+            decision_warnings=decision_warnings,
             evaluated_at=evaluated_at,
             thresholds=thresholds,
             market=market,
@@ -479,6 +510,21 @@ def evaluate_strategy_observer(
             brti_backend_age_ms=brti_backend_age_ms,
             brti_source_age_ms=brti_source_age_ms,
             brti_age_ms=brti_age_ms,
+            brti_strategy_fresh_age_ms=brti_strategy_fresh_age_ms,
+            brti_reference_source_warn_ms=brti_reference_source_warn_ms,
+            brti_reference_source_hard_limit_ms=brti_reference_source_hard_limit_ms,
+            brti_reference_status_category=brti_reference_status_category,
+            brti_reference_transport_stale=brti_reference_transport_stale,
+            brti_reference_persistence_stale=brti_reference_persistence_stale,
+            brti_reference_worker_heartbeat_stale=brti_reference_worker_heartbeat_stale,
+            brti_reference_trade_ready_fresh=brti_reference_trade_ready_fresh,
+            brti_reference_backend_transport_lag_ms=(
+                brti_reference_backend_transport_lag_ms
+            ),
+            brti_reference_time_since_last_valid_tick_ms=(
+                brti_reference_time_since_last_valid_tick_ms
+            ),
+            brti_reference_stale_reason=brti_reference_stale_reason,
             orderbook=orderbook,
             orderbook_age_ms=orderbook_age_ms,
             latest_trade=latest_trade,
@@ -559,7 +605,7 @@ def evaluate_strategy_observer(
                 if blockers is not None
                 else ([] if state == STATE_OBSERVE_ONLY_MARKET else [reason])
             ),
-            warnings=warnings if warnings is not None else [],
+            warnings=decision_warnings,
             raw_context_hash=context_hash,
         )
 
@@ -743,9 +789,70 @@ def evaluate_strategy_observer(
             reference_worker_heartbeat_at,
             evaluated_at,
         )
+        brti_reference_status_category = _metadata_text(
+            reference_worker_metadata,
+            "status_category",
+        )
+        brti_reference_backend_transport_lag_ms = (
+            _metadata_int(reference_worker_metadata, "backend_transport_lag_ms")
+            or _age_ms(
+                _metadata_datetime(reference_worker_metadata, "last_message_at"),
+                evaluated_at,
+            )
+        )
+        brti_reference_time_since_last_valid_tick_ms = (
+            _metadata_int(reference_worker_metadata, "time_since_last_valid_tick_ms")
+            or _age_ms(
+                _metadata_datetime(reference_worker_metadata, "last_valid_tick_at"),
+                evaluated_at,
+            )
+        )
+        brti_reference_worker_heartbeat_stale = (
+            _metadata_bool(reference_worker_metadata, "worker_heartbeat_stale")
+            or (
+                reference_worker_heartbeat_age_ms is not None
+                and reference_worker_heartbeat_age_ms
+                > int(config.kalshi_cfbenchmarks_heartbeat_stale_after_seconds * 1000)
+            )
+            or _metadata_status_category_is(reference_worker_metadata, "worker_stale")
+            or _metadata_has_warning(
+                reference_worker_metadata,
+                "brti_reference_worker_heartbeat_stale",
+            )
+        )
+        brti_reference_transport_stale = (
+            _metadata_bool(reference_worker_metadata, "transport_stale")
+            or _metadata_status_category_is(reference_worker_metadata, "stale_transport")
+            or _metadata_has_warning(
+                reference_worker_metadata,
+                "brti_reference_transport_stale",
+                "brti_reference_first_tick_timeout",
+                "brti_reference_no_valid_tick_timeout",
+                "brti_reference_reconnect_requested",
+            )
+        )
+        brti_reference_persistence_stale = (
+            _metadata_bool(reference_worker_metadata, "persistence_stale")
+            or _metadata_status_category_is(reference_worker_metadata, "stale_persistence")
+            or _metadata_status_category_is(reference_worker_metadata, "persistence_error")
+            or _metadata_has_warning(
+                reference_worker_metadata,
+                "brti_reference_persistence_stale",
+                "brti_persistence_failed",
+            )
+        )
 
-    reference_tick = ReferenceTicksRepository(session).get_latest_tick(BRTI_SOURCE)
-    if not _valid_reference_tick(reference_tick):
+    reference_repository = ReferenceTicksRepository(session)
+    latest_reference_tick = reference_repository.get_latest_tick(BRTI_SOURCE)
+    reference_tick = reference_repository.get_latest_valid_tick(BRTI_SOURCE)
+    if reference_tick is None:
+        metadata_stale_reason = _metadata_stale_reason(reference_worker_metadata)
+        if metadata_stale_reason is not None:
+            brti_reference_stale_reason = metadata_stale_reason
+        elif latest_reference_tick is not None:
+            brti_reference_stale_reason = "brti_reference_value_unusable"
+        else:
+            brti_reference_stale_reason = "brti_reference_missing"
         if manage_feed_failure_position():
             load_managed_exit_quote()
             return decision(
@@ -753,17 +860,43 @@ def evaluate_strategy_observer(
                 "dry_run_position_reference_unusable",
                 blockers=["dry_run_force_exit_required"],
             )
-        return decision(STATE_REFERENCE_STALE, "brti_reference_missing_or_invalid")
+        return decision(STATE_REFERENCE_STALE, brti_reference_stale_reason)
 
     brti_value = reference_tick.parsed_value
     brti_backend_age_ms = _age_ms(reference_tick.received_at, evaluated_at)
     brti_source_age_ms = _reference_source_age_ms(reference_tick, evaluated_at)
+    brti_strategy_fresh_age_ms = brti_backend_age_ms
+    brti_reference_time_since_last_valid_tick_ms = (
+        brti_reference_time_since_last_valid_tick_ms or brti_backend_age_ms
+    )
     brti_age_ms = max(
         age
         for age in (brti_backend_age_ms, brti_source_age_ms)
         if age is not None
     )
-    if brti_age_ms > config.strategy_reference_max_age_ms:
+    brti_reference_stale_reason = _strategy_reference_stale_reason(
+        config=config,
+        reference_tick=reference_tick,
+        brti_backend_age_ms=brti_backend_age_ms,
+        brti_source_age_ms=brti_source_age_ms,
+        reference_worker_metadata=reference_worker_metadata,
+        worker_heartbeat_stale=brti_reference_worker_heartbeat_stale,
+        transport_stale=brti_reference_transport_stale,
+        persistence_stale=brti_reference_persistence_stale,
+    )
+    brti_reference_trade_ready_fresh = (
+        brti_reference_stale_reason is None
+        and brti_backend_age_ms is not None
+        and brti_backend_age_ms <= config.strategy_reference_max_age_ms
+    )
+    if (
+        brti_reference_stale_reason is None
+        and brti_source_age_ms is not None
+        and brti_source_age_ms > config.strategy_reference_source_warn_ms
+    ):
+        accumulated_warnings.append("brti_reference_source_age_warning")
+
+    if brti_reference_stale_reason is not None:
         if manage_feed_failure_position():
             load_managed_exit_quote()
             return decision(
@@ -771,7 +904,7 @@ def evaluate_strategy_observer(
                 "dry_run_position_reference_stale",
                 blockers=["dry_run_force_exit_required"],
             )
-        return decision(STATE_REFERENCE_STALE, "brti_reference_age_exceeds_limit")
+        return decision(STATE_REFERENCE_STALE, brti_reference_stale_reason)
 
     orderbook = OrderbookRepository(session).get_latest_snapshot(market.market_ticker)
     if orderbook is None:
@@ -971,12 +1104,17 @@ def evaluate_strategy_observer(
     if (
         dry_run_intended_entry_price
         < Decimal(str(config.strategy_dry_run_min_entry_price))
-        or dry_run_intended_entry_price
-        > Decimal(str(config.strategy_dry_run_max_entry_price))
     ):
         return decision(
             STATE_CONTRACT_NOT_CONFIRMED,
-            "dry_run_intended_entry_price_outside_range",
+            "dry_run_intended_entry_price_too_low",
+        )
+    if dry_run_intended_entry_price > Decimal(
+        str(config.strategy_dry_run_max_entry_price)
+    ):
+        return decision(
+            STATE_CONTRACT_NOT_CONFIRMED,
+            "dry_run_intended_entry_price_too_high",
         )
 
     impulse = _brti_impulse_metrics(
@@ -1033,12 +1171,8 @@ def evaluate_strategy_observer(
     )
     recent_trade_count = int(trade_confirmation["trade_count"])
     candidate_trade_ratio = trade_confirmation["candidate_trade_ratio"]
-    warnings: list[str] = []
     if recent_trade_count < config.strategy_trade_confirmation_min_trades:
-        return decision(
-            STATE_CONTRACT_NOT_CONFIRMED,
-            "recent_trade_confirmation_insufficient_trades",
-        )
+        accumulated_warnings.append("recent_trade_confirmation_insufficient_trades")
     elif (
         candidate_trade_ratio is not None
         and candidate_trade_ratio < Decimal(str(config.strategy_trade_confirmation_min_ratio))
@@ -1057,7 +1191,6 @@ def evaluate_strategy_observer(
                 if config.app_mode is AppMode.DRY_RUN
                 else "observer_decision_ledger_only"
             ),
-            warnings=warnings,
         )
 
     open_position_count = dry_run_repository.count_open_positions(
@@ -1068,7 +1201,6 @@ def evaluate_strategy_observer(
         return decision(
             STATE_RISK_BLOCKED,
             "dry_run_max_open_positions_reached",
-            warnings=warnings,
         )
 
     entered_this_market = dry_run_repository.has_any_position_for_market(
@@ -1080,7 +1212,6 @@ def evaluate_strategy_observer(
         return decision(
             STATE_RISK_BLOCKED,
             "dry_run_one_entry_per_market_blocked",
-            warnings=warnings,
         )
 
     dry_run_risk_state = "entry_allowed"
@@ -1088,7 +1219,6 @@ def evaluate_strategy_observer(
         STATE_ENTER_DRY_RUN,
         "dry_run_entry_signal",
         blockers=[],
-        warnings=warnings,
     )
 
 
@@ -1198,6 +1328,90 @@ def build_recent_strategy_decisions(
         count=len(decisions),
         decisions=decisions,
         checked_at=checked_at,
+    )
+
+
+def build_recent_strategy_gate_summary(
+    config: AppConfig,
+    *,
+    limit: int,
+    now: datetime | None = None,
+) -> StrategyGateSummarySnapshot:
+    capped_limit = min(max(limit, 1), 500)
+    checked_at = _as_utc(now or datetime.now(UTC))
+    rows: list[StrategyDecision] = []
+    current_open_position_count = 0
+    if config.database_url:
+        try:
+            engine = create_engine_from_config(config)
+            try:
+                session_factory = create_session_factory(engine)
+                with session_factory() as session:
+                    rows = StrategyDecisionsRepository(session).list_recent_decisions(
+                        limit=capped_limit
+                    )
+                    current_open_position_count = StrategyDryRunRepository(
+                        session
+                    ).count_open_positions(strategy_id=config.strategy_id)
+            finally:
+                engine.dispose()
+        except SQLAlchemyError:
+            rows = []
+            current_open_position_count = 0
+
+    by_state: dict[str, int] = {}
+    by_reason: dict[str, int] = {}
+    by_gate: dict[str, dict[str, Any]] = {}
+    latest_enter_dry_run: StrategyDecision | None = None
+
+    for row in rows:
+        _increment_counter(by_state, row.decision_state)
+        _increment_counter(by_reason, row.primary_reason)
+        if row.decision_state == STATE_ENTER_DRY_RUN and latest_enter_dry_run is None:
+            latest_enter_dry_run = row
+
+        measurements = row.measurements if isinstance(row.measurements, dict) else {}
+        gate_results = measurements.get("gate_results")
+        if not isinstance(gate_results, dict):
+            continue
+        for gate_name, gate_value in gate_results.items():
+            if not isinstance(gate_value, dict):
+                continue
+            gate_summary = by_gate.setdefault(
+                str(gate_name),
+                {
+                    "count": 0,
+                    "status_counts": {},
+                    "reason_counts": {},
+                    "latest_status": None,
+                    "latest_reason": None,
+                },
+            )
+            gate_summary["count"] += 1
+            status = str(gate_value.get("status") or "unknown")
+            _increment_counter(gate_summary["status_counts"], status)
+            reason = gate_value.get("reason")
+            if reason is not None:
+                _increment_counter(gate_summary["reason_counts"], str(reason))
+            if gate_summary["latest_status"] is None:
+                gate_summary["latest_status"] = status
+                gate_summary["latest_reason"] = reason
+
+    latest_decision = rows[0] if rows else None
+    latest_blockers = (
+        _string_list(latest_decision.blockers) if latest_decision is not None else []
+    )
+    return StrategyGateSummarySnapshot(
+        limit=capped_limit,
+        count=len(rows),
+        checked_at=checked_at,
+        by_state=by_state,
+        by_reason=by_reason,
+        by_gate=by_gate,
+        latest_decision=strategy_decision_snapshot(latest_decision),
+        latest_enter_dry_run=strategy_decision_snapshot(latest_enter_dry_run),
+        latest_blockers=latest_blockers,
+        current_open_position_count=current_open_position_count,
     )
 
 
@@ -1561,6 +1775,12 @@ def _status_snapshot(
             if latest_decision is not None
             else None
         ),
+        gate_results_summary=(
+            _gate_results_summary(latest_decision.measurements.get("gate_results"))
+            if latest_decision is not None
+            and isinstance(latest_decision.measurements, dict)
+            else None
+        ),
         decision_age_seconds=decision_age_seconds,
         stale=stale,
         warnings=_unique_strings(warnings),
@@ -1573,6 +1793,9 @@ def _measurements(
     *,
     config: AppConfig,
     safety: SafetyAssessment,
+    decision_state: str,
+    primary_reason: str,
+    decision_warnings: list[str],
     evaluated_at: datetime,
     thresholds: dict[str, Any],
     market: Market | None,
@@ -1586,6 +1809,17 @@ def _measurements(
     brti_backend_age_ms: int | None,
     brti_source_age_ms: int | None,
     brti_age_ms: int | None,
+    brti_strategy_fresh_age_ms: int | None,
+    brti_reference_source_warn_ms: int,
+    brti_reference_source_hard_limit_ms: int,
+    brti_reference_status_category: str | None,
+    brti_reference_transport_stale: bool,
+    brti_reference_persistence_stale: bool,
+    brti_reference_worker_heartbeat_stale: bool,
+    brti_reference_trade_ready_fresh: bool,
+    brti_reference_backend_transport_lag_ms: int | None,
+    brti_reference_time_since_last_valid_tick_ms: int | None,
+    brti_reference_stale_reason: str | None,
     orderbook: OrderbookSnapshot | None,
     orderbook_age_ms: int | None,
     latest_trade: PublicTrade | None,
@@ -1622,6 +1856,42 @@ def _measurements(
     dry_run_position_id: str | None,
     managing_position: StrategyDryRunPosition | None,
 ) -> dict[str, Any]:
+    gate_results = _gate_results(
+        config=config,
+        decision_state=decision_state,
+        primary_reason=primary_reason,
+        decision_warnings=decision_warnings,
+        market=market,
+        boundary=boundary,
+        boundary_source=boundary_source,
+        brti_value=brti_value,
+        brti_backend_age_ms=brti_backend_age_ms,
+        brti_source_age_ms=brti_source_age_ms,
+        brti_strategy_fresh_age_ms=brti_strategy_fresh_age_ms,
+        brti_reference_stale_reason=brti_reference_stale_reason,
+        brti_reference_transport_stale=brti_reference_transport_stale,
+        brti_reference_persistence_stale=brti_reference_persistence_stale,
+        brti_reference_worker_heartbeat_stale=brti_reference_worker_heartbeat_stale,
+        seconds_left=seconds_left,
+        distance_bps=distance_bps,
+        desired_bid=desired_bid,
+        desired_ask=desired_ask,
+        desired_mid=desired_mid,
+        desired_spread=desired_spread,
+        desired_spread_cents=desired_spread_cents,
+        desired_top_book_size=desired_top_book_size,
+        dry_run_intended_entry_price=dry_run_intended_entry_price,
+        brti_short_move_bps=brti_short_move_bps,
+        brti_medium_move_bps=brti_medium_move_bps,
+        brti_long_move_bps=brti_long_move_bps,
+        boundary_cross_count=boundary_cross_count,
+        retrace_fraction=retrace_fraction,
+        contract_mid_move_cents=contract_mid_move_cents,
+        ask_pullback_cents=ask_pullback_cents,
+        recent_trade_count=recent_trade_count,
+        candidate_trade_ratio=candidate_trade_ratio,
+        dry_run_risk_state=dry_run_risk_state,
+    )
     return {
         "evaluated_at": _isoformat_or_none(evaluated_at),
         "market_ticker": getattr(market, "market_ticker", None),
@@ -1638,13 +1908,22 @@ def _measurements(
         "brti_age_ms": brti_age_ms,
         "brti_backend_age_ms": brti_backend_age_ms,
         "brti_source_age_ms": brti_source_age_ms,
-        "brti_reference_stale_reason": _strategy_reference_stale_reason(
-            config=config,
-            reference_tick=reference_tick,
-            brti_backend_age_ms=brti_backend_age_ms,
-            brti_source_age_ms=brti_source_age_ms,
-            brti_age_ms=brti_age_ms,
-            reference_worker_metadata=reference_worker_metadata,
+        "brti_strategy_fresh_age_ms": brti_strategy_fresh_age_ms,
+        "brti_reference_source_warn_ms": brti_reference_source_warn_ms,
+        "brti_reference_source_hard_limit_ms": brti_reference_source_hard_limit_ms,
+        "brti_reference_stale_reason": brti_reference_stale_reason,
+        "brti_reference_status_category": brti_reference_status_category,
+        "brti_reference_transport_stale": brti_reference_transport_stale,
+        "brti_reference_persistence_stale": brti_reference_persistence_stale,
+        "brti_reference_worker_heartbeat_stale": (
+            brti_reference_worker_heartbeat_stale
+        ),
+        "brti_reference_trade_ready_fresh": brti_reference_trade_ready_fresh,
+        "brti_reference_backend_transport_lag_ms": (
+            brti_reference_backend_transport_lag_ms
+        ),
+        "brti_reference_time_since_last_valid_tick_ms": (
+            brti_reference_time_since_last_valid_tick_ms
         ),
         "brti_reference_connection_state": _metadata_text(
             reference_worker_metadata,
@@ -1735,6 +2014,12 @@ def _measurements(
         "strategy_id": config.strategy_id,
         "dry_run_risk_state": dry_run_risk_state,
         "dry_run_intended_entry_price": _decimal_text(dry_run_intended_entry_price),
+        "strategy_dry_run_min_entry_price": _decimal_text(
+            config.strategy_dry_run_min_entry_price
+        ),
+        "strategy_dry_run_max_entry_price": _decimal_text(
+            config.strategy_dry_run_max_entry_price
+        ),
         "dry_run_intended_contract_count": dry_run_intended_contract_count,
         "dry_run_position_id": dry_run_position_id,
         "managed_position_id": getattr(managing_position, "position_id", None),
@@ -1747,6 +2032,8 @@ def _measurements(
         "observer_only": config.app_mode is AppMode.OBSERVER,
         "config": thresholds,
         "series_ticker": config.kalshi_btc15_series_ticker,
+        "gate_results": gate_results,
+        "gate_results_summary": _gate_results_summary(gate_results),
     }
 
 
@@ -1806,6 +2093,13 @@ def _thresholds(config: AppConfig) -> dict[str, Any]:
         "strategy_dry_run_min_entry_price": config.strategy_dry_run_min_entry_price,
         "strategy_min_boundary_distance_bps": config.strategy_min_boundary_distance_bps,
         "strategy_reference_max_age_ms": config.strategy_reference_max_age_ms,
+        "strategy_reference_source_max_age_ms": (
+            config.strategy_reference_source_max_age_ms
+        ),
+        "strategy_reference_source_warn_ms": config.strategy_reference_source_warn_ms,
+        "strategy_reference_require_trade_ready_fresh": (
+            config.strategy_reference_require_trade_ready_fresh
+        ),
         "strategy_kalshi_book_max_age_ms": config.strategy_kalshi_book_max_age_ms,
         "strategy_no_entry_first_seconds": config.strategy_no_entry_first_seconds,
         "strategy_no_entry_last_seconds": config.strategy_no_entry_last_seconds,
@@ -1822,6 +2116,14 @@ def _measurement_summary(measurements: Any) -> JsonPayload | None:
         "boundary",
         "brti_value",
         "brti_age_ms",
+        "brti_strategy_fresh_age_ms",
+        "brti_reference_source_warn_ms",
+        "brti_reference_source_hard_limit_ms",
+        "brti_reference_status_category",
+        "brti_reference_transport_stale",
+        "brti_reference_persistence_stale",
+        "brti_reference_worker_heartbeat_stale",
+        "brti_reference_trade_ready_fresh",
         "distance_bps",
         "candidate_side",
         "seconds_left",
@@ -1848,8 +2150,239 @@ def _measurement_summary(measurements: Any) -> JsonPayload | None:
         "brti_reference_stale_reason",
         "brti_reference_connection_state",
         "brti_reference_recovery_state",
+        "gate_results_summary",
     )
     return {key: measurements.get(key) for key in keys if key in measurements}
+
+
+def _gate_results_summary(gate_results: Any) -> JsonPayload | None:
+    if not isinstance(gate_results, dict):
+        return None
+    summary: dict[str, Any] = {}
+    for gate, value in gate_results.items():
+        if not isinstance(value, dict):
+            continue
+        summary[str(gate)] = {
+            "status": value.get("status"),
+            "reason": value.get("reason"),
+        }
+    return summary
+
+
+def _gate_results(
+    *,
+    config: AppConfig,
+    decision_state: str,
+    primary_reason: str,
+    decision_warnings: list[str],
+    market: Market | None,
+    boundary: Decimal | None,
+    boundary_source: str | None,
+    brti_value: Decimal | None,
+    brti_backend_age_ms: int | None,
+    brti_source_age_ms: int | None,
+    brti_strategy_fresh_age_ms: int | None,
+    brti_reference_stale_reason: str | None,
+    brti_reference_transport_stale: bool,
+    brti_reference_persistence_stale: bool,
+    brti_reference_worker_heartbeat_stale: bool,
+    seconds_left: int | None,
+    distance_bps: Decimal | None,
+    desired_bid: Decimal | None,
+    desired_ask: Decimal | None,
+    desired_mid: Decimal | None,
+    desired_spread: Decimal | None,
+    desired_spread_cents: Decimal | None,
+    desired_top_book_size: Decimal | None,
+    dry_run_intended_entry_price: Decimal | None,
+    brti_short_move_bps: Decimal | None,
+    brti_medium_move_bps: Decimal | None,
+    brti_long_move_bps: Decimal | None,
+    boundary_cross_count: int | None,
+    retrace_fraction: Decimal | None,
+    contract_mid_move_cents: Decimal | None,
+    ask_pullback_cents: Decimal | None,
+    recent_trade_count: int,
+    candidate_trade_ratio: Decimal | None,
+    dry_run_risk_state: str | None,
+) -> dict[str, Any]:
+    reference_status = "pass" if brti_value is not None else "not_evaluated"
+    reference_reason = None
+    if decision_state == STATE_REFERENCE_STALE or primary_reason.startswith(
+        "dry_run_position_reference"
+    ):
+        reference_status = "block"
+        reference_reason = brti_reference_stale_reason or primary_reason
+    elif "brti_reference_source_age_warning" in decision_warnings:
+        reference_status = "warn"
+        reference_reason = "brti_reference_source_age_warning"
+
+    timing_status = "not_evaluated" if seconds_left is None else "pass"
+    timing_reason = None
+    if primary_reason in {"entry_window_too_early", "entry_window_too_late"}:
+        timing_status = "block"
+        timing_reason = primary_reason
+
+    boundary_distance_status = "not_evaluated" if distance_bps is None else "pass"
+    boundary_distance_reason = None
+    if primary_reason == "boundary_distance_below_threshold":
+        boundary_distance_status = "block"
+        boundary_distance_reason = primary_reason
+
+    book_status = "not_evaluated" if desired_bid is None and desired_ask is None else "pass"
+    book_reason = None
+    book_block_prefixes = (
+        "dry_run_position_orderbook",
+        "dry_run_position_book",
+        "dry_run_position_spread",
+        "dry_run_position_depth",
+    )
+    if decision_state in {
+        STATE_KALSHI_STALE,
+        STATE_BOOK_UNUSABLE,
+        STATE_SPREAD_TOO_WIDE,
+        STATE_DEPTH_TOO_THIN,
+    } or primary_reason.startswith(book_block_prefixes):
+        book_status = "block"
+        book_reason = primary_reason
+
+    entry_price_status = (
+        "not_evaluated" if dry_run_intended_entry_price is None else "pass"
+    )
+    entry_price_reason = None
+    if primary_reason in {
+        "dry_run_intended_entry_price_too_low",
+        "dry_run_intended_entry_price_too_high",
+        "dry_run_intended_entry_price_outside_range",
+    }:
+        entry_price_status = "block"
+        entry_price_reason = primary_reason
+
+    impulse_status = "not_evaluated" if brti_short_move_bps is None else "pass"
+    impulse_reason = None
+    if decision_state == STATE_IMPULSE_TOO_WEAK:
+        impulse_status = "block"
+        impulse_reason = primary_reason
+
+    chop_status = "not_evaluated" if boundary_cross_count is None else "pass"
+    chop_reason = None
+    if decision_state == STATE_CHOP_FILTER_BLOCKED:
+        chop_status = "block"
+        chop_reason = primary_reason
+
+    contract_status = "not_evaluated" if contract_mid_move_cents is None else "pass"
+    contract_reason = None
+    contract_reasons = {
+        "contract_mid_move_below_threshold",
+        "contract_ask_pullback_above_threshold",
+        "dry_run_intended_entry_price_too_low",
+        "dry_run_intended_entry_price_too_high",
+        "dry_run_intended_entry_price_outside_range",
+    }
+    if decision_state == STATE_CONTRACT_NOT_CONFIRMED and primary_reason in contract_reasons:
+        contract_status = "block"
+        contract_reason = primary_reason
+
+    trade_status = "not_evaluated" if recent_trade_count == 0 else "pass"
+    trade_reason = None
+    if "recent_trade_confirmation_insufficient_trades" in decision_warnings:
+        trade_status = "warn"
+        trade_reason = "recent_trade_confirmation_insufficient_trades"
+    if primary_reason == "recent_trade_confirmation_weak":
+        trade_status = "block"
+        trade_reason = primary_reason
+
+    dry_run_risk_status = "not_evaluated" if dry_run_risk_state is None else "pass"
+    dry_run_risk_reason = None
+    if decision_state == STATE_RISK_BLOCKED:
+        dry_run_risk_status = "block"
+        dry_run_risk_reason = primary_reason
+
+    return {
+        "safety": {"status": "pass"},
+        "market": {
+            "status": "block" if decision_state == STATE_NO_ACTIVE_MARKET else "pass",
+            "reason": primary_reason if decision_state == STATE_NO_ACTIVE_MARKET else None,
+            "ticker": getattr(market, "market_ticker", None),
+        },
+        "boundary": {
+            "status": (
+                "block" if decision_state == STATE_MARKET_NOT_PARSEABLE else "pass"
+            ),
+            "reason": (
+                primary_reason if decision_state == STATE_MARKET_NOT_PARSEABLE else None
+            ),
+            "boundary": _decimal_text(boundary),
+            "source": boundary_source,
+        },
+        "reference": {
+            "status": reference_status,
+            "reason": reference_reason,
+            "backend_age_ms": brti_backend_age_ms,
+            "source_age_ms": brti_source_age_ms,
+            "strategy_fresh_age_ms": brti_strategy_fresh_age_ms,
+            "transport_stale": brti_reference_transport_stale,
+            "persistence_stale": brti_reference_persistence_stale,
+            "worker_heartbeat_stale": brti_reference_worker_heartbeat_stale,
+        },
+        "timing": {
+            "status": timing_status,
+            "reason": timing_reason,
+            "seconds_left": seconds_left,
+        },
+        "boundary_distance": {
+            "status": boundary_distance_status,
+            "reason": boundary_distance_reason,
+            "distance_bps": _decimal_text(distance_bps),
+        },
+        "book": {
+            "status": book_status,
+            "reason": book_reason,
+            "desired_bid": _decimal_text(desired_bid),
+            "desired_ask": _decimal_text(desired_ask),
+            "desired_mid": _decimal_text(desired_mid),
+            "spread_cents": _decimal_text(desired_spread_cents),
+            "top_book_size": _decimal_text(desired_top_book_size),
+        },
+        "entry_price": {
+            "status": entry_price_status,
+            "reason": entry_price_reason,
+            "desired_ask": _decimal_text(desired_ask),
+            "intended_entry_price": _decimal_text(dry_run_intended_entry_price),
+            "min_entry_price": _decimal_text(config.strategy_dry_run_min_entry_price),
+            "max_entry_price": _decimal_text(config.strategy_dry_run_max_entry_price),
+        },
+        "impulse": {
+            "status": impulse_status,
+            "reason": impulse_reason,
+            "short_move_bps": _decimal_text(brti_short_move_bps),
+            "medium_move_bps": _decimal_text(brti_medium_move_bps),
+            "long_move_bps": _decimal_text(brti_long_move_bps),
+        },
+        "chop": {
+            "status": chop_status,
+            "reason": chop_reason,
+            "boundary_cross_count": boundary_cross_count,
+            "retrace_fraction": _decimal_text(retrace_fraction),
+        },
+        "contract_confirmation": {
+            "status": contract_status,
+            "reason": contract_reason,
+            "mid_move_cents": _decimal_text(contract_mid_move_cents),
+            "ask_pullback_cents": _decimal_text(ask_pullback_cents),
+        },
+        "trade_confirmation": {
+            "status": trade_status,
+            "reason": trade_reason,
+            "trade_count": recent_trade_count,
+            "candidate_trade_ratio": _decimal_text(candidate_trade_ratio),
+        },
+        "dry_run_risk": {
+            "status": dry_run_risk_status,
+            "reason": dry_run_risk_reason,
+            "state": dry_run_risk_state,
+        },
+    }
 
 
 def _market_boundary(market: Market) -> tuple[Decimal | None, str | None]:
@@ -1886,30 +2419,33 @@ def _strategy_reference_stale_reason(
     reference_tick: ReferenceTick | None,
     brti_backend_age_ms: int | None,
     brti_source_age_ms: int | None,
-    brti_age_ms: int | None,
     reference_worker_metadata: dict[str, Any] | None,
+    worker_heartbeat_stale: bool,
+    transport_stale: bool,
+    persistence_stale: bool,
 ) -> str | None:
     metadata_reason = _metadata_stale_reason(reference_worker_metadata)
     if not _valid_reference_tick(reference_tick):
-        return metadata_reason or "brti_reference_missing_or_invalid"
-    if brti_age_ms is None or brti_age_ms <= config.strategy_reference_max_age_ms:
-        return metadata_reason
-
-    backend_stale = (
-        brti_backend_age_ms is not None
-        and brti_backend_age_ms > config.strategy_reference_max_age_ms
-    )
-    source_stale = (
-        brti_source_age_ms is not None
-        and brti_source_age_ms > config.strategy_reference_max_age_ms
-    )
-    if backend_stale and source_stale:
-        return "brti_reference_backend_and_source_age_exceed_limit"
-    if backend_stale:
+        return metadata_reason or "brti_reference_missing"
+    if not config.strategy_reference_require_trade_ready_fresh:
+        return None
+    if worker_heartbeat_stale:
+        return "brti_reference_worker_heartbeat_stale"
+    if transport_stale:
+        return "brti_reference_transport_stale"
+    if persistence_stale:
+        return "brti_reference_persistence_stale"
+    if (
+        brti_backend_age_ms is None
+        or brti_backend_age_ms > config.strategy_reference_max_age_ms
+    ):
         return "brti_reference_backend_age_exceeds_limit"
-    if source_stale:
-        return "brti_reference_source_age_exceeds_limit"
-    return metadata_reason or "brti_reference_age_exceeds_limit"
+    if (
+        brti_source_age_ms is not None
+        and brti_source_age_ms > config.strategy_reference_source_max_age_ms
+    ):
+        return "brti_reference_source_age_exceeds_hard_limit"
+    return metadata_reason
 
 
 def _metadata_stale_reason(metadata: dict[str, Any] | None) -> str | None:
@@ -1936,6 +2472,46 @@ def _metadata_text(metadata: dict[str, Any] | None, key: str) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _metadata_datetime(metadata: dict[str, Any] | None, key: str) -> datetime | None:
+    text = _metadata_text(metadata, key)
+    if text is None:
+        return None
+    try:
+        return _as_utc(datetime.fromisoformat(text.replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def _metadata_bool(metadata: dict[str, Any] | None, key: str) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    value = metadata.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _metadata_has_warning(
+    metadata: dict[str, Any] | None,
+    *warnings: str,
+) -> bool:
+    metadata_warnings = set(_metadata_string_list(metadata, "warnings"))
+    metadata_blockers = set(_metadata_string_list(metadata, "blockers"))
+    return any(
+        warning in metadata_warnings or warning in metadata_blockers
+        for warning in warnings
+    )
+
+
+def _metadata_status_category_is(
+    metadata: dict[str, Any] | None,
+    status_category: str,
+) -> bool:
+    return _metadata_text(metadata, "status_category") == status_category
 
 
 def _metadata_int(metadata: dict[str, Any] | None, key: str) -> int | None:
@@ -2725,6 +3301,12 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, str)]
+
+
+def _increment_counter(counter: dict[str, int], value: str | None) -> None:
+    if value is None:
+        return
+    counter[value] = counter.get(value, 0) + 1
 
 
 def _unique_strings(values: list[str]) -> list[str]:
