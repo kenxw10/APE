@@ -552,10 +552,11 @@ class KalshiWsCollector:
             if parsed_json is None:
                 self._add_warning("invalid_websocket_json")
                 self.record_heartbeat(force=False)
-                reconnect_reason = self._handle_reference_stale_if_due(received_at)
-                if reconnect_reason is not None:
-                    self.record_heartbeat()
-                    return reconnect_reason
+                if include_reference:
+                    reconnect_reason = self._handle_reference_stale_if_due(received_at)
+                    if reconnect_reason is not None:
+                        self.record_heartbeat()
+                        return reconnect_reason
                 continue
 
             if include_reference and is_cfbenchmarks_value_payload(parsed_json):
@@ -588,10 +589,11 @@ class KalshiWsCollector:
 
             if market_ticker is None:
                 self.record_heartbeat(force=False)
-                reconnect_reason = self._handle_reference_stale_if_due(received_at)
-                if reconnect_reason is not None:
-                    self.record_heartbeat()
-                    return reconnect_reason
+                if include_reference:
+                    reconnect_reason = self._handle_reference_stale_if_due(received_at)
+                    if reconnect_reason is not None:
+                        self.record_heartbeat()
+                        return reconnect_reason
                 continue
 
             message = parse_ws_payload(
@@ -607,10 +609,11 @@ class KalshiWsCollector:
                 self.record_heartbeat()
                 return resubscribe_reason
             self.record_heartbeat(force=self._consume_force_next_heartbeat())
-            reconnect_reason = self._handle_reference_stale_if_due(received_at)
-            if reconnect_reason is not None:
-                self.record_heartbeat()
-                return reconnect_reason
+            if include_reference:
+                reconnect_reason = self._handle_reference_stale_if_due(received_at)
+                if reconnect_reason is not None:
+                    self.record_heartbeat()
+                    return reconnect_reason
 
         return None
 

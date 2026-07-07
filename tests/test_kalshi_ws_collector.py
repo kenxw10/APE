@@ -1224,6 +1224,61 @@ def test_collector_reconnects_when_brti_subscribed_without_valid_tick(tmp_path) 
         engine.dispose()
 
 
+def test_market_loop_does_not_return_brti_reconnect_reason(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_market_ignores_brti_stale.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_FIRST_TICK_TIMEOUT_SECONDS": "1",
+            "KALSHI_CFBENCHMARKS_MAX_CONSECUTIVE_STALE_BEFORE_RECONNECT": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket(
+        [
+            {
+                "type": "ticker",
+                "sid": 2,
+                "seq": 1,
+                "msg": {"market_ticker": "KXBTC15M-TEST"},
+            }
+        ]
+    )
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=lambda *_args: websocket,
+        now=lambda: NOW + timedelta(seconds=5),
+    )
+    collector.brti_status.connection_state = "subscribed"
+    collector.brti_status.last_connected_at = NOW
+
+    try:
+        result = asyncio.run(
+            collector._read_messages(
+                websocket,
+                "KXBTC15M-TEST",
+                None,
+                threading.Event(),
+                include_reference=False,
+            )
+        )
+
+        assert result is None
+        assert collector.brti_status.connection_state == "subscribed"
+        assert collector.brti_status.warnings == []
+    finally:
+        engine.dispose()
+
+
 def test_collector_records_bounded_safe_parse_diagnostic_samples(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_parse_diagnostics.sqlite'}"
     config = load_config(

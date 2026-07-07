@@ -657,13 +657,18 @@ def _status_category(
         return "worker_stale"
     if "brti_persistence_failed" in warnings:
         return "persistence_error"
+    if _worker_timeout_reason(warnings) is not None or connection_state in {
+        "stale",
+        "reconnect_pending",
+    }:
+        return "stale_transport"
     if transport_stale:
         return "stale_transport"
     if persistence_stale:
         return "stale_persistence"
     if source_stale or kalshi_received_stale:
         return "upstream_lag"
-    if latest_tick is None or connection_state in {
+    if latest_tick is None or not _reference_tick_valid(latest_tick) or connection_state in {
         "waiting_for_worker",
         "waiting_for_fresh_tick",
         "connected",
