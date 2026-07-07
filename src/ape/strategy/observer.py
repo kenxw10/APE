@@ -1008,6 +1008,7 @@ def evaluate_strategy_observer(
     return decision(
         STATE_ENTER_DRY_RUN,
         "dry_run_entry_signal",
+        blockers=[],
         warnings=warnings,
     )
 

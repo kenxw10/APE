@@ -114,13 +114,17 @@ def test_strategy_dry_run_records_hypothetical_entry_and_event(tmp_path) -> None
 
         assert decision is not None
         assert latest_decision is not None
+        assert decision.blockers == []
         assert latest_decision.decision_state == STATE_ENTER_DRY_RUN
+        assert latest_decision.blockers == []
         assert len(open_positions) == 1
         assert open_positions[0].decision_id == latest_decision.decision_id
         assert open_positions[0].open_price == Decimal("0.63")
         assert len(events) == 1
         assert events[0].event_type == STATE_ENTER_DRY_RUN
         assert heartbeat is not None
+        assert heartbeat.metadata_["strategy"]["observer"]["blockers"] == []
+        assert heartbeat.metadata_["strategy"]["dry_run"]["blockers"] == []
         assert heartbeat.metadata_["strategy"]["dry_run"]["enabled"] is True
         assert heartbeat.metadata_["strategy"]["dry_run"]["open_position_count"] == 1
     finally:
