@@ -524,6 +524,8 @@ def test_strategy_dry_run_force_exit_prices_stale_reference_with_fresh_book(
             "APP_MODE": "DRY_RUN",
             "STRATEGY_OBSERVER_ENABLED": "true",
             "STRATEGY_DRY_RUN_ENABLED": "true",
+            "STRATEGY_DRY_RUN_MAX_OPEN_POSITIONS": "2",
+            "STRATEGY_DRY_RUN_ONE_ENTRY_PER_MARKET": "false",
         }
     )
     engine = create_engine_from_config(config)
@@ -595,6 +597,59 @@ def test_strategy_dry_run_force_exit_prices_stale_reference_with_fresh_book(
         assert events[0].price == Decimal("0.60")
     finally:
         engine.dispose()
+
+
+def test_strategy_dry_run_force_exits_stale_book_under_multi_position_capacity(
+    session,
+) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config(
+        {
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+            "STRATEGY_DRY_RUN_MAX_OPEN_POSITIONS": "2",
+            "STRATEGY_DRY_RUN_ONE_ENTRY_PER_MARKET": "false",
+        }
+    )
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        latest_orderbook_received_at=now - timedelta(seconds=5),
+    )
+    StrategyDryRunRepository(session).insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="dryrun-stale-book-position",
+            strategy_id=config.strategy_id,
+            market_ticker="KXBTC15M-ACTIVE",
+            decision_id="strategy-stale-book-enter",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now - timedelta(seconds=30),
+            open_price=Decimal("0.63"),
+            contract_count=1,
+            boundary=Decimal("62000"),
+            brti_at_entry=Decimal("62100"),
+            distance_bps_at_entry=Decimal("16.10305958"),
+            entry_reason="dry_run_entry_signal",
+            status="OPEN",
+            measurements={"desired_side_ask": "0.62"},
+        )
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_FORCE_EXIT
+    assert decision.primary_reason == "dry_run_position_orderbook_stale"
+    assert decision.measurements["managed_position_id"] == (
+        "dryrun-stale-book-position"
+    )
 
 
 def test_strategy_dry_run_mode_without_flag_stays_observe_only(session) -> None:
@@ -847,6 +902,7 @@ def _seed_observable_context(
     yes_ask_count: Decimal = Decimal("3"),
     no_bid_count: Decimal = Decimal("3"),
     no_ask_count: Decimal = Decimal("3"),
+    latest_orderbook_received_at: datetime | None = None,
 ) -> None:
     _seed_market(session, now=now)
     reference_repository = ReferenceTicksRepository(session)
@@ -886,7 +942,8 @@ def _seed_observable_context(
     orderbook_repository.insert_snapshot(
         OrderbookSnapshotInput(
             market_ticker="KXBTC15M-ACTIVE",
-            received_at=now - timedelta(milliseconds=500),
+            received_at=latest_orderbook_received_at
+            or now - timedelta(milliseconds=500),
             sequence_number=123,
             yes_bid=yes_bid,
             yes_ask=yes_ask,

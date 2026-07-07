@@ -453,6 +453,7 @@ def evaluate_strategy_observer(
     dry_run_intended_contract_count: int | None = None
     dry_run_position_id: str | None = None
     managing_position: StrategyDryRunPosition | None = None
+    feed_failure_position: StrategyDryRunPosition | None = None
     open_positions: list[StrategyDryRunPosition] = []
 
     def decision(
@@ -608,6 +609,21 @@ def evaluate_strategy_observer(
         if latest_trade is not None:
             latest_trade_age_ms = _age_ms(latest_trade.received_at, evaluated_at)
 
+    def manage_feed_failure_position() -> bool:
+        nonlocal candidate_side
+        nonlocal dry_run_position_id
+        nonlocal managing_position
+
+        if managing_position is not None:
+            return True
+        if feed_failure_position is None:
+            return False
+
+        managing_position = feed_failure_position
+        dry_run_position_id = managing_position.position_id
+        candidate_side = managing_position.side_candidate
+        return True
+
     if not safety.is_safe:
         return decision(
             STATE_LIVE_GUARD_BLOCKED,
@@ -635,15 +651,14 @@ def evaluate_strategy_observer(
                     or position.market_ticker != active_market.market_ticker
                 )
             ]
-            active_market_position = next(
-                (
-                    position
-                    for position in open_positions
-                    if active_market is not None
-                    and position.market_ticker == active_market.market_ticker
-                ),
-                None,
-            )
+            active_market_positions = [
+                position
+                for position in open_positions
+                if active_market is not None
+                and position.market_ticker == active_market.market_ticker
+            ]
+            active_market_position = _oldest_dry_run_position(active_market_positions)
+            feed_failure_position = active_market_position
             can_open_additional = (
                 len(open_positions) < config.strategy_dry_run_max_open_positions
                 and (
@@ -727,7 +742,7 @@ def evaluate_strategy_observer(
 
     reference_tick = ReferenceTicksRepository(session).get_latest_tick(BRTI_SOURCE)
     if not _valid_reference_tick(reference_tick):
-        if managing_position is not None:
+        if manage_feed_failure_position():
             load_managed_exit_quote()
             return decision(
                 STATE_FORCE_EXIT,
@@ -745,7 +760,7 @@ def evaluate_strategy_observer(
         if age is not None
     )
     if brti_age_ms > config.strategy_reference_max_age_ms:
-        if managing_position is not None:
+        if manage_feed_failure_position():
             load_managed_exit_quote()
             return decision(
                 STATE_FORCE_EXIT,
@@ -756,7 +771,7 @@ def evaluate_strategy_observer(
 
     orderbook = OrderbookRepository(session).get_latest_snapshot(market.market_ticker)
     if orderbook is None:
-        if managing_position is not None:
+        if manage_feed_failure_position():
             return decision(
                 STATE_FORCE_EXIT,
                 "dry_run_position_orderbook_missing",
@@ -766,7 +781,7 @@ def evaluate_strategy_observer(
 
     orderbook_age_ms = _age_ms(orderbook.received_at, evaluated_at)
     if orderbook_age_ms is None or orderbook_age_ms > config.strategy_kalshi_book_max_age_ms:
-        if managing_position is not None:
+        if manage_feed_failure_position():
             return decision(
                 STATE_FORCE_EXIT,
                 "dry_run_position_orderbook_stale",
