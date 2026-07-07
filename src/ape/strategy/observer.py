@@ -657,7 +657,11 @@ def evaluate_strategy_observer(
                 if active_market is not None
                 and position.market_ticker == active_market.market_ticker
             ]
-            active_market_position = _oldest_dry_run_position(active_market_positions)
+            active_market_position = (
+                _oldest_dry_run_position(active_market_positions)
+                if active_market_positions
+                else None
+            )
             feed_failure_position = active_market_position
             can_open_additional = (
                 len(open_positions) < config.strategy_dry_run_max_open_positions

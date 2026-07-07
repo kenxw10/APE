@@ -389,6 +389,64 @@ def test_strategy_dry_run_prioritizes_older_expired_position_before_new_entry(
     assert decision.measurements["managed_position_id"] == "dryrun-expired-position"
 
 
+def test_strategy_dry_run_force_exits_only_stale_position_after_roll(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config(
+        {
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+            "STRATEGY_DRY_RUN_MAX_OPEN_POSITIONS": "3",
+            "STRATEGY_DRY_RUN_ONE_ENTRY_PER_MARKET": "false",
+        }
+    )
+    safety = assess_startup_safety(config)
+    _seed_observable_context(session, now=now)
+    MarketsRepository(session).upsert_market(
+        MarketInput(
+            market_ticker="KXBTC15M-OLD",
+            event_ticker="KXBTC15M-26JUL051145",
+            series_ticker="KXBTC15M",
+            open_time=now - timedelta(minutes=25),
+            close_time=now - timedelta(minutes=10),
+            functional_strike=Decimal("62000"),
+            resolver_decision_reason="market_interval_contains_now",
+        )
+    )
+    StrategyDryRunRepository(session).insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="dryrun-only-stale-position",
+            strategy_id=config.strategy_id,
+            market_ticker="KXBTC15M-OLD",
+            decision_id="strategy-old-enter",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now - timedelta(minutes=20),
+            open_price=Decimal("0.63"),
+            contract_count=1,
+            boundary=Decimal("62000"),
+            brti_at_entry=Decimal("62100"),
+            distance_bps_at_entry=Decimal("16.10305958"),
+            entry_reason="dry_run_entry_signal",
+            status="OPEN",
+            measurements={"desired_side_ask": "0.62"},
+        )
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_FORCE_EXIT
+    assert decision.primary_reason == "dry_run_position_market_closed_or_expired"
+    assert decision.measurements["managed_position_id"] == (
+        "dryrun-only-stale-position"
+    )
+
+
 def test_strategy_dry_run_prioritizes_older_profit_target_before_new_entry(
     session,
 ) -> None:
