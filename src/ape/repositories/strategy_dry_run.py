@@ -149,19 +149,38 @@ class StrategyDryRunRepository:
             .limit(1)
         )
 
-    def get_latest_event(self) -> StrategyDryRunEvent | None:
+    def get_latest_event(
+        self,
+        *,
+        strategy_id: str | None = None,
+    ) -> StrategyDryRunEvent | None:
+        statement = select(StrategyDryRunEvent)
+        if strategy_id is not None:
+            statement = statement.join(
+                StrategyDryRunPosition,
+                StrategyDryRunEvent.position_id == StrategyDryRunPosition.position_id,
+            ).where(StrategyDryRunPosition.strategy_id == strategy_id)
         return self.session.scalar(
-            select(StrategyDryRunEvent)
-            .order_by(desc(StrategyDryRunEvent.occurred_at), desc(StrategyDryRunEvent.id))
-            .limit(1)
+            statement.order_by(
+                desc(StrategyDryRunEvent.occurred_at),
+                desc(StrategyDryRunEvent.id),
+            ).limit(1)
         )
 
-    def get_latest_enter_decision_id(self) -> str | None:
+    def get_latest_enter_decision_id(self, *, strategy_id: str | None = None) -> str | None:
+        statement = select(StrategyDryRunEvent).where(
+            StrategyDryRunEvent.event_type == "ENTER_DRY_RUN"
+        )
+        if strategy_id is not None:
+            statement = statement.join(
+                StrategyDryRunPosition,
+                StrategyDryRunEvent.position_id == StrategyDryRunPosition.position_id,
+            ).where(StrategyDryRunPosition.strategy_id == strategy_id)
         row = self.session.scalar(
-            select(StrategyDryRunEvent)
-            .where(StrategyDryRunEvent.event_type == "ENTER_DRY_RUN")
-            .order_by(desc(StrategyDryRunEvent.occurred_at), desc(StrategyDryRunEvent.id))
-            .limit(1)
+            statement.order_by(
+                desc(StrategyDryRunEvent.occurred_at),
+                desc(StrategyDryRunEvent.id),
+            ).limit(1)
         )
         return row.decision_id if row is not None else None
 

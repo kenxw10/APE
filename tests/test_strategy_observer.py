@@ -24,6 +24,7 @@ from ape.repositories.strategy_dry_run import StrategyDryRunRepository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import assess_startup_safety
 from ape.strategy.observer import (
+    STATE_CONTRACT_NOT_CONFIRMED,
     STATE_ENTER_DRY_RUN,
     STATE_IMPULSE_TOO_WEAK,
     STATE_OBSERVE_ONLY_MARKET,
@@ -120,6 +121,61 @@ def test_strategy_dry_run_records_hypothetical_entry_and_event(tmp_path) -> None
         assert heartbeat.metadata_["strategy"]["dry_run"]["open_position_count"] == 1
     finally:
         engine.dispose()
+
+
+def test_strategy_entry_bounds_use_offset_adjusted_dry_run_price(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"APP_MODE": "DRY_RUN", "STRATEGY_DRY_RUN_ENABLED": "true"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        yes_bid=Decimal("0.76"),
+        yes_ask=Decimal("0.78"),
+        yes_spread=Decimal("0.02"),
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_CONTRACT_NOT_CONFIRMED
+    assert decision.primary_reason == "dry_run_intended_entry_price_outside_range"
+    assert decision.measurements["dry_run_intended_entry_price"] == "0.79"
+
+
+def test_strategy_entry_bounds_allow_offset_to_reach_minimum(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config(
+        {
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+        }
+    )
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        yes_bid=Decimal("0.53"),
+        yes_ask=Decimal("0.55"),
+        yes_spread=Decimal("0.02"),
+        initial_yes_bid=Decimal("0.49"),
+        initial_yes_ask=Decimal("0.51"),
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_ENTER_DRY_RUN
+    assert decision.measurements["dry_run_intended_entry_price"] == "0.56"
 
 
 def test_strategy_dry_run_mode_without_flag_stays_observe_only(session) -> None:
@@ -366,6 +422,8 @@ def _seed_observable_context(
     yes_bid: Decimal = Decimal("0.60"),
     yes_ask: Decimal = Decimal("0.62"),
     yes_spread: Decimal = Decimal("0.02"),
+    initial_yes_bid: Decimal = Decimal("0.55"),
+    initial_yes_ask: Decimal = Decimal("0.57"),
 ) -> None:
     _seed_market(session, now=now)
     reference_repository = ReferenceTicksRepository(session)
@@ -389,8 +447,8 @@ def _seed_observable_context(
             market_ticker="KXBTC15M-ACTIVE",
             received_at=now - timedelta(seconds=45),
             sequence_number=122,
-            yes_bid=Decimal("0.55"),
-            yes_ask=Decimal("0.57"),
+            yes_bid=initial_yes_bid,
+            yes_ask=initial_yes_ask,
             no_bid=Decimal("0.43"),
             no_ask=Decimal("0.45"),
             yes_spread=Decimal("0.02"),

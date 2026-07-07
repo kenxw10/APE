@@ -817,11 +817,21 @@ def evaluate_strategy_observer(
             ),
         )
 
+    dry_run_intended_entry_price = _intended_entry_price(
+        desired_ask,
+        config.strategy_dry_run_entry_price_offset_cents,
+    )
+    dry_run_intended_contract_count = config.strategy_dry_run_position_size_contracts
     if (
-        desired_ask < Decimal(str(config.strategy_dry_run_min_entry_price))
-        or desired_ask > Decimal(str(config.strategy_dry_run_max_entry_price))
+        dry_run_intended_entry_price
+        < Decimal(str(config.strategy_dry_run_min_entry_price))
+        or dry_run_intended_entry_price
+        > Decimal(str(config.strategy_dry_run_max_entry_price))
     ):
-        return decision(STATE_CONTRACT_NOT_CONFIRMED, "desired_side_ask_outside_range")
+        return decision(
+            STATE_CONTRACT_NOT_CONFIRMED,
+            "dry_run_intended_entry_price_outside_range",
+        )
 
     impulse = _brti_impulse_metrics(
         config=config,
@@ -889,11 +899,6 @@ def evaluate_strategy_observer(
             "recent_trade_confirmation_weak",
         )
 
-    dry_run_intended_entry_price = _intended_entry_price(
-        desired_ask,
-        config.strategy_dry_run_entry_price_offset_cents,
-    )
-    dry_run_intended_contract_count = config.strategy_dry_run_position_size_contracts
     dry_run_entry_bucket = int(
         evaluated_at.timestamp()
         / max(config.strategy_dry_run_min_seconds_between_decisions, 0.001)
@@ -1101,9 +1106,13 @@ def build_strategy_dry_run_status(
                 open_position_count = dry_run_repository.count_open_positions(
                     strategy_id=config.strategy_id
                 )
-                latest_event = dry_run_repository.get_latest_event()
+                latest_event = dry_run_repository.get_latest_event(
+                    strategy_id=config.strategy_id
+                )
                 latest_decision = StrategyDecisionsRepository(session).get_latest_decision()
-                latest_enter_id = dry_run_repository.get_latest_enter_decision_id()
+                latest_enter_id = dry_run_repository.get_latest_enter_decision_id(
+                    strategy_id=config.strategy_id
+                )
                 if latest_enter_id is not None:
                     latest_enter_decision = StrategyDecisionsRepository(
                         session
@@ -2330,7 +2339,7 @@ def _apply_dry_run_ledger(
                 )
             )
 
-    latest_event = repository.get_latest_event()
+    latest_event = repository.get_latest_event(strategy_id=config.strategy_id)
     return DryRunLedgerResult(
         open_position_count=repository.count_open_positions(strategy_id=config.strategy_id),
         latest_event_type=latest_event.event_type if latest_event else None,

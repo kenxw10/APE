@@ -256,3 +256,147 @@ def test_strategy_dry_run_endpoints_report_read_only_ledger(tmp_path) -> None:
         assert "order_id" not in events["events"][0]
     finally:
         engine.dispose()
+
+
+def test_strategy_dry_run_status_scopes_latest_event_to_configured_strategy(
+    tmp_path,
+) -> None:
+    now = datetime.now(UTC)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_strategy_scoped_status.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        with session_factory() as session:
+            decisions = StrategyDecisionsRepository(session)
+            decisions.insert_decision(
+                StrategyDecisionInput(
+                    decision_id="strategy-KXBTC15M-CURRENT-1-enter",
+                    evaluated_at=now,
+                    decision_state="ENTER_DRY_RUN",
+                    primary_reason="dry_run_entry_signal",
+                    app_mode="DRY_RUN",
+                    market_ticker="KXBTC15M-CURRENT",
+                    candidate_side="YES",
+                    boundary=Decimal("62000"),
+                    brti_value=Decimal("62100"),
+                    distance_bps=Decimal("16.10305958"),
+                    seconds_left=300,
+                    measurements={"desired_side_ask": "0.62"},
+                    blockers=[],
+                    warnings=[],
+                    raw_context_hash="current",
+                )
+            )
+            decisions.insert_decision(
+                StrategyDecisionInput(
+                    decision_id="strategy-KXBTC15M-OTHER-1-enter",
+                    evaluated_at=now + timedelta(seconds=10),
+                    decision_state="ENTER_DRY_RUN",
+                    primary_reason="dry_run_entry_signal",
+                    app_mode="DRY_RUN",
+                    market_ticker="KXBTC15M-OTHER",
+                    candidate_side="NO",
+                    boundary=Decimal("62000"),
+                    brti_value=Decimal("62150"),
+                    distance_bps=Decimal("24.19354839"),
+                    seconds_left=290,
+                    measurements={"desired_side_ask": "0.64"},
+                    blockers=[],
+                    warnings=[],
+                    raw_context_hash="other",
+                )
+            )
+            repository = StrategyDryRunRepository(session)
+            repository.insert_position_if_absent(
+                StrategyDryRunPositionInput(
+                    position_id="dryrun-btc15-KXBTC15M-CURRENT",
+                    strategy_id=config.strategy_id,
+                    market_ticker="KXBTC15M-CURRENT",
+                    decision_id="strategy-KXBTC15M-CURRENT-1-enter",
+                    side_candidate="YES",
+                    economic_side="YES",
+                    opened_at=now,
+                    open_price=Decimal("0.63"),
+                    contract_count=1,
+                    boundary=Decimal("62000"),
+                    brti_at_entry=Decimal("62100"),
+                    distance_bps_at_entry=Decimal("16.10305958"),
+                    entry_reason="dry_run_entry_signal",
+                    status="OPEN",
+                    measurements={"desired_side_ask": "0.62"},
+                )
+            )
+            repository.insert_event_if_absent(
+                StrategyDryRunEventInput(
+                    event_id="dryrun-event-current-enter",
+                    position_id="dryrun-btc15-KXBTC15M-CURRENT",
+                    decision_id="strategy-KXBTC15M-CURRENT-1-enter",
+                    event_type="ENTER_DRY_RUN",
+                    market_ticker="KXBTC15M-CURRENT",
+                    occurred_at=now,
+                    side_candidate="YES",
+                    price=Decimal("0.63"),
+                    contract_count=1,
+                    reason="dry_run_entry_signal",
+                    measurements={"desired_side_ask": "0.62"},
+                )
+            )
+            repository.insert_position_if_absent(
+                StrategyDryRunPositionInput(
+                    position_id="dryrun-btc15-KXBTC15M-OTHER",
+                    strategy_id="other_strategy",
+                    market_ticker="KXBTC15M-OTHER",
+                    decision_id="strategy-KXBTC15M-OTHER-1-enter",
+                    side_candidate="NO",
+                    economic_side="NO",
+                    opened_at=now + timedelta(seconds=10),
+                    open_price=Decimal("0.65"),
+                    contract_count=1,
+                    boundary=Decimal("62000"),
+                    brti_at_entry=Decimal("62150"),
+                    distance_bps_at_entry=Decimal("24.19354839"),
+                    entry_reason="dry_run_entry_signal",
+                    status="OPEN",
+                    measurements={"desired_side_ask": "0.64"},
+                )
+            )
+            repository.insert_event_if_absent(
+                StrategyDryRunEventInput(
+                    event_id="dryrun-event-other-enter",
+                    position_id="dryrun-btc15-KXBTC15M-OTHER",
+                    decision_id="strategy-KXBTC15M-OTHER-1-enter",
+                    event_type="ENTER_DRY_RUN",
+                    market_ticker="KXBTC15M-OTHER",
+                    occurred_at=now + timedelta(seconds=10),
+                    side_candidate="NO",
+                    price=Decimal("0.65"),
+                    contract_count=1,
+                    reason="dry_run_entry_signal",
+                    measurements={"desired_side_ask": "0.64"},
+                )
+            )
+            session.commit()
+
+        app = create_app(config)
+        with TestClient(app) as client:
+            response = client.get("/strategy/dry-run/status")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["open_position_count"] == 1
+        assert body["latest_event"]["event_id"] == "dryrun-event-current-enter"
+        assert body["latest_event"]["market_ticker"] == "KXBTC15M-CURRENT"
+        assert body["latest_enter_decision"]["decision_id"] == (
+            "strategy-KXBTC15M-CURRENT-1-enter"
+        )
+    finally:
+        engine.dispose()
