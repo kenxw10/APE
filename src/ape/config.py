@@ -79,6 +79,32 @@ class AppConfig:
     strategy_observer_enabled: bool = False
     strategy_observer_poll_seconds: float = 1.0
     strategy_observer_decision_ttl_seconds: float = 5.0
+    strategy_dry_run_enabled: bool = False
+    strategy_id: str = "btc15_momentum_v1"
+    strategy_dry_run_max_open_positions: int = 1
+    strategy_dry_run_one_entry_per_market: bool = True
+    strategy_dry_run_position_size_contracts: int = 1
+    strategy_dry_run_entry_price_offset_cents: int = 1
+    strategy_dry_run_min_seconds_between_decisions: float = 1.0
+    strategy_brti_lookback_short_seconds: int = 30
+    strategy_brti_lookback_medium_seconds: int = 90
+    strategy_brti_lookback_long_seconds: int = 180
+    strategy_brti_min_move_short_bps: float = 2.0
+    strategy_brti_min_move_medium_bps: float = 4.5
+    strategy_brti_min_move_long_bps: float = 6.0
+    strategy_brti_directional_tick_ratio_min: float = 0.62
+    strategy_brti_max_boundary_crosses_90s: int = 1
+    strategy_brti_max_retrace_fraction: float = 0.40
+    strategy_contract_lookback_seconds: int = 45
+    strategy_contract_min_mid_move_cents: int = 4
+    strategy_contract_ask_pullback_lookback_seconds: int = 15
+    strategy_contract_max_ask_pullback_cents: int = 2
+    strategy_trade_confirmation_lookback_seconds: int = 30
+    strategy_trade_confirmation_min_ratio: float = 0.60
+    strategy_trade_confirmation_min_trades: int = 3
+    strategy_min_top_book_size_contracts: int = 2
+    strategy_dry_run_max_entry_price: float = 0.78
+    strategy_dry_run_min_entry_price: float = 0.56
     strategy_min_boundary_distance_bps: float = 3.5
     strategy_reference_max_age_ms: int = 2_000
     strategy_kalshi_book_max_age_ms: int = 2_000
@@ -97,6 +123,8 @@ class AppConfig:
     storage_retention_reference_ticks_seconds: int = 86400
     storage_retention_worker_heartbeats_seconds: int = 21600
     storage_retention_strategy_decisions_seconds: int = 1209600
+    storage_retention_dry_run_positions_seconds: int = 2592000
+    storage_retention_dry_run_events_seconds: int = 2592000
     storage_retention_markets_seconds: int = 2592000
     storage_retention_raw_payload_orderbook_seconds: int = 900
     storage_retention_raw_payload_public_trades_seconds: int = 3600
@@ -284,6 +312,110 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
             "STRATEGY_OBSERVER_DECISION_TTL_SECONDS",
             _get(source, "STRATEGY_OBSERVER_DECISION_TTL_SECONDS", "5"),
         ),
+        strategy_dry_run_enabled=_parse_bool(
+            "STRATEGY_DRY_RUN_ENABLED",
+            _get(source, "STRATEGY_DRY_RUN_ENABLED", "false"),
+        ),
+        strategy_id=_parse_required_text(
+            "STRATEGY_ID",
+            _get(source, "STRATEGY_ID", "btc15_momentum_v1"),
+        ),
+        strategy_dry_run_max_open_positions=_parse_int(
+            "STRATEGY_DRY_RUN_MAX_OPEN_POSITIONS",
+            _get(source, "STRATEGY_DRY_RUN_MAX_OPEN_POSITIONS", "1"),
+        ),
+        strategy_dry_run_one_entry_per_market=_parse_bool(
+            "STRATEGY_DRY_RUN_ONE_ENTRY_PER_MARKET",
+            _get(source, "STRATEGY_DRY_RUN_ONE_ENTRY_PER_MARKET", "true"),
+        ),
+        strategy_dry_run_position_size_contracts=_parse_int(
+            "STRATEGY_DRY_RUN_POSITION_SIZE_CONTRACTS",
+            _get(source, "STRATEGY_DRY_RUN_POSITION_SIZE_CONTRACTS", "1"),
+        ),
+        strategy_dry_run_entry_price_offset_cents=_parse_non_negative_int(
+            "STRATEGY_DRY_RUN_ENTRY_PRICE_OFFSET_CENTS",
+            _get(source, "STRATEGY_DRY_RUN_ENTRY_PRICE_OFFSET_CENTS", "1"),
+        ),
+        strategy_dry_run_min_seconds_between_decisions=_parse_float(
+            "STRATEGY_DRY_RUN_MIN_SECONDS_BETWEEN_DECISIONS",
+            _get(source, "STRATEGY_DRY_RUN_MIN_SECONDS_BETWEEN_DECISIONS", "1"),
+        ),
+        strategy_brti_lookback_short_seconds=_parse_int(
+            "STRATEGY_BRTI_LOOKBACK_SHORT_SECONDS",
+            _get(source, "STRATEGY_BRTI_LOOKBACK_SHORT_SECONDS", "30"),
+        ),
+        strategy_brti_lookback_medium_seconds=_parse_int(
+            "STRATEGY_BRTI_LOOKBACK_MEDIUM_SECONDS",
+            _get(source, "STRATEGY_BRTI_LOOKBACK_MEDIUM_SECONDS", "90"),
+        ),
+        strategy_brti_lookback_long_seconds=_parse_int(
+            "STRATEGY_BRTI_LOOKBACK_LONG_SECONDS",
+            _get(source, "STRATEGY_BRTI_LOOKBACK_LONG_SECONDS", "180"),
+        ),
+        strategy_brti_min_move_short_bps=_parse_float(
+            "STRATEGY_BRTI_MIN_MOVE_SHORT_BPS",
+            _get(source, "STRATEGY_BRTI_MIN_MOVE_SHORT_BPS", "2.0"),
+        ),
+        strategy_brti_min_move_medium_bps=_parse_float(
+            "STRATEGY_BRTI_MIN_MOVE_MEDIUM_BPS",
+            _get(source, "STRATEGY_BRTI_MIN_MOVE_MEDIUM_BPS", "4.5"),
+        ),
+        strategy_brti_min_move_long_bps=_parse_float(
+            "STRATEGY_BRTI_MIN_MOVE_LONG_BPS",
+            _get(source, "STRATEGY_BRTI_MIN_MOVE_LONG_BPS", "6.0"),
+        ),
+        strategy_brti_directional_tick_ratio_min=_parse_float(
+            "STRATEGY_BRTI_DIRECTIONAL_TICK_RATIO_MIN",
+            _get(source, "STRATEGY_BRTI_DIRECTIONAL_TICK_RATIO_MIN", "0.62"),
+        ),
+        strategy_brti_max_boundary_crosses_90s=_parse_non_negative_int(
+            "STRATEGY_BRTI_MAX_BOUNDARY_CROSSES_90S",
+            _get(source, "STRATEGY_BRTI_MAX_BOUNDARY_CROSSES_90S", "1"),
+        ),
+        strategy_brti_max_retrace_fraction=_parse_float(
+            "STRATEGY_BRTI_MAX_RETRACE_FRACTION",
+            _get(source, "STRATEGY_BRTI_MAX_RETRACE_FRACTION", "0.40"),
+        ),
+        strategy_contract_lookback_seconds=_parse_int(
+            "STRATEGY_CONTRACT_LOOKBACK_SECONDS",
+            _get(source, "STRATEGY_CONTRACT_LOOKBACK_SECONDS", "45"),
+        ),
+        strategy_contract_min_mid_move_cents=_parse_int(
+            "STRATEGY_CONTRACT_MIN_MID_MOVE_CENTS",
+            _get(source, "STRATEGY_CONTRACT_MIN_MID_MOVE_CENTS", "4"),
+        ),
+        strategy_contract_ask_pullback_lookback_seconds=_parse_int(
+            "STRATEGY_CONTRACT_ASK_PULLBACK_LOOKBACK_SECONDS",
+            _get(source, "STRATEGY_CONTRACT_ASK_PULLBACK_LOOKBACK_SECONDS", "15"),
+        ),
+        strategy_contract_max_ask_pullback_cents=_parse_non_negative_int(
+            "STRATEGY_CONTRACT_MAX_ASK_PULLBACK_CENTS",
+            _get(source, "STRATEGY_CONTRACT_MAX_ASK_PULLBACK_CENTS", "2"),
+        ),
+        strategy_trade_confirmation_lookback_seconds=_parse_int(
+            "STRATEGY_TRADE_CONFIRMATION_LOOKBACK_SECONDS",
+            _get(source, "STRATEGY_TRADE_CONFIRMATION_LOOKBACK_SECONDS", "30"),
+        ),
+        strategy_trade_confirmation_min_ratio=_parse_float(
+            "STRATEGY_TRADE_CONFIRMATION_MIN_RATIO",
+            _get(source, "STRATEGY_TRADE_CONFIRMATION_MIN_RATIO", "0.60"),
+        ),
+        strategy_trade_confirmation_min_trades=_parse_int(
+            "STRATEGY_TRADE_CONFIRMATION_MIN_TRADES",
+            _get(source, "STRATEGY_TRADE_CONFIRMATION_MIN_TRADES", "3"),
+        ),
+        strategy_min_top_book_size_contracts=_parse_int(
+            "STRATEGY_MIN_TOP_BOOK_SIZE_CONTRACTS",
+            _get(source, "STRATEGY_MIN_TOP_BOOK_SIZE_CONTRACTS", "2"),
+        ),
+        strategy_dry_run_max_entry_price=_parse_float(
+            "STRATEGY_DRY_RUN_MAX_ENTRY_PRICE",
+            _get(source, "STRATEGY_DRY_RUN_MAX_ENTRY_PRICE", "0.78"),
+        ),
+        strategy_dry_run_min_entry_price=_parse_float(
+            "STRATEGY_DRY_RUN_MIN_ENTRY_PRICE",
+            _get(source, "STRATEGY_DRY_RUN_MIN_ENTRY_PRICE", "0.56"),
+        ),
         strategy_min_boundary_distance_bps=_parse_float(
             "STRATEGY_MIN_BOUNDARY_DISTANCE_BPS",
             _get(source, "STRATEGY_MIN_BOUNDARY_DISTANCE_BPS", "3.5"),
@@ -355,6 +487,14 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         storage_retention_strategy_decisions_seconds=_parse_int(
             "STORAGE_RETENTION_STRATEGY_DECISIONS_SECONDS",
             _get(source, "STORAGE_RETENTION_STRATEGY_DECISIONS_SECONDS", "1209600"),
+        ),
+        storage_retention_dry_run_positions_seconds=_parse_int(
+            "STORAGE_RETENTION_DRY_RUN_POSITIONS_SECONDS",
+            _get(source, "STORAGE_RETENTION_DRY_RUN_POSITIONS_SECONDS", "2592000"),
+        ),
+        storage_retention_dry_run_events_seconds=_parse_int(
+            "STORAGE_RETENTION_DRY_RUN_EVENTS_SECONDS",
+            _get(source, "STORAGE_RETENTION_DRY_RUN_EVENTS_SECONDS", "2592000"),
         ),
         storage_retention_markets_seconds=_parse_int(
             "STORAGE_RETENTION_MARKETS_SECONDS",
@@ -479,6 +619,13 @@ def _parse_non_negative_int(name: str, raw_value: str) -> int:
         raise ConfigError(f"Invalid integer for {name}: {raw_value!r}.") from exc
     if value < 0:
         raise ConfigError(f"{name} must be greater than or equal to 0.")
+    return value
+
+
+def _parse_required_text(name: str, raw_value: str) -> str:
+    value = raw_value.strip()
+    if not value:
+        raise ConfigError(f"{name} must not be empty.")
     return value
 
 

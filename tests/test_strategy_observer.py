@@ -11,19 +11,24 @@ from ape.db.session import create_engine_from_config, create_session_factory
 from ape.repositories.inputs import (
     MarketInput,
     OrderbookSnapshotInput,
+    PublicTradeInput,
     ReferenceTickInput,
     WorkerHeartbeatInput,
 )
 from ape.repositories.markets import MarketsRepository
 from ape.repositories.orderbook import OrderbookRepository
+from ape.repositories.public_trades import PublicTradesRepository
 from ape.repositories.reference_ticks import ReferenceTicksRepository
 from ape.repositories.strategy_decisions import StrategyDecisionsRepository
+from ape.repositories.strategy_dry_run import StrategyDryRunRepository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import assess_startup_safety
 from ape.strategy.observer import (
-    STATE_BOOK_UNUSABLE,
+    STATE_ENTER_DRY_RUN,
+    STATE_IMPULSE_TOO_WEAK,
     STATE_OBSERVE_ONLY_MARKET,
     STATE_REFERENCE_STALE,
+    STATE_SPREAD_TOO_WIDE,
     StrategyObserver,
     evaluate_strategy_observer,
 )
@@ -64,6 +69,93 @@ def test_strategy_observer_evaluates_observer_only_market(session) -> None:
     assert decision.measurements["desired_side_ask"] == "0.62"
     assert decision.measurements["config"]["strategy_max_spread_cents"] == 4
     assert "ENTER" not in decision.decision_state
+
+
+def test_strategy_dry_run_records_hypothetical_entry_and_event(tmp_path) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_strategy_dry_run.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        with session_factory() as session:
+            _seed_observable_context(session, now=now)
+
+        observer = StrategyObserver(
+            config=config,
+            safety=assess_startup_safety(config),
+            session_factory=session_factory,
+            started_at=now - timedelta(minutes=1),
+            now=lambda: now,
+        )
+        decision = observer.evaluate_once()
+
+        with session_factory() as session:
+            latest_decision = StrategyDecisionsRepository(session).get_latest_decision()
+            dry_run_repository = StrategyDryRunRepository(session)
+            open_positions = dry_run_repository.list_open_positions(
+                strategy_id=config.strategy_id
+            )
+            events = dry_run_repository.list_recent_events(limit=10)
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+        assert decision is not None
+        assert latest_decision is not None
+        assert latest_decision.decision_state == STATE_ENTER_DRY_RUN
+        assert len(open_positions) == 1
+        assert open_positions[0].decision_id == latest_decision.decision_id
+        assert open_positions[0].open_price == Decimal("0.63")
+        assert len(events) == 1
+        assert events[0].event_type == STATE_ENTER_DRY_RUN
+        assert heartbeat is not None
+        assert heartbeat.metadata_["strategy"]["dry_run"]["enabled"] is True
+        assert heartbeat.metadata_["strategy"]["dry_run"]["open_position_count"] == 1
+    finally:
+        engine.dispose()
+
+
+def test_strategy_dry_run_mode_without_flag_stays_observe_only(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"APP_MODE": "DRY_RUN"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(session, now=now)
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_OBSERVE_ONLY_MARKET
+    assert decision.primary_reason == "dry_run_disabled_observe_only"
+    assert decision.measurements["dry_run_risk_state"] == "dry_run_disabled"
+
+
+def test_strategy_blocks_weak_brti_impulse(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"STRATEGY_BRTI_MIN_MOVE_LONG_BPS": "999"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(session, now=now)
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_IMPULSE_TOO_WEAK
+    assert decision.primary_reason == "weak_long_brti_move"
+    assert decision.measurements["brti_move_long_bps"] is not None
 
 
 def test_strategy_observer_prioritizes_reference_before_book(session) -> None:
@@ -130,8 +222,8 @@ def test_strategy_observer_blocks_unusable_desired_book(session) -> None:
         now=now,
     )
 
-    assert decision.decision_state == STATE_BOOK_UNUSABLE
-    assert decision.primary_reason == "desired_side_book_unusable"
+    assert decision.decision_state == STATE_SPREAD_TOO_WIDE
+    assert decision.primary_reason == "desired_side_spread_too_wide"
     assert decision.measurements["desired_side_spread_cents"] == "9"
 
 
@@ -276,18 +368,39 @@ def _seed_observable_context(
     yes_spread: Decimal = Decimal("0.02"),
 ) -> None:
     _seed_market(session, now=now)
-    ReferenceTicksRepository(session).insert_tick(
-        ReferenceTickInput(
-            source="kalshi_cfbenchmarks_brti",
-            received_at=now - timedelta(milliseconds=500),
-            source_ts=now - timedelta(milliseconds=500),
-            raw_value="62100",
-            parsed_value=Decimal("62100"),
-            source_age_ms=500,
-            parse_status="valid",
+    reference_repository = ReferenceTicksRepository(session)
+    for seconds_ago in range(180, -1, -5):
+        value = Decimal("62020") + Decimal(180 - seconds_ago) * Decimal("0.5")
+        received_at = now - timedelta(seconds=seconds_ago, milliseconds=500)
+        reference_repository.insert_tick(
+            ReferenceTickInput(
+                source="kalshi_cfbenchmarks_brti",
+                received_at=received_at,
+                source_ts=received_at,
+                raw_value=str(value),
+                parsed_value=value,
+                source_age_ms=500,
+                parse_status="valid",
+            )
+        )
+    orderbook_repository = OrderbookRepository(session)
+    orderbook_repository.insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker="KXBTC15M-ACTIVE",
+            received_at=now - timedelta(seconds=45),
+            sequence_number=122,
+            yes_bid=Decimal("0.55"),
+            yes_ask=Decimal("0.57"),
+            no_bid=Decimal("0.43"),
+            no_ask=Decimal("0.45"),
+            yes_spread=Decimal("0.02"),
+            no_spread=Decimal("0.02"),
+            yes_ask_count=Decimal("3"),
+            no_ask_count=Decimal("3"),
+            book_status="ok",
         )
     )
-    OrderbookRepository(session).insert_snapshot(
+    orderbook_repository.insert_snapshot(
         OrderbookSnapshotInput(
             market_ticker="KXBTC15M-ACTIVE",
             received_at=now - timedelta(milliseconds=500),
@@ -298,7 +411,39 @@ def _seed_observable_context(
             no_ask=Decimal("0.40"),
             yes_spread=yes_spread,
             no_spread=Decimal("0.02"),
+            yes_ask_count=Decimal("3"),
+            no_ask_count=Decimal("3"),
             book_status="ok",
+        )
+    )
+    PublicTradesRepository(session).insert_trade(
+        PublicTradeInput(
+            market_ticker="KXBTC15M-ACTIVE",
+            received_at=now - timedelta(seconds=10),
+            executed_at=now - timedelta(seconds=10),
+            price=Decimal("0.61"),
+            trade_count=Decimal("1"),
+            side_inferred="YES",
+        )
+    )
+    PublicTradesRepository(session).insert_trade(
+        PublicTradeInput(
+            market_ticker="KXBTC15M-ACTIVE",
+            received_at=now - timedelta(seconds=8),
+            executed_at=now - timedelta(seconds=8),
+            price=Decimal("0.62"),
+            trade_count=Decimal("1"),
+            side_inferred="YES",
+        )
+    )
+    PublicTradesRepository(session).insert_trade(
+        PublicTradeInput(
+            market_ticker="KXBTC15M-ACTIVE",
+            received_at=now - timedelta(seconds=5),
+            executed_at=now - timedelta(seconds=5),
+            price=Decimal("0.62"),
+            trade_count=Decimal("1"),
+            side_inferred="YES",
         )
     )
     session.commit()

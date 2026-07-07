@@ -49,6 +49,8 @@ def test_storage_status_reports_tables_without_retention_run(tmp_path) -> None:
         "reference_ticks",
         "worker_heartbeats",
         "strategy_decisions",
+        "strategy_dry_run_events",
+        "strategy_dry_run_positions",
         "markets",
     }
     assert "large-secret-payload" not in response.text

@@ -29,6 +29,8 @@ def test_schema_can_be_created_in_local_sqlite_database(tmp_path) -> None:
             "orderbook_snapshots",
             "public_trades",
             "strategy_decisions",
+            "strategy_dry_run_events",
+            "strategy_dry_run_positions",
             "worker_heartbeats",
             "storage_retention_runs",
         }
@@ -39,7 +41,7 @@ def test_schema_can_be_created_in_local_sqlite_database(tmp_path) -> None:
                 select(SchemaMigration).where(SchemaMigration.version == CURRENT_SCHEMA_VERSION)
             )
             assert migration is not None
-            assert session.scalar(select(func.count()).select_from(SchemaMigration)) == 3
+            assert session.scalar(select(func.count()).select_from(SchemaMigration)) == 4
 
         orderbook_columns = {
             column["name"] for column in inspector.get_columns("orderbook_snapshots")

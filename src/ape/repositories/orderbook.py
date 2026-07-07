@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from sqlalchemy import desc, select
+from datetime import datetime
+
+from sqlalchemy import asc, desc, select
 from sqlalchemy.orm import Session
 
 from ape.db.models import OrderbookSnapshot
@@ -30,4 +32,23 @@ class OrderbookRepository:
             select(OrderbookSnapshot)
             .order_by(desc(OrderbookSnapshot.received_at), desc(OrderbookSnapshot.id))
             .limit(1)
+        )
+
+    def get_snapshots_since(
+        self,
+        market_ticker: str,
+        since: datetime,
+        *,
+        limit: int,
+    ) -> list[OrderbookSnapshot]:
+        return list(
+            self.session.scalars(
+                select(OrderbookSnapshot)
+                .where(
+                    OrderbookSnapshot.market_ticker == market_ticker,
+                    OrderbookSnapshot.received_at >= since,
+                )
+                .order_by(asc(OrderbookSnapshot.received_at), asc(OrderbookSnapshot.id))
+                .limit(limit)
+            )
         )

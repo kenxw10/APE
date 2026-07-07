@@ -18,6 +18,8 @@ ALLOWED_RETENTION_TABLES = {
     "public_trades",
     "reference_ticks",
     "strategy_decisions",
+    "strategy_dry_run_events",
+    "strategy_dry_run_positions",
     "worker_heartbeats",
 }
 JSON_FIELDS = {

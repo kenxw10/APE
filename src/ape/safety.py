@@ -33,8 +33,8 @@ def assess_startup_safety(config: AppConfig) -> SafetyAssessment:
     blockers: list[str] = []
     warnings: list[str] = []
 
-    if config.app_mode is not AppMode.OBSERVER:
-        blockers.append("Current safety policy only permits APP_MODE=OBSERVER.")
+    if config.app_mode not in {AppMode.OBSERVER, AppMode.DRY_RUN}:
+        blockers.append("Current safety policy only permits APP_MODE=OBSERVER or DRY_RUN.")
 
     if config.trading_enabled:
         blockers.append("TRADING_ENABLED=true is blocked in PR 1.")

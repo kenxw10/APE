@@ -117,6 +117,44 @@ class StrategyDecisionInput:
 
 
 @dataclass(frozen=True)
+class StrategyDryRunPositionInput:
+    position_id: str
+    strategy_id: str
+    market_ticker: str
+    decision_id: str
+    side_candidate: str
+    economic_side: str
+    opened_at: datetime
+    open_price: Decimal
+    contract_count: int
+    entry_reason: str
+    status: str
+    boundary: Decimal | None = None
+    brti_at_entry: Decimal | None = None
+    distance_bps_at_entry: Decimal | None = None
+    closed_at: datetime | None = None
+    close_price: Decimal | None = None
+    close_reason: str | None = None
+    realized_pnl_cents: Decimal | None = None
+    measurements: JsonPayload | None = None
+
+
+@dataclass(frozen=True)
+class StrategyDryRunEventInput:
+    event_id: str
+    event_type: str
+    occurred_at: datetime
+    position_id: str | None = None
+    decision_id: str | None = None
+    market_ticker: str | None = None
+    side_candidate: str | None = None
+    price: Decimal | None = None
+    contract_count: int | None = None
+    reason: str | None = None
+    measurements: JsonPayload | None = None
+
+
+@dataclass(frozen=True)
 class WorkerHeartbeatInput:
     service_name: str
     heartbeat_at: datetime

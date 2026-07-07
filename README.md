@@ -22,6 +22,8 @@ PR 8 adds an observer-only strategy decision ledger v0. It is disabled by defaul
 
 PR 8a adds worker-owned storage retention and read-only database lifecycle status. It is disabled by default, deletes old high-volume observer rows in bounded batches when enabled on the Railway worker, strips raw payload JSON before normalized rows expire, writes audit rows to `storage_retention_runs`, and exposes read-only `/storage/status`. It does not add a destructive public API endpoint and does not run `VACUUM FULL`.
 
+PR 9 adds the first dry-run-only BTC15 momentum decision engine. It is disabled by default, runs only on persisted market/BRTI/orderbook/trade rows when `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`, and `STRATEGY_DRY_RUN_ENABLED=true`, writes hypothetical simulated positions/events to dry-run ledger tables, and exposes read-only dry-run endpoints. It does not place orders, paper trade, live trade, read account balances, subscribe to private/user channels, or add execution controls.
+
 ## Safety Defaults
 
 The default configuration is intentionally non-trading:
@@ -34,7 +36,7 @@ EXECUTE=false
 
 Startup is blocked if:
 
-- `APP_MODE` is anything other than `OBSERVER`
+- `APP_MODE` is anything other than `OBSERVER` or `DRY_RUN`
 - `TRADING_ENABLED=true`
 - `EXECUTE=true`
 
@@ -49,6 +51,8 @@ If Kalshi credentials are missing, `/kalshi/status` and `/markets/active` return
 `KALSHI_CFBENCHMARKS_ENABLED=false` by default. BRTI collection is worker-only and does not change trading safety.
 
 `STRATEGY_OBSERVER_ENABLED=false` by default. The strategy observer is a decision ledger only; it records why the system would keep observing and never emits enter/order/execution actions.
+
+`STRATEGY_DRY_RUN_ENABLED=false` by default. Dry-run simulation requires `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`, `STRATEGY_DRY_RUN_ENABLED=true`, `TRADING_ENABLED=false`, and `EXECUTE=false`. Dry-run is a hypothetical ledger only and is not paper trading.
 
 `STORAGE_RETENTION_ENABLED=false` by default. Retention is worker-only observer infrastructure; it deletes old persisted diagnostics and raw payload JSON only when explicitly enabled on the Railway worker.
 
@@ -103,6 +107,10 @@ Invoke-RestMethod "http://127.0.0.1:8000/reference/brti/series?window_seconds=90
 Invoke-RestMethod http://127.0.0.1:8000/strategy/status
 Invoke-RestMethod http://127.0.0.1:8000/strategy/decisions/latest
 Invoke-RestMethod "http://127.0.0.1:8000/strategy/decisions/recent?limit=100"
+Invoke-RestMethod http://127.0.0.1:8000/strategy/dry-run/status
+Invoke-RestMethod http://127.0.0.1:8000/strategy/dry-run/positions/open
+Invoke-RestMethod "http://127.0.0.1:8000/strategy/dry-run/positions/recent?limit=100"
+Invoke-RestMethod "http://127.0.0.1:8000/strategy/dry-run/events/recent?limit=100"
 Invoke-RestMethod http://127.0.0.1:8000/storage/status
 ```
 
@@ -119,6 +127,8 @@ When `KALSHI_WS_ENABLED=false`, `/ws/status` should report `connection_state` as
 When `KALSHI_CFBENCHMARKS_ENABLED=false`, `/reference/brti/status` should report `connection_state` as `disabled` and `stale` as `False`.
 
 When `STRATEGY_OBSERVER_ENABLED=false`, `/strategy/status` should report `connection_state` as `disabled` and `stale` as `False`.
+
+When `STRATEGY_DRY_RUN_ENABLED=false`, `/strategy/dry-run/status` should report `enabled` as `False` and `open_position_count` as `0`.
 
 When `STORAGE_RETENTION_ENABLED=false`, `/storage/status` should report retention as disabled while still returning read-only table stats if `DATABASE_URL` is configured.
 
@@ -223,6 +233,40 @@ The read-only endpoints are:
 
 Expected behavior: the latest decision state is one of the observer-safe diagnostic states such as `OBSERVE_ONLY_MARKET`, `REFERENCE_STALE`, `KALSHI_STALE`, or `TOO_CLOSE_TO_BOUNDARY`. There are no enter, fill, order, paper-trading, or live-trading states.
 
+## Dry-Run Strategy Engine
+
+PR 9 is dry-run only. It upgrades the strategy observer from a skip ledger to a momentum evaluator that can emit `ENTER_DRY_RUN`, `MANAGE_POSITION`, `EXIT_SIGNAL`, and `FORCE_EXIT` simulation states only when all safety and strategy gates pass.
+
+Required Railway worker settings for dry-run validation:
+
+```text
+APP_MODE=DRY_RUN
+STRATEGY_OBSERVER_ENABLED=true
+STRATEGY_DRY_RUN_ENABLED=true
+TRADING_ENABLED=false
+EXECUTE=false
+```
+
+Dry-run remains disabled unless both `APP_MODE=DRY_RUN` and `STRATEGY_DRY_RUN_ENABLED=true` are set. To disable it, set:
+
+```text
+STRATEGY_DRY_RUN_ENABLED=false
+APP_MODE=OBSERVER
+```
+
+Dry-run differs from paper trading: APE creates only hypothetical database ledger rows in `strategy_dry_run_positions` and `strategy_dry_run_events`. It does not place orders, read balances, consume private/user streams, create real positions, cancel orders, or call Kalshi order APIs.
+
+Read-only dry-run endpoints:
+
+```text
+/strategy/dry-run/status
+/strategy/dry-run/positions/open
+/strategy/dry-run/positions/recent?limit=100
+/strategy/dry-run/events/recent?limit=100
+```
+
+The evaluator checks safety, active market, boundary parsing, BRTI freshness, Kalshi book freshness, entry timing, boundary distance, spread/depth, BRTI impulse, anti-chop, contract confirmation, recent public-trade confirmation, and dry-run risk limits. Observer mode still stops at `OBSERVE_ONLY_MARKET`; PR 9 never emits `ENTER_PAPER` or `ENTER_LIVE`.
+
 ## Storage Retention
 
 PR 8a is observer infrastructure for Railway Postgres lifecycle control. Retention is disabled by default and should be enabled only on the Railway worker after merge.
@@ -240,6 +284,8 @@ STORAGE_RETENTION_PUBLIC_TRADES_SECONDS=86400
 STORAGE_RETENTION_REFERENCE_TICKS_SECONDS=86400
 STORAGE_RETENTION_WORKER_HEARTBEATS_SECONDS=21600
 STORAGE_RETENTION_STRATEGY_DECISIONS_SECONDS=1209600
+STORAGE_RETENTION_DRY_RUN_POSITIONS_SECONDS=2592000
+STORAGE_RETENTION_DRY_RUN_EVENTS_SECONDS=2592000
 STORAGE_RETENTION_MARKETS_SECONDS=2592000
 STORAGE_RETENTION_RAW_PAYLOAD_ORDERBOOK_SECONDS=900
 STORAGE_RETENTION_RAW_PAYLOAD_PUBLIC_TRADES_SECONDS=3600
@@ -248,7 +294,7 @@ STORAGE_RETENTION_STATUS_WARN_BYTES=40000000000
 STORAGE_RETENTION_STATUS_CRITICAL_BYTES=47500000000
 ```
 
-Retention deletes old `orderbook_snapshots`, `public_trades`, `reference_ticks`, `worker_heartbeats`, `strategy_decisions`, and old closed `markets` rows in bounded batches. It strips `raw_payload` JSON from orderbook, public trade, and reference tick rows earlier than it deletes the normalized row, while preserving `raw_payload_hash` and parsed fields. Strategy decisions and markets are retained longer because they are lower volume and useful for audit.
+Retention deletes old `orderbook_snapshots`, `public_trades`, `reference_ticks`, `worker_heartbeats`, `strategy_decisions`, dry-run ledger rows, and old closed `markets` rows in bounded batches. It strips `raw_payload` JSON from orderbook, public trade, and reference tick rows earlier than it deletes the normalized row, while preserving `raw_payload_hash` and parsed fields. Strategy decisions, dry-run ledger rows, and markets are retained longer because they are lower volume and useful for audit.
 
 The read-only endpoint is:
 
@@ -271,7 +317,7 @@ $env:DATABASE_URL="sqlite+pysqlite:///./local-ape.sqlite"
 python -m ape.db.migrations
 ```
 
-Successful output should say the database schema is current. The command does not print the database URL. PR 8a adds the `storage_retention_runs` audit table.
+Successful output should say the database schema is current. The command does not print the database URL. PR 8a adds the `storage_retention_runs` audit table. PR 9 adds the `strategy_dry_run_positions` and `strategy_dry_run_events` simulation ledger tables.
 
 ## Railway Deployment
 
@@ -322,7 +368,7 @@ Successful startup should log that the worker is running in observer mode. Stop 
 - Kalshi order placement
 - Order executor
 - Kalshi WebSocket ingestion beyond observer-only public market/reference capture
-- Trading strategy execution
+- Real or paper trading strategy execution beyond dry-run simulation
 - CF Benchmarks/BRTI REST intake
 - Real dashboard portfolio/ledger endpoints
 - Railway cron
