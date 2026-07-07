@@ -69,15 +69,18 @@ PR 7a post-merge checkpoint:
   `/health`, `/safety`, `/db/status`, and `/ready`.
 - Confirm `reference_ticks` rows are being written when Kalshi emits BRTI
   `cfbenchmarks_value` events.
-- Confirm `/reference/brti/status` reports `transport_stale=false`,
-  `persistence_stale=false`, no blockers, and null unresolved error fields when
-  live BRTI rows are arriving. `source_stale` may be true if upstream CF
+- Confirm `/reference/brti/status` reports `status_category=healthy`,
+  `transport_stale=false`, `persistence_stale=false`,
+  `worker_heartbeat_stale=false`, no blockers, and null unresolved error fields
+  when live BRTI rows are arriving. `source_stale` may be true if upstream CF
   timestamps lag; that is visible but not a global collector failure by itself.
-- Confirm `/reference/brti/series` returns a rolling 900-second, 16,000-point
+- Confirm stale BRTI states include `stale_reason`, `stale_age_ms`,
+  `recovery_state`, `recommended_action`, and worker heartbeat age fields.
+- Confirm `/reference/brti/series` returns a bounded 900-second, 16,000-point
   maximum series sorted by `received_at` and does not return raw payloads.
-- Confirm the dashboard Reference Price CF/BRTI chart says live BRTI when the
-  series endpoint has points, and fallback/scaffold only when live series data
-  is unavailable.
+- Confirm the dashboard Reference Price CF/BRTI chart uses the current fixed
+  Kalshi 15-minute interval, keeps Interval Open fixed to the first valid BRTI
+  tick at or after interval start, and resets at the next interval boundary.
 - BRTI final-minute averages may be stored when present, but no strategy,
   position-management, paper trading, live trading, order, fill, or decision-ledger
   logic is enabled by PR 7a.

@@ -23,8 +23,19 @@ class BrtiReferenceStatusResponse(BaseModel):
     subscription_request_id: int | None
     subscribed_channels: list[str]
     connection_state: str
+    status_category: str
+    connection_state_detail: str | None
+    worker_heartbeat_at: datetime | None
+    worker_heartbeat_age_ms: int | None
+    worker_started_at: datetime | None
+    worker_heartbeat_stale: bool
     last_connected_at: datetime | None
+    last_successful_subscribe_at: datetime | None
+    last_subscription_ack_at: datetime | None
     latest_tick_received_at: datetime | None
+    last_valid_tick_at: datetime | None
+    last_healthy_at: datetime | None
+    last_recovered_at: datetime | None
     latest_source_ts: datetime | None
     latest_parsed_value: Decimal | None
     latest_trailing_60s_avg: Decimal | None
@@ -48,11 +59,22 @@ class BrtiReferenceStatusResponse(BaseModel):
     persistence_stale: bool
     trade_ready_fresh: bool
     stale: bool
+    stale_reason: str | None
+    stale_age_ms: int | None
+    stale_since: datetime | None
     last_message_at: datetime | None
     last_persisted_at: datetime | None
+    time_since_last_message_ms: int | None
+    time_since_last_persisted_ms: int | None
+    time_since_last_valid_tick_ms: int | None
     last_error_type: str | None
     last_error_message: str | None
     reconnect_count: int
+    recovery_state: str | None
+    consecutive_stale_count: int
+    consecutive_reconnect_count: int
+    consecutive_fresh_tick_count: int
+    recommended_action: str | None
     warnings: list[str]
     blockers: list[str]
     checked_at: datetime

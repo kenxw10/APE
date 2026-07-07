@@ -70,6 +70,12 @@ class AppConfig:
     kalshi_cfbenchmarks_source_age_warn_ms: int = 45_000
     kalshi_cfbenchmarks_kalshi_received_warn_ms: int = 10_000
     kalshi_cfbenchmarks_trade_fresh_ms: int = 2_000
+    kalshi_cfbenchmarks_first_tick_timeout_seconds: float = 15.0
+    kalshi_cfbenchmarks_no_valid_tick_reconnect_seconds: float = 15.0
+    kalshi_cfbenchmarks_max_consecutive_stale_before_reconnect: int = 2
+    kalshi_cfbenchmarks_heartbeat_stale_after_seconds: float = 15.0
+    kalshi_cfbenchmarks_status_grace_seconds: float = 3.0
+    kalshi_cfbenchmarks_recovery_required_fresh_ticks: int = 2
     strategy_observer_enabled: bool = False
     strategy_observer_poll_seconds: float = 1.0
     strategy_observer_decision_ttl_seconds: float = 5.0
@@ -235,6 +241,36 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         kalshi_cfbenchmarks_trade_fresh_ms=_parse_int(
             "KALSHI_CFBENCHMARKS_TRADE_FRESH_MS",
             _get(source, "KALSHI_CFBENCHMARKS_TRADE_FRESH_MS", "2000"),
+        ),
+        kalshi_cfbenchmarks_first_tick_timeout_seconds=_parse_float(
+            "KALSHI_CFBENCHMARKS_FIRST_TICK_TIMEOUT_SECONDS",
+            _get(source, "KALSHI_CFBENCHMARKS_FIRST_TICK_TIMEOUT_SECONDS", "15"),
+        ),
+        kalshi_cfbenchmarks_no_valid_tick_reconnect_seconds=_parse_float(
+            "KALSHI_CFBENCHMARKS_NO_VALID_TICK_RECONNECT_SECONDS",
+            _get(source, "KALSHI_CFBENCHMARKS_NO_VALID_TICK_RECONNECT_SECONDS", "15"),
+        ),
+        kalshi_cfbenchmarks_max_consecutive_stale_before_reconnect=(
+            _parse_non_negative_int(
+                "KALSHI_CFBENCHMARKS_MAX_CONSECUTIVE_STALE_BEFORE_RECONNECT",
+                _get(
+                    source,
+                    "KALSHI_CFBENCHMARKS_MAX_CONSECUTIVE_STALE_BEFORE_RECONNECT",
+                    "2",
+                ),
+            )
+        ),
+        kalshi_cfbenchmarks_heartbeat_stale_after_seconds=_parse_float(
+            "KALSHI_CFBENCHMARKS_HEARTBEAT_STALE_AFTER_SECONDS",
+            _get(source, "KALSHI_CFBENCHMARKS_HEARTBEAT_STALE_AFTER_SECONDS", "15"),
+        ),
+        kalshi_cfbenchmarks_status_grace_seconds=_parse_float(
+            "KALSHI_CFBENCHMARKS_STATUS_GRACE_SECONDS",
+            _get(source, "KALSHI_CFBENCHMARKS_STATUS_GRACE_SECONDS", "3"),
+        ),
+        kalshi_cfbenchmarks_recovery_required_fresh_ticks=_parse_non_negative_int(
+            "KALSHI_CFBENCHMARKS_RECOVERY_REQUIRED_FRESH_TICKS",
+            _get(source, "KALSHI_CFBENCHMARKS_RECOVERY_REQUIRED_FRESH_TICKS", "2"),
         ),
         strategy_observer_enabled=_parse_bool(
             "STRATEGY_OBSERVER_ENABLED",

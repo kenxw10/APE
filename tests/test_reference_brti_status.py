@@ -28,6 +28,8 @@ def test_brti_status_disabled_without_credentials() -> None:
     assert body["enabled"] is False
     assert body["configured"] is False
     assert body["connection_state"] == "disabled"
+    assert body["status_category"] == "disabled"
+    assert body["recommended_action"] is None
     assert body["stale"] is False
     assert "PRIVATE KEY" not in response.text
 
@@ -43,7 +45,9 @@ def test_brti_status_enabled_without_credentials_is_safe() -> None:
     assert body["enabled"] is True
     assert body["signer_ready"] is False
     assert body["connection_state"] == "not_configured"
+    assert body["status_category"] == "waiting"
     assert "kalshi_cfbenchmarks_credentials_not_configured_or_not_parseable" in body["blockers"]
+    assert body["recommended_action"] == "check_worker_kalshi_credentials"
     assert body["stale"] is False
     assert "PRIVATE KEY" not in response.text
 
@@ -231,6 +235,9 @@ def test_brti_status_uses_worker_enabled_state_when_api_disabled(tmp_path) -> No
         assert body["signer_ready"] is True
         assert body["index_ids"] == ["BRTI"]
         assert body["connection_state"] == "subscribed"
+        assert body["status_category"] == "healthy"
+        assert body["stale_reason"] is None
+        assert body["time_since_last_valid_tick_ms"] is not None
         assert body["stale"] is False
         assert body["blockers"] == []
     finally:
@@ -296,6 +303,9 @@ def test_brti_status_reports_stale_persisted_tick(tmp_path) -> None:
         assert response.status_code == 200
         body = response.json()
         assert body["stale"] is True
+        assert body["status_category"] == "stale_persistence"
+        assert body["stale_reason"] == "brti_reference_persistence_stale"
+        assert body["stale_age_ms"] is not None
         assert body["transport_stale"] is False
         assert body["persistence_stale"] is True
         assert "brti_reference_persistence_stale" in body["warnings"]
@@ -433,6 +443,8 @@ def test_brti_status_reports_source_age_warning_without_global_stale(tmp_path) -
         assert response.status_code == 200
         body = response.json()
         assert body["source_stale"] is True
+        assert body["status_category"] == "upstream_lag"
+        assert body["stale_reason"] == "brti_reference_source_age_stale"
         assert body["stale"] is False
         assert "brti_reference_source_age_stale" in body["warnings"]
     finally:
@@ -500,8 +512,79 @@ def test_brti_status_reports_transport_stale_without_recent_backend_message(tmp_
         body = response.json()
         assert body["transport_stale"] is True
         assert body["persistence_stale"] is False
+        assert body["status_category"] == "stale_transport"
+        assert body["stale_reason"] == "brti_reference_transport_stale"
         assert body["stale"] is True
         assert "brti_reference_transport_stale" in body["warnings"]
+    finally:
+        engine.dispose()
+
+
+def test_brti_status_reports_stale_worker_heartbeat(tmp_path) -> None:
+    now = datetime.now(UTC)
+    old_heartbeat_time = now - timedelta(seconds=30)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_brti_worker_stale.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_HEARTBEAT_STALE_AFTER_SECONDS": "3",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        with session_factory() as session:
+            ReferenceTicksRepository(session).insert_tick(
+                ReferenceTickInput(
+                    source=BRTI_SOURCE,
+                    received_at=now,
+                    source_ts=now,
+                    kalshi_received_at=now,
+                    parse_status="valid",
+                    parsed_value=Decimal("68000.12"),
+                    source_age_ms=1000,
+                )
+            )
+            WorkerHeartbeatRepository(session).record_heartbeat(
+                WorkerHeartbeatInput(
+                    service_name="ape-worker",
+                    started_at=old_heartbeat_time - timedelta(minutes=1),
+                    heartbeat_at=old_heartbeat_time,
+                    app_mode="OBSERVER",
+                    is_safe=True,
+                    metadata={
+                        "reference": {
+                            "brti": {
+                                "enabled": True,
+                                "configured": True,
+                                "signer_ready": True,
+                                "connection_state": "subscribed",
+                                "last_message_at": _isoformat_z(now),
+                                "last_persisted_at": _isoformat_z(now),
+                                "warnings": [],
+                                "blockers": [],
+                            }
+                        }
+                    },
+                )
+            )
+            session.commit()
+
+        app = create_app(config)
+        with TestClient(app) as client:
+            response = client.get("/reference/brti/status")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["worker_heartbeat_stale"] is True
+        assert body["status_category"] == "worker_stale"
+        assert body["stale_reason"] == "brti_reference_worker_heartbeat_stale"
+        assert body["stale"] is True
+        assert body["recommended_action"] == "restart_or_inspect_railway_worker"
     finally:
         engine.dispose()
 

@@ -6,7 +6,7 @@ import logging
 import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from inspect import isawaitable
 from typing import Any
 
@@ -107,8 +107,15 @@ class BrtiReferenceStatus:
     subscribed_channels: list[str] = field(default_factory=list)
     connection_state: str = "disabled"
     last_connected_at: datetime | None = None
+    last_successful_subscribe_at: datetime | None = None
+    last_subscription_ack_at: datetime | None = None
     last_message_at: datetime | None = None
     last_persisted_at: datetime | None = None
+    last_valid_tick_at: datetime | None = None
+    last_healthy_at: datetime | None = None
+    last_recovered_at: datetime | None = None
+    stale_since: datetime | None = None
+    last_stale_check_at: datetime | None = None
     latest_source_ts: datetime | None = None
     latest_value: str | None = None
     latest_trailing_60s_avg: str | None = None
@@ -120,6 +127,10 @@ class BrtiReferenceStatus:
     reconnect_count: int = 0
     inter_arrival_ms: int | None = None
     source_gap_ms: int | None = None
+    recovery_state: str = "idle"
+    consecutive_stale_count: int = 0
+    consecutive_reconnect_count: int = 0
+    consecutive_fresh_tick_count: int = 0
     duplicate_source_ts_count: int = 0
     out_of_order_source_ts_count: int = 0
     skipped_tick_count: int = 0
@@ -141,8 +152,19 @@ class BrtiReferenceStatus:
             "subscribed_channels": self.subscribed_channels,
             "connection_state": self.connection_state,
             "last_connected_at": _isoformat_or_none(self.last_connected_at),
+            "last_successful_subscribe_at": _isoformat_or_none(
+                self.last_successful_subscribe_at
+            ),
+            "last_subscription_ack_at": _isoformat_or_none(
+                self.last_subscription_ack_at
+            ),
             "last_message_at": _isoformat_or_none(self.last_message_at),
             "last_persisted_at": _isoformat_or_none(self.last_persisted_at),
+            "last_valid_tick_at": _isoformat_or_none(self.last_valid_tick_at),
+            "last_healthy_at": _isoformat_or_none(self.last_healthy_at),
+            "last_recovered_at": _isoformat_or_none(self.last_recovered_at),
+            "stale_since": _isoformat_or_none(self.stale_since),
+            "last_stale_check_at": _isoformat_or_none(self.last_stale_check_at),
             "latest_source_ts": _isoformat_or_none(self.latest_source_ts),
             "latest_value": self.latest_value,
             "latest_trailing_60s_avg": self.latest_trailing_60s_avg,
@@ -154,6 +176,10 @@ class BrtiReferenceStatus:
             "reconnect_count": self.reconnect_count,
             "inter_arrival_ms": self.inter_arrival_ms,
             "source_gap_ms": self.source_gap_ms,
+            "recovery_state": self.recovery_state,
+            "consecutive_stale_count": self.consecutive_stale_count,
+            "consecutive_reconnect_count": self.consecutive_reconnect_count,
+            "consecutive_fresh_tick_count": self.consecutive_fresh_tick_count,
             "duplicate_source_ts_count": self.duplicate_source_ts_count,
             "out_of_order_source_ts_count": self.out_of_order_source_ts_count,
             "skipped_tick_count": self.skipped_tick_count,
@@ -384,6 +410,7 @@ class KalshiWsCollector:
                 if brti_enabled:
                     self.brti_status.connection_state = "connected"
                     self.brti_status.last_connected_at = self.now()
+                    self.brti_status.recovery_state = "connecting"
                 if include_market:
                     self.status.last_connected_at = self.now()
                 self.record_heartbeat()
@@ -397,9 +424,11 @@ class KalshiWsCollector:
                     self.status.connection_state = "subscribed"
                 if brti_enabled:
                     self.brti_status.connection_state = "subscribed"
+                    self.brti_status.last_successful_subscribe_at = self.now()
+                    self.brti_status.recovery_state = "waiting_for_fresh_tick"
                 self.record_heartbeat()
 
-                await self._read_messages(
+                read_result = await self._read_messages(
                     websocket,
                     market_ticker,
                     market_close_time,
@@ -408,7 +437,7 @@ class KalshiWsCollector:
                 )
                 if include_market:
                     self.status.reconnect_count = 0
-                if include_reference:
+                if include_reference and not _reference_reconnect_result(read_result):
                     self.brti_status.reconnect_count = 0
             finally:
                 await _close_websocket(websocket)
@@ -483,7 +512,7 @@ class KalshiWsCollector:
         market_close_time: datetime | None,
         stop_event: threading.Event,
         include_reference: bool,
-    ) -> None:
+    ) -> str | None:
         orderbook = OrderbookState(market_ticker=market_ticker or "")
         message_iterator = websocket.__aiter__()
 
@@ -492,26 +521,41 @@ class KalshiWsCollector:
                 self.status.connection_state = "market_roll_reresolve"
                 self._add_warning("active_market_window_closed")
                 self.record_heartbeat()
-                return
+                return "market_roll_reresolve"
 
             try:
                 raw_message = await _next_websocket_message(
                     message_iterator,
-                    _seconds_until_market_close(self.now(), market_close_time),
+                    _minimum_timeout_seconds(
+                        _seconds_until_market_close(self.now(), market_close_time),
+                        self._seconds_until_reference_check(self.now())
+                        if include_reference
+                        else None,
+                    ),
                 )
             except StopAsyncIteration:
-                return
+                return None
             except TimeoutError:
+                if include_reference and self._reference_stale_reason(self.now()) is not None:
+                    reconnect_reason = self._handle_reference_stale_if_due(self.now())
+                    self.record_heartbeat()
+                    if reconnect_reason is not None:
+                        return reconnect_reason
+                    continue
                 self.status.connection_state = "market_roll_reresolve"
                 self._add_warning("active_market_window_closed")
                 self.record_heartbeat()
-                return
+                return "market_roll_reresolve"
 
             received_at = self.now()
             parsed_json = _json_or_none(raw_message)
             if parsed_json is None:
                 self._add_warning("invalid_websocket_json")
                 self.record_heartbeat(force=False)
+                reconnect_reason = self._handle_reference_stale_if_due(received_at)
+                if reconnect_reason is not None:
+                    self.record_heartbeat()
+                    return reconnect_reason
                 continue
 
             if include_reference and is_cfbenchmarks_value_payload(parsed_json):
@@ -524,6 +568,10 @@ class KalshiWsCollector:
                 self.brti_status.last_message_at = received_at
                 self._handle_reference_message(reference_message)
                 self.record_heartbeat(force=self._consume_force_next_heartbeat())
+                reconnect_reason = self._handle_reference_stale_if_due(received_at)
+                if reconnect_reason is not None:
+                    self.record_heartbeat()
+                    return reconnect_reason
                 continue
 
             if include_reference and self._handle_reference_control_payload(
@@ -532,10 +580,18 @@ class KalshiWsCollector:
                 market_ticker=market_ticker,
             ):
                 self.record_heartbeat(force=self._consume_force_next_heartbeat())
+                reconnect_reason = self._handle_reference_stale_if_due(received_at)
+                if reconnect_reason is not None:
+                    self.record_heartbeat()
+                    return reconnect_reason
                 continue
 
             if market_ticker is None:
                 self.record_heartbeat(force=False)
+                reconnect_reason = self._handle_reference_stale_if_due(received_at)
+                if reconnect_reason is not None:
+                    self.record_heartbeat()
+                    return reconnect_reason
                 continue
 
             message = parse_ws_payload(
@@ -549,8 +605,14 @@ class KalshiWsCollector:
                 self.status.connection_state = "resubscribe_pending"
                 self._add_warning("kalshi_ws_resubscribe_requested")
                 self.record_heartbeat()
-                return
+                return resubscribe_reason
             self.record_heartbeat(force=self._consume_force_next_heartbeat())
+            reconnect_reason = self._handle_reference_stale_if_due(received_at)
+            if reconnect_reason is not None:
+                self.record_heartbeat()
+                return reconnect_reason
+
+        return None
 
     def _handle_reference_message(self, message: ParsedReferenceMessage) -> None:
         if message.kind == "ignored":
@@ -698,6 +760,9 @@ class KalshiWsCollector:
 
         self.brti_status.last_message_at = received_at
         if message_type != "error":
+            if message_type in {"subscribed", "ok"}:
+                self.brti_status.last_subscription_ack_at = received_at
+                self.brti_status.recovery_state = "waiting_for_fresh_tick"
             return True
 
         self._set_reference_error(
@@ -819,6 +884,8 @@ class KalshiWsCollector:
                 ),
             )
         self.brti_status.last_persisted_at = row.received_at
+        self.brti_status.last_valid_tick_at = row.received_at
+        self.brti_status.last_healthy_at = row.received_at
         self.brti_status.latest_source_ts = row.source_ts
         self.brti_status.latest_value = _decimal_text_or_none(row.parsed_value)
         self.brti_status.latest_trailing_60s_avg = _decimal_text_or_none(
@@ -830,7 +897,148 @@ class KalshiWsCollector:
         )
         self.brti_status.final_minute_average_status = row.final_minute_average_status
         self.brti_status.source_age_ms = row.source_age_ms
+        self._mark_reference_fresh(row.received_at)
         return True
+
+    def _seconds_until_reference_check(self, checked_at: datetime) -> float | None:
+        reason = self._reference_stale_reason(checked_at)
+        if reason is not None:
+            if self.brti_status.last_stale_check_at is not None:
+                grace_deadline = _as_utc(self.brti_status.last_stale_check_at) + timedelta(
+                    seconds=self.config.kalshi_cfbenchmarks_status_grace_seconds
+                )
+                return max(0.0, (grace_deadline - _as_utc(checked_at)).total_seconds())
+            return 0.0
+
+        if self._reference_subscription_error_active():
+            return None
+
+        last_valid = _latest_datetime(
+            self.brti_status.last_valid_tick_at,
+            self.brti_status.last_persisted_at,
+        )
+        last_connected = self.brti_status.last_connected_at
+        if last_connected is not None and (
+            last_valid is None or _as_utc(last_valid) < _as_utc(last_connected)
+        ):
+            deadline = _as_utc(last_connected) + timedelta(
+                seconds=self.config.kalshi_cfbenchmarks_first_tick_timeout_seconds
+            )
+        elif last_valid is not None:
+            deadline = _as_utc(last_valid) + timedelta(
+                seconds=(
+                    self.config.kalshi_cfbenchmarks_no_valid_tick_reconnect_seconds
+                )
+            )
+        elif last_connected is not None:
+            deadline = _as_utc(last_connected) + timedelta(
+                seconds=self.config.kalshi_cfbenchmarks_first_tick_timeout_seconds
+            )
+        else:
+            return None
+
+        if self.brti_status.last_stale_check_at is not None:
+            grace_deadline = _as_utc(self.brti_status.last_stale_check_at) + timedelta(
+                seconds=self.config.kalshi_cfbenchmarks_status_grace_seconds
+            )
+            if grace_deadline > deadline:
+                deadline = grace_deadline
+
+        return max(0.0, (deadline - _as_utc(checked_at)).total_seconds())
+
+    def _reference_stale_reason(self, checked_at: datetime) -> str | None:
+        if not self._reference_collection_enabled():
+            return None
+        if self._reference_subscription_error_active():
+            return None
+
+        last_valid = _latest_datetime(
+            self.brti_status.last_valid_tick_at,
+            self.brti_status.last_persisted_at,
+        )
+        last_connected = self.brti_status.last_connected_at
+        if last_connected is not None and (
+            last_valid is None or _as_utc(last_valid) < _as_utc(last_connected)
+        ):
+            elapsed = (_as_utc(checked_at) - _as_utc(last_connected)).total_seconds()
+            if elapsed > self.config.kalshi_cfbenchmarks_first_tick_timeout_seconds:
+                return "brti_reference_first_tick_timeout"
+            return None
+
+        if last_valid is None:
+            return None
+
+        elapsed = (_as_utc(checked_at) - _as_utc(last_valid)).total_seconds()
+        if elapsed > self.config.kalshi_cfbenchmarks_no_valid_tick_reconnect_seconds:
+            return "brti_reference_no_valid_tick_timeout"
+        return None
+
+    def _handle_reference_stale_if_due(self, checked_at: datetime) -> str | None:
+        reason = self._reference_stale_reason(checked_at)
+        if reason is None:
+            return None
+
+        if self.brti_status.last_stale_check_at is not None:
+            elapsed = (
+                _as_utc(checked_at) - _as_utc(self.brti_status.last_stale_check_at)
+            ).total_seconds()
+            if elapsed < self.config.kalshi_cfbenchmarks_status_grace_seconds:
+                return None
+
+        self.brti_status.last_stale_check_at = checked_at
+        self.brti_status.stale_since = self.brti_status.stale_since or checked_at
+        self.brti_status.consecutive_stale_count += 1
+        self.brti_status.consecutive_fresh_tick_count = 0
+        self.brti_status.recovery_state = "waiting_for_fresh_tick"
+        self.brti_status.connection_state = "stale"
+        self._add_reference_warning(reason)
+        self._force_next_heartbeat = True
+
+        max_stale = max(
+            1,
+            self.config.kalshi_cfbenchmarks_max_consecutive_stale_before_reconnect,
+        )
+        if self.brti_status.consecutive_stale_count < max_stale:
+            return None
+
+        self.brti_status.connection_state = "reconnect_pending"
+        self.brti_status.recovery_state = "reconnecting"
+        self.brti_status.consecutive_reconnect_count += 1
+        self.brti_status.reconnect_count += 1
+        self._add_reference_warning("brti_reference_reconnect_requested")
+        return reason
+
+    def _mark_reference_fresh(self, checked_at: datetime) -> None:
+        was_recovering = self.brti_status.recovery_state in {
+            "reconnecting",
+            "waiting_for_fresh_tick",
+            "recovering",
+            "stale",
+        }
+        self.brti_status.consecutive_stale_count = 0
+        self.brti_status.last_stale_check_at = None
+        self.brti_status.stale_since = None
+        self.brti_status.consecutive_fresh_tick_count += 1
+        required_ticks = max(
+            1,
+            self.config.kalshi_cfbenchmarks_recovery_required_fresh_ticks,
+        )
+        if was_recovering and self.brti_status.consecutive_fresh_tick_count < required_ticks:
+            self.brti_status.recovery_state = "recovering"
+        else:
+            if was_recovering:
+                self.brti_status.last_recovered_at = checked_at
+            self.brti_status.recovery_state = "healthy"
+            self.brti_status.consecutive_reconnect_count = 0
+            self.brti_status.reconnect_count = 0
+        self._clear_reference_warnings(
+            "brti_reference_first_tick_timeout",
+            "brti_reference_no_valid_tick_timeout",
+            "brti_reference_reconnect_requested",
+        )
+
+    def _reference_subscription_error_active(self) -> bool:
+        return "kalshi_cfbenchmarks_subscription_error" in self.brti_status.blockers
 
     def record_heartbeat(self, *, force: bool = True) -> None:
         if self.session_factory is None:
@@ -1093,12 +1301,29 @@ def _seconds_until_market_close(now: datetime, close_time: datetime | None) -> f
     return max(0.0, (close_time.astimezone(UTC) - now.astimezone(UTC)).total_seconds())
 
 
+def _minimum_timeout_seconds(*values: float | None) -> float | None:
+    present = [value for value in values if value is not None]
+    return min(present) if present else None
+
+
 def _decimal_text_or_none(value: Any) -> str | None:
     return str(value) if value is not None else None
 
 
 def _as_utc(value: datetime) -> datetime:
     return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+
+
+def _latest_datetime(*values: datetime | None) -> datetime | None:
+    present = [_as_utc(value) for value in values if value is not None]
+    return max(present) if present else None
+
+
+def _reference_reconnect_result(value: str | None) -> bool:
+    return value in {
+        "brti_reference_first_tick_timeout",
+        "brti_reference_no_valid_tick_timeout",
+    }
 
 
 def _invalid_message_diagnostic_sample(message: ParsedWsMessage) -> dict[str, Any] | None:

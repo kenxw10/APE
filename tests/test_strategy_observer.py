@@ -71,6 +71,28 @@ def test_strategy_observer_prioritizes_reference_before_book(session) -> None:
     config = load_config({})
     safety = assess_startup_safety(config)
     _seed_market(session, now=now)
+    WorkerHeartbeatRepository(session).record_heartbeat(
+        WorkerHeartbeatInput(
+            service_name="ape-worker",
+            started_at=now - timedelta(minutes=1),
+            heartbeat_at=now,
+            app_mode="OBSERVER",
+            is_safe=True,
+            metadata={
+                "reference": {
+                    "brti": {
+                        "connection_state": "reconnect_pending",
+                        "recovery_state": "reconnecting",
+                        "warnings": ["brti_reference_first_tick_timeout"],
+                        "blockers": [],
+                        "consecutive_stale_count": 1,
+                        "consecutive_reconnect_count": 1,
+                    }
+                }
+            },
+        )
+    )
+    session.commit()
 
     decision = evaluate_strategy_observer(
         config=config,
@@ -81,6 +103,12 @@ def test_strategy_observer_prioritizes_reference_before_book(session) -> None:
 
     assert decision.decision_state == STATE_REFERENCE_STALE
     assert decision.primary_reason == "brti_reference_missing_or_invalid"
+    assert (
+        decision.measurements["brti_reference_stale_reason"]
+        == "brti_reference_first_tick_timeout"
+    )
+    assert decision.measurements["brti_reference_connection_state"] == "reconnect_pending"
+    assert decision.measurements["brti_reference_recovery_state"] == "reconnecting"
 
 
 def test_strategy_observer_blocks_unusable_desired_book(session) -> None:
