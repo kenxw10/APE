@@ -311,6 +311,7 @@ def build_brti_reference_status(
         source_stale=source_stale,
         kalshi_received_stale=kalshi_received_stale,
         warnings=warnings,
+        last_error_type=_str_or_none(heartbeat_metadata.get("last_error_type")),
     )
     recommended_action = _recommended_action(
         status_category=status_category,
@@ -648,6 +649,7 @@ def _status_category(
     source_stale: bool,
     kalshi_received_stale: bool,
     warnings: list[str],
+    last_error_type: str | None,
 ) -> str:
     if not enabled:
         return "disabled"
@@ -661,6 +663,8 @@ def _status_category(
         "stale",
         "reconnect_pending",
     }:
+        return "stale_transport"
+    if connection_state == "error" or last_error_type is not None:
         return "stale_transport"
     if transport_stale:
         return "stale_transport"
