@@ -2276,9 +2276,6 @@ def _gate_results(
         "insufficient_contract_history",
         "contract_mid_move_below_threshold",
         "ask_pullback_above_threshold",
-        "dry_run_intended_entry_price_too_low",
-        "dry_run_intended_entry_price_too_high",
-        "dry_run_intended_entry_price_outside_range",
     }
     if decision_state == STATE_CONTRACT_NOT_CONFIRMED and primary_reason in contract_reasons:
         contract_status = "block"
@@ -2308,7 +2305,11 @@ def _gate_results(
     return {
         "safety": {"status": safety_status, "reason": safety_reason},
         "market": {
-            "status": "block" if decision_state == STATE_NO_ACTIVE_MARKET else "pass",
+            "status": (
+                "block"
+                if decision_state == STATE_NO_ACTIVE_MARKET
+                else "not_evaluated" if market is None else "pass"
+            ),
             "reason": primary_reason if decision_state == STATE_NO_ACTIVE_MARKET else None,
             "ticker": getattr(market, "market_ticker", None),
         },

@@ -156,6 +156,10 @@ def test_strategy_entry_bounds_use_offset_adjusted_dry_run_price(session) -> Non
     assert decision.primary_reason == "dry_run_intended_entry_price_too_high"
     assert decision.measurements["dry_run_intended_entry_price"] == "0.79"
     assert decision.measurements["gate_results"]["entry_price"]["status"] == "block"
+    assert (
+        decision.measurements["gate_results"]["contract_confirmation"]["status"]
+        != "block"
+    )
 
 
 def test_strategy_entry_bounds_allow_offset_to_reach_minimum(session) -> None:
@@ -405,6 +409,7 @@ def test_strategy_gate_summary_blocks_unsafe_startup(session) -> None:
         decision.measurements["gate_results"]["safety"]["reason"]
         == "startup_safety_not_observer_safe"
     )
+    assert decision.measurements["gate_results"]["market"]["status"] == "not_evaluated"
 
 
 def test_strategy_dry_run_allows_additional_entry_when_multi_position_enabled(
