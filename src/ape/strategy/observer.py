@@ -877,6 +877,25 @@ def evaluate_strategy_observer(
             ),
         )
 
+    dry_run_entry_bucket = int(
+        evaluated_at.timestamp()
+        / max(config.strategy_dry_run_min_seconds_between_decisions, 0.001)
+    )
+    dry_run_position_id = _dry_run_position_id(
+        config=config,
+        market_ticker=market.market_ticker,
+        decision_id=f"entry-{dry_run_entry_bucket}",
+    )
+    if (
+        _dry_run_runtime_enabled(config, safety)
+        and dry_run_repository.get_position_by_id(dry_run_position_id) is not None
+    ):
+        dry_run_risk_state = "entry_bucket_already_entered"
+        return decision(
+            STATE_RISK_BLOCKED,
+            "dry_run_entry_bucket_already_entered",
+        )
+
     dry_run_intended_entry_price = _intended_entry_price(
         desired_ask,
         config.strategy_dry_run_entry_price_offset_cents,
@@ -958,16 +977,6 @@ def evaluate_strategy_observer(
             STATE_CONTRACT_NOT_CONFIRMED,
             "recent_trade_confirmation_weak",
         )
-
-    dry_run_entry_bucket = int(
-        evaluated_at.timestamp()
-        / max(config.strategy_dry_run_min_seconds_between_decisions, 0.001)
-    )
-    dry_run_position_id = _dry_run_position_id(
-        config=config,
-        market_ticker=market.market_ticker,
-        decision_id=f"entry-{dry_run_entry_bucket}",
-    )
 
     if not _dry_run_runtime_enabled(config, safety):
         dry_run_risk_state = "dry_run_disabled"

@@ -33,6 +33,7 @@ from ape.strategy.observer import (
     STATE_MANAGE_POSITION,
     STATE_OBSERVE_ONLY_MARKET,
     STATE_REFERENCE_STALE,
+    STATE_RISK_BLOCKED,
     STATE_SPREAD_TOO_WIDE,
     StrategyObserver,
     evaluate_strategy_observer,
@@ -231,6 +232,58 @@ def test_strategy_dry_run_allows_additional_entry_when_multi_position_enabled(
     assert decision.decision_state == STATE_ENTER_DRY_RUN
     assert decision.primary_reason == "dry_run_entry_signal"
     assert decision.measurements["managed_position_id"] is None
+
+
+def test_strategy_dry_run_blocks_duplicate_entry_in_same_bucket(tmp_path) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    current_time = {"value": now}
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_strategy_bucket.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+            "STRATEGY_DRY_RUN_MAX_OPEN_POSITIONS": "2",
+            "STRATEGY_DRY_RUN_ONE_ENTRY_PER_MARKET": "false",
+            "STRATEGY_DRY_RUN_MIN_SECONDS_BETWEEN_DECISIONS": "10",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        with session_factory() as session:
+            _seed_observable_context(session, now=now)
+
+        observer = StrategyObserver(
+            config=config,
+            safety=assess_startup_safety(config),
+            session_factory=session_factory,
+            started_at=now - timedelta(minutes=1),
+            now=lambda: current_time["value"],
+        )
+        first_decision = observer.evaluate_once()
+        current_time["value"] = now + timedelta(seconds=1)
+        second_decision = observer.evaluate_once()
+
+        with session_factory() as session:
+            dry_run_repository = StrategyDryRunRepository(session)
+            open_positions = dry_run_repository.list_open_positions(
+                strategy_id=config.strategy_id
+            )
+            events = dry_run_repository.list_recent_events(limit=10)
+
+        assert first_decision is not None
+        assert first_decision.decision_state == STATE_ENTER_DRY_RUN
+        assert second_decision is not None
+        assert second_decision.decision_state == STATE_RISK_BLOCKED
+        assert second_decision.primary_reason == "dry_run_entry_bucket_already_entered"
+        assert len(open_positions) == 1
+        assert len(events) == 1
+        assert events[0].decision_id == first_decision.decision_id
+    finally:
+        engine.dispose()
 
 
 def test_strategy_dry_run_prioritizes_older_expired_position_before_new_entry(
