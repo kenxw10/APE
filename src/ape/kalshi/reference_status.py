@@ -260,7 +260,14 @@ def build_brti_reference_status(
         kalshi_age_ms=latest_kalshi_age_ms,
         trade_fresh_ms=config.kalshi_cfbenchmarks_trade_fresh_ms,
     )
-    stale = worker_heartbeat_stale or transport_stale or persistence_stale
+    metadata_warnings = _string_list(heartbeat_metadata.get("warnings"))
+    worker_timeout_stale = _worker_timeout_reason(metadata_warnings) is not None
+    stale = (
+        worker_heartbeat_stale
+        or transport_stale
+        or persistence_stale
+        or worker_timeout_stale
+    )
     if transport_stale:
         warnings.append("brti_reference_transport_stale")
     if persistence_stale:
@@ -296,7 +303,7 @@ def build_brti_reference_status(
             config.kalshi_cfbenchmarks_kalshi_received_warn_ms
         ),
         metadata_stale_since=_datetime_or_none(heartbeat_metadata.get("stale_since")),
-        metadata_warnings=_string_list(heartbeat_metadata.get("warnings")),
+        metadata_warnings=metadata_warnings,
     )
     recovery_state = _str_or_none(heartbeat_metadata.get("recovery_state"))
     status_category = _status_category(
