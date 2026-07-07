@@ -275,6 +275,9 @@ def evaluate_strategy_observer(
     reference_tick: ReferenceTick | None = None
     orderbook: OrderbookSnapshot | None = None
     latest_trade: PublicTrade | None = None
+    reference_worker_metadata: dict[str, Any] | None = None
+    reference_worker_heartbeat_at: datetime | None = None
+    reference_worker_heartbeat_age_ms: int | None = None
     boundary: Decimal | None = None
     boundary_source: str | None = None
     brti_value: Decimal | None = None
@@ -308,6 +311,9 @@ def evaluate_strategy_observer(
             boundary=boundary,
             boundary_source=boundary_source,
             reference_tick=reference_tick,
+            reference_worker_metadata=reference_worker_metadata,
+            reference_worker_heartbeat_at=reference_worker_heartbeat_at,
+            reference_worker_heartbeat_age_ms=reference_worker_heartbeat_age_ms,
             brti_value=brti_value,
             brti_backend_age_ms=brti_backend_age_ms,
             brti_source_age_ms=brti_source_age_ms,
@@ -389,6 +395,15 @@ def evaluate_strategy_observer(
     boundary, boundary_source = _market_boundary(market)
     if boundary is None:
         return decision(STATE_MARKET_NOT_PARSEABLE, "market_boundary_not_parseable")
+
+    heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+    if heartbeat is not None:
+        reference_worker_metadata = _reference_worker_metadata(heartbeat.metadata_)
+        reference_worker_heartbeat_at = _as_utc(heartbeat.heartbeat_at)
+        reference_worker_heartbeat_age_ms = _age_ms(
+            reference_worker_heartbeat_at,
+            evaluated_at,
+        )
 
     reference_tick = ReferenceTicksRepository(session).get_latest_tick(BRTI_SOURCE)
     if not _valid_reference_tick(reference_tick):
@@ -684,6 +699,9 @@ def _measurements(
     boundary: Decimal | None,
     boundary_source: str | None,
     reference_tick: ReferenceTick | None,
+    reference_worker_metadata: dict[str, Any] | None,
+    reference_worker_heartbeat_at: datetime | None,
+    reference_worker_heartbeat_age_ms: int | None,
     brti_value: Decimal | None,
     brti_backend_age_ms: int | None,
     brti_source_age_ms: int | None,
@@ -717,6 +735,62 @@ def _measurements(
         "brti_age_ms": brti_age_ms,
         "brti_backend_age_ms": brti_backend_age_ms,
         "brti_source_age_ms": brti_source_age_ms,
+        "brti_reference_stale_reason": _strategy_reference_stale_reason(
+            config=config,
+            reference_tick=reference_tick,
+            brti_backend_age_ms=brti_backend_age_ms,
+            brti_source_age_ms=brti_source_age_ms,
+            brti_age_ms=brti_age_ms,
+            reference_worker_metadata=reference_worker_metadata,
+        ),
+        "brti_reference_connection_state": _metadata_text(
+            reference_worker_metadata,
+            "connection_state",
+        ),
+        "brti_reference_recovery_state": _metadata_text(
+            reference_worker_metadata,
+            "recovery_state",
+        ),
+        "brti_reference_warnings": _metadata_string_list(
+            reference_worker_metadata,
+            "warnings",
+        ),
+        "brti_reference_blockers": _metadata_string_list(
+            reference_worker_metadata,
+            "blockers",
+        ),
+        "brti_reference_last_error_type": _metadata_text(
+            reference_worker_metadata,
+            "last_error_type",
+        ),
+        "brti_reference_last_message_at": _metadata_text(
+            reference_worker_metadata,
+            "last_message_at",
+        ),
+        "brti_reference_last_persisted_at": _metadata_text(
+            reference_worker_metadata,
+            "last_persisted_at",
+        ),
+        "brti_reference_last_valid_tick_at": _metadata_text(
+            reference_worker_metadata,
+            "last_valid_tick_at",
+        ),
+        "brti_reference_stale_since": _metadata_text(
+            reference_worker_metadata,
+            "stale_since",
+        ),
+        "brti_reference_consecutive_stale_count": _metadata_int(
+            reference_worker_metadata,
+            "consecutive_stale_count",
+        ),
+        "brti_reference_consecutive_reconnect_count": _metadata_int(
+            reference_worker_metadata,
+            "consecutive_reconnect_count",
+        ),
+        "brti_reference_worker_heartbeat_at": _isoformat_or_none(
+            reference_worker_heartbeat_at
+        ),
+        "brti_reference_worker_heartbeat_age_ms": reference_worker_heartbeat_age_ms,
         "distance_bps": _decimal_text(distance_bps),
         "candidate_side": candidate_side,
         "yes_bid": _decimal_text(getattr(orderbook, "yes_bid", None)),
@@ -775,6 +849,9 @@ def _measurement_summary(measurements: Any) -> JsonPayload | None:
         "desired_side_spread_cents",
         "orderbook_age_ms",
         "latest_trade_age_ms",
+        "brti_reference_stale_reason",
+        "brti_reference_connection_state",
+        "brti_reference_recovery_state",
     )
     return {key: measurements.get(key) for key in keys if key in measurements}
 
@@ -805,6 +882,82 @@ def _reference_source_age_ms(tick: ReferenceTick, evaluated_at: datetime) -> int
         if computed_age is not None:
             ages.append(computed_age)
     return max(ages) if ages else None
+
+
+def _strategy_reference_stale_reason(
+    *,
+    config: AppConfig,
+    reference_tick: ReferenceTick | None,
+    brti_backend_age_ms: int | None,
+    brti_source_age_ms: int | None,
+    brti_age_ms: int | None,
+    reference_worker_metadata: dict[str, Any] | None,
+) -> str | None:
+    metadata_reason = _metadata_stale_reason(reference_worker_metadata)
+    if not _valid_reference_tick(reference_tick):
+        return metadata_reason or "brti_reference_missing_or_invalid"
+    if brti_age_ms is None or brti_age_ms <= config.strategy_reference_max_age_ms:
+        return metadata_reason
+
+    backend_stale = (
+        brti_backend_age_ms is not None
+        and brti_backend_age_ms > config.strategy_reference_max_age_ms
+    )
+    source_stale = (
+        brti_source_age_ms is not None
+        and brti_source_age_ms > config.strategy_reference_max_age_ms
+    )
+    if backend_stale and source_stale:
+        return "brti_reference_backend_and_source_age_exceed_limit"
+    if backend_stale:
+        return "brti_reference_backend_age_exceeds_limit"
+    if source_stale:
+        return "brti_reference_source_age_exceeds_limit"
+    return metadata_reason or "brti_reference_age_exceeds_limit"
+
+
+def _metadata_stale_reason(metadata: dict[str, Any] | None) -> str | None:
+    warnings = _metadata_string_list(metadata, "warnings")
+    for warning in (
+        "brti_reference_first_tick_timeout",
+        "brti_reference_no_valid_tick_timeout",
+        "brti_reference_reconnect_requested",
+        "brti_reference_transport_stale",
+        "brti_reference_persistence_stale",
+        "brti_reference_worker_heartbeat_stale",
+        "brti_persistence_failed",
+    ):
+        if warning in warnings:
+            return warning
+    return None
+
+
+def _metadata_text(metadata: dict[str, Any] | None, key: str) -> str | None:
+    if not isinstance(metadata, dict):
+        return None
+    value = metadata.get(key)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _metadata_int(metadata: dict[str, Any] | None, key: str) -> int | None:
+    if not isinstance(metadata, dict):
+        return None
+    try:
+        return int(metadata.get(key))
+    except (TypeError, ValueError):
+        return None
+
+
+def _metadata_string_list(metadata: dict[str, Any] | None, key: str) -> list[str]:
+    if not isinstance(metadata, dict):
+        return []
+    value = metadata.get(key)
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if item is not None]
 
 
 def _desired_book(
@@ -898,6 +1051,16 @@ def _strategy_worker_metadata(metadata: Any) -> dict[str, Any] | None:
         return None
     observer_metadata = strategy_metadata.get("observer")
     return observer_metadata if isinstance(observer_metadata, dict) else None
+
+
+def _reference_worker_metadata(metadata: Any) -> dict[str, Any] | None:
+    if not isinstance(metadata, dict):
+        return None
+    reference_metadata = metadata.get("reference")
+    if not isinstance(reference_metadata, dict):
+        return None
+    brti_metadata = reference_metadata.get("brti")
+    return brti_metadata if isinstance(brti_metadata, dict) else None
 
 
 def _preserve_existing_worker_metadata(

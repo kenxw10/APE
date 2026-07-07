@@ -61,6 +61,17 @@ class AdvancingFakeWebSocket(FakeWebSocket):
         return await super().__anext__()
 
 
+class SlowNoMessageFakeWebSocket(FakeWebSocket):
+    def __init__(self, advance_time) -> None:
+        super().__init__([])
+        self.advance_time = advance_time
+
+    async def __anext__(self) -> str:
+        self.advance_time()
+        await asyncio.sleep(1)
+        raise StopAsyncIteration
+
+
 def test_collector_subscribes_and_persists_mock_messages(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_collector.sqlite'}"
     config = load_config(
@@ -942,6 +953,66 @@ def test_collector_persists_malformed_brti_tick_without_crashing(tmp_path) -> No
         engine.dispose()
 
 
+def test_collector_malformed_brti_ticks_do_not_reset_valid_tick_timer(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_malformed_timeout.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "0.01",
+            "KALSHI_WS_MAX_RECONNECT_SECONDS": "0.01",
+            "KALSHI_CFBENCHMARKS_FIRST_TICK_TIMEOUT_SECONDS": "0.01",
+            "KALSHI_CFBENCHMARKS_STATUS_GRACE_SECONDS": "0.001",
+            "KALSHI_CFBENCHMARKS_MAX_CONSECUTIVE_STALE_BEFORE_RECONNECT": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    current_time = NOW
+
+    def advance_time() -> None:
+        nonlocal current_time
+        current_time = current_time + timedelta(seconds=1)
+
+    websocket = AdvancingFakeWebSocket([_brti_payload(value="bad")], advance_time)
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        now=lambda: current_time,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            latest_tick = ReferenceTicksRepository(session).get_latest_tick(BRTI_SOURCE)
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert latest_tick is not None
+            assert latest_tick.parse_status == "malformed_value"
+            assert latest_tick.parsed_value is None
+            assert heartbeat is not None
+            brti_metadata = heartbeat.metadata_["reference"]["brti"]
+            assert brti_metadata["last_persisted_at"] is not None
+            assert brti_metadata["last_valid_tick_at"] is None
+            assert brti_metadata["connection_state"] == "reconnect_pending"
+            assert "brti_malformed_value" in brti_metadata["warnings"]
+            assert "brti_reference_first_tick_timeout" in brti_metadata["warnings"]
+            assert "brti_reference_reconnect_requested" in brti_metadata["warnings"]
+    finally:
+        engine.dispose()
+
+
 def test_collector_skips_duplicate_or_out_of_order_brti_source_timestamp(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_duplicate.sqlite'}"
     config = load_config(
@@ -1073,6 +1144,12 @@ def test_collector_clears_stale_brti_error_after_successful_persist(tmp_path) ->
     )
     collector.brti_status.last_error_type = "SQLAlchemyError"
     collector.brti_status.last_error_message = "old reference persistence failure"
+    collector.brti_status.warnings = [
+        "brti_reference_no_valid_tick_timeout",
+        "brti_reference_reconnect_requested",
+    ]
+    collector.brti_status.recovery_state = "reconnecting"
+    collector.brti_status.consecutive_stale_count = 2
 
     try:
         asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
@@ -1085,6 +1162,119 @@ def test_collector_clears_stale_brti_error_after_successful_persist(tmp_path) ->
             assert brti_metadata["last_error_type"] is None
             assert brti_metadata["last_error_message"] is None
             assert brti_metadata["warnings"] == []
+    finally:
+        engine.dispose()
+
+
+def test_collector_reconnects_when_brti_subscribed_without_valid_tick(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_first_tick_timeout.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "0.01",
+            "KALSHI_WS_MAX_RECONNECT_SECONDS": "0.01",
+            "KALSHI_CFBENCHMARKS_FIRST_TICK_TIMEOUT_SECONDS": "0.01",
+            "KALSHI_CFBENCHMARKS_STATUS_GRACE_SECONDS": "0.001",
+            "KALSHI_CFBENCHMARKS_MAX_CONSECUTIVE_STALE_BEFORE_RECONNECT": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    current_time = NOW
+
+    def advance_time() -> None:
+        nonlocal current_time
+        current_time = current_time + timedelta(seconds=1)
+
+    websocket = SlowNoMessageFakeWebSocket(advance_time)
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        now=lambda: current_time,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            latest_tick = ReferenceTicksRepository(session).get_latest_tick(BRTI_SOURCE)
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert latest_tick is None
+            assert heartbeat is not None
+            brti_metadata = heartbeat.metadata_["reference"]["brti"]
+            assert brti_metadata["connection_state"] == "reconnect_pending"
+            assert brti_metadata["recovery_state"] == "reconnecting"
+            assert brti_metadata["consecutive_stale_count"] == 1
+            assert brti_metadata["consecutive_reconnect_count"] == 1
+            assert "brti_reference_first_tick_timeout" in brti_metadata["warnings"]
+            assert "brti_reference_reconnect_requested" in brti_metadata["warnings"]
+    finally:
+        engine.dispose()
+
+
+def test_market_loop_does_not_return_brti_reconnect_reason(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_market_ignores_brti_stale.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_FIRST_TICK_TIMEOUT_SECONDS": "1",
+            "KALSHI_CFBENCHMARKS_MAX_CONSECUTIVE_STALE_BEFORE_RECONNECT": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket(
+        [
+            {
+                "type": "ticker",
+                "sid": 2,
+                "seq": 1,
+                "msg": {"market_ticker": "KXBTC15M-TEST"},
+            }
+        ]
+    )
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=lambda *_args: websocket,
+        now=lambda: NOW + timedelta(seconds=5),
+    )
+    collector.brti_status.connection_state = "subscribed"
+    collector.brti_status.last_connected_at = NOW
+
+    try:
+        result = asyncio.run(
+            collector._read_messages(
+                websocket,
+                "KXBTC15M-TEST",
+                None,
+                threading.Event(),
+                include_reference=False,
+            )
+        )
+
+        assert result is None
+        assert collector.brti_status.connection_state == "subscribed"
+        assert collector.brti_status.warnings == []
     finally:
         engine.dispose()
 

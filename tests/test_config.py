@@ -42,6 +42,12 @@ def test_default_config_is_observer_only() -> None:
     assert config.kalshi_cfbenchmarks_source_age_warn_ms == 45000
     assert config.kalshi_cfbenchmarks_kalshi_received_warn_ms == 10000
     assert config.kalshi_cfbenchmarks_trade_fresh_ms == 2000
+    assert config.kalshi_cfbenchmarks_first_tick_timeout_seconds == 15
+    assert config.kalshi_cfbenchmarks_no_valid_tick_reconnect_seconds == 15
+    assert config.kalshi_cfbenchmarks_max_consecutive_stale_before_reconnect == 2
+    assert config.kalshi_cfbenchmarks_heartbeat_stale_after_seconds == 15
+    assert config.kalshi_cfbenchmarks_status_grace_seconds == 3
+    assert config.kalshi_cfbenchmarks_recovery_required_fresh_ticks == 2
     assert config.strategy_observer_enabled is False
     assert config.strategy_observer_poll_seconds == 1.0
     assert config.strategy_observer_decision_ttl_seconds == 5
@@ -141,6 +147,12 @@ def test_kalshi_cfbenchmarks_env_vars_parse_safely() -> None:
             "KALSHI_CFBENCHMARKS_SOURCE_AGE_WARN_MS": "45001",
             "KALSHI_CFBENCHMARKS_KALSHI_RECEIVED_WARN_MS": "10001",
             "KALSHI_CFBENCHMARKS_TRADE_FRESH_MS": "2001",
+            "KALSHI_CFBENCHMARKS_FIRST_TICK_TIMEOUT_SECONDS": "16",
+            "KALSHI_CFBENCHMARKS_NO_VALID_TICK_RECONNECT_SECONDS": "17",
+            "KALSHI_CFBENCHMARKS_MAX_CONSECUTIVE_STALE_BEFORE_RECONNECT": "3",
+            "KALSHI_CFBENCHMARKS_HEARTBEAT_STALE_AFTER_SECONDS": "18",
+            "KALSHI_CFBENCHMARKS_STATUS_GRACE_SECONDS": "4",
+            "KALSHI_CFBENCHMARKS_RECOVERY_REQUIRED_FRESH_TICKS": "5",
         }
     )
 
@@ -156,6 +168,12 @@ def test_kalshi_cfbenchmarks_env_vars_parse_safely() -> None:
     assert config.kalshi_cfbenchmarks_source_age_warn_ms == 45001
     assert config.kalshi_cfbenchmarks_kalshi_received_warn_ms == 10001
     assert config.kalshi_cfbenchmarks_trade_fresh_ms == 2001
+    assert config.kalshi_cfbenchmarks_first_tick_timeout_seconds == 16
+    assert config.kalshi_cfbenchmarks_no_valid_tick_reconnect_seconds == 17
+    assert config.kalshi_cfbenchmarks_max_consecutive_stale_before_reconnect == 3
+    assert config.kalshi_cfbenchmarks_heartbeat_stale_after_seconds == 18
+    assert config.kalshi_cfbenchmarks_status_grace_seconds == 4
+    assert config.kalshi_cfbenchmarks_recovery_required_fresh_ticks == 5
 
 
 def test_invalid_kalshi_cfbenchmarks_index_ids_raise_clear_config_error() -> None:

@@ -253,7 +253,8 @@ Invoke-RestMethod https://ape-api-production.up.railway.app/ready
 Expected behavior:
 
 - Worker logs show the BRTI subscription without secrets.
-- `/reference/brti/status` shows `enabled=true`, `index_ids=["BRTI"]`, `connection_state=subscribed`, recent transport/persistence timestamps, no blockers, and null `last_error_type` / `last_error_message`.
+- `/reference/brti/status` shows `enabled=true`, `index_ids=["BRTI"]`, `connection_state=subscribed`, `status_category=healthy`, recent transport/persistence/worker heartbeat timestamps, no blockers, and null `last_error_type` / `last_error_message`.
+- If the worker is subscribed but no valid BRTI tick arrives, `/reference/brti/status` reports a `stale_reason` such as `brti_reference_first_tick_timeout` or `brti_reference_no_valid_tick_timeout`, increments recovery counters, and the worker reconnects the BRTI WebSocket without stopping the market collector, strategy observer, or storage retention worker.
 - Source age may be lagging without making observer status globally stale. Read `source_stale`, `kalshi_received_stale`, and `trade_ready_fresh` separately from `transport_stale` and `persistence_stale`.
 - `/reference/brti/latest` returns the latest safe reference tick shape without raw payloads or credentials.
 - `/reference/brti/series` returns live BRTI points sorted by `received_at`, capped at a 900-second rolling window and 16,000 points, without raw payloads.

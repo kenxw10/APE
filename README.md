@@ -181,9 +181,15 @@ KALSHI_CFBENCHMARKS_PERSISTENCE_STALE_AFTER_SECONDS=5
 KALSHI_CFBENCHMARKS_SOURCE_AGE_WARN_MS=45000
 KALSHI_CFBENCHMARKS_KALSHI_RECEIVED_WARN_MS=10000
 KALSHI_CFBENCHMARKS_TRADE_FRESH_MS=2000
+KALSHI_CFBENCHMARKS_FIRST_TICK_TIMEOUT_SECONDS=15
+KALSHI_CFBENCHMARKS_NO_VALID_TICK_RECONNECT_SECONDS=15
+KALSHI_CFBENCHMARKS_MAX_CONSECUTIVE_STALE_BEFORE_RECONNECT=2
+KALSHI_CFBENCHMARKS_HEARTBEAT_STALE_AFTER_SECONDS=15
+KALSHI_CFBENCHMARKS_STATUS_GRACE_SECONDS=3
+KALSHI_CFBENCHMARKS_RECOVERY_REQUIRED_FRESH_TICKS=2
 ```
 
-After PR 7a is merged, enable BRTI only on the Railway worker. Do not add Kalshi credentials, WebSocket settings, or BRTI env vars to Vercel. The API remains read-only and the dashboard only reads the public Railway API. `/reference/brti/series` returns BRTI points sorted by `received_at`, capped at 16,000 points, and excludes raw payloads; the dashboard renders those points in the current fixed Kalshi 15-minute interval. Source age is upstream CF timestamp lag; it remains visible but is separate from transport and persistence staleness. `trade_ready_fresh` is a future strategy gate and is not used for trading in PR 7a. If Kalshi sends the final-minute 15-minute average, APE stores it for diagnostics only; no position-management, strategy, or trading logic uses it in PR 7a.
+After PR 7a is merged, enable BRTI only on the Railway worker. Do not add Kalshi credentials, WebSocket settings, or BRTI env vars to Vercel. The API remains read-only and the dashboard only reads the public Railway API. `/reference/brti/series` returns BRTI points sorted by `received_at`, capped at 16,000 points, and excludes raw payloads; the dashboard renders those points in the current fixed Kalshi 15-minute interval. Source age is upstream CF timestamp lag; it remains visible but is separate from transport and persistence staleness. PR 8b adds status categories, worker heartbeat age, stale reasons, recovery counters, and bounded BRTI reconnects when the worker is subscribed but no valid tick arrives. `trade_ready_fresh` is a future strategy gate and is not used for trading in PR 7a/8b. If Kalshi sends the final-minute 15-minute average, APE stores it for diagnostics only; no position-management, strategy, or trading logic uses it in PR 7a/8b.
 
 ## Strategy Observer Ledger
 

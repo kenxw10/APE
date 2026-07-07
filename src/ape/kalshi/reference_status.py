@@ -31,8 +31,19 @@ class BrtiReferenceStatusSnapshot:
     subscription_request_id: int | None
     subscribed_channels: list[str]
     connection_state: str
+    status_category: str
+    connection_state_detail: str | None
+    worker_heartbeat_at: datetime | None
+    worker_heartbeat_age_ms: int | None
+    worker_started_at: datetime | None
+    worker_heartbeat_stale: bool
     last_connected_at: datetime | None
+    last_successful_subscribe_at: datetime | None
+    last_subscription_ack_at: datetime | None
     latest_tick_received_at: datetime | None
+    last_valid_tick_at: datetime | None
+    last_healthy_at: datetime | None
+    last_recovered_at: datetime | None
     latest_source_ts: datetime | None
     latest_parsed_value: Decimal | None
     latest_trailing_60s_avg: Decimal | None
@@ -56,11 +67,22 @@ class BrtiReferenceStatusSnapshot:
     persistence_stale: bool
     trade_ready_fresh: bool
     stale: bool
+    stale_reason: str | None
+    stale_age_ms: int | None
+    stale_since: datetime | None
     last_message_at: datetime | None
     last_persisted_at: datetime | None
+    time_since_last_message_ms: int | None
+    time_since_last_persisted_ms: int | None
+    time_since_last_valid_tick_ms: int | None
     last_error_type: str | None
     last_error_message: str | None
     reconnect_count: int
+    recovery_state: str | None
+    consecutive_stale_count: int
+    consecutive_reconnect_count: int
+    consecutive_fresh_tick_count: int
+    recommended_action: str | None
     warnings: list[str]
     blockers: list[str]
     checked_at: datetime
@@ -121,6 +143,8 @@ def build_brti_reference_status(
     warnings: list[str] = []
     blockers: list[str] = []
     heartbeat_metadata: dict[str, Any] = {}
+    worker_heartbeat_at: datetime | None = None
+    worker_started_at: datetime | None = None
     latest_tick: ReferenceTick | None = None
 
     config_enabled = config.kalshi_cfbenchmarks_enabled
@@ -141,6 +165,8 @@ def build_brti_reference_status(
                         WORKER_SERVICE_NAME
                     )
                     if heartbeat is not None and isinstance(heartbeat.metadata_, dict):
+                        worker_heartbeat_at = _as_utc(heartbeat.heartbeat_at)
+                        worker_started_at = _as_utc(heartbeat.started_at)
                         reference = _dict_or_empty(heartbeat.metadata_.get("reference"))
                         heartbeat_metadata = _dict_or_empty(reference.get("brti"))
                     latest_tick = ReferenceTicksRepository(session).get_latest_tick(BRTI_SOURCE)
@@ -171,11 +197,25 @@ def build_brti_reference_status(
     if effective_enabled and not effective_signer_ready:
         blockers.append("kalshi_cfbenchmarks_credentials_not_configured_or_not_parseable")
 
+    worker_heartbeat_age_ms = _age_ms(checked_at, worker_heartbeat_at)
+    worker_heartbeat_stale = _is_stale(
+        enabled=effective_enabled and effective_signer_ready and not blockers,
+        latest_tick_received_at=worker_heartbeat_at,
+        checked_at=checked_at,
+        stale_after_seconds=config.kalshi_cfbenchmarks_heartbeat_stale_after_seconds,
+    )
+    if worker_heartbeat_stale:
+        warnings.append("brti_reference_worker_heartbeat_stale")
+
     last_message_at = _datetime_or_none(heartbeat_metadata.get("last_message_at"))
     latest_received_at = latest_tick.received_at if latest_tick else None
     last_persisted_at = _latest_datetime(
         _datetime_or_none(heartbeat_metadata.get("last_persisted_at")),
         latest_received_at,
+    )
+    last_valid_tick_at = _latest_datetime(
+        _datetime_or_none(heartbeat_metadata.get("last_valid_tick_at")),
+        latest_received_at if _reference_tick_valid(latest_tick) else None,
     )
     latest_source_age_ms = latest_tick.source_age_ms if latest_tick else None
     latest_kalshi_age_ms = (
@@ -187,6 +227,9 @@ def build_brti_reference_status(
         else None
     )
     backend_transport_lag_ms = _age_ms(checked_at, last_message_at)
+    time_since_last_message_ms = backend_transport_lag_ms
+    time_since_last_persisted_ms = _age_ms(checked_at, last_persisted_at)
+    time_since_last_valid_tick_ms = _age_ms(checked_at, last_valid_tick_at)
     transport_stale = _is_stale(
         enabled=effective_enabled and effective_signer_ready and not blockers,
         latest_tick_received_at=last_message_at,
@@ -217,7 +260,14 @@ def build_brti_reference_status(
         kalshi_age_ms=latest_kalshi_age_ms,
         trade_fresh_ms=config.kalshi_cfbenchmarks_trade_fresh_ms,
     )
-    stale = transport_stale or persistence_stale
+    metadata_warnings = _string_list(heartbeat_metadata.get("warnings"))
+    worker_timeout_stale = _worker_timeout_reason(metadata_warnings) is not None
+    stale = (
+        worker_heartbeat_stale
+        or transport_stale
+        or persistence_stale
+        or worker_timeout_stale
+    )
     if transport_stale:
         warnings.append("brti_reference_transport_stale")
     if persistence_stale:
@@ -226,6 +276,71 @@ def build_brti_reference_status(
         warnings.append("brti_reference_source_age_stale")
     if kalshi_received_stale:
         warnings.append("brti_reference_kalshi_received_stale")
+
+    stale_reason, stale_age_ms, stale_since = _stale_details(
+        checked_at=checked_at,
+        worker_heartbeat_stale=worker_heartbeat_stale,
+        worker_heartbeat_at=worker_heartbeat_at,
+        worker_heartbeat_stale_after_seconds=(
+            config.kalshi_cfbenchmarks_heartbeat_stale_after_seconds
+        ),
+        transport_stale=transport_stale,
+        last_message_at=last_message_at,
+        transport_stale_after_seconds=(
+            config.kalshi_cfbenchmarks_transport_stale_after_seconds
+        ),
+        persistence_stale=persistence_stale,
+        last_persisted_at=last_persisted_at,
+        persistence_stale_after_seconds=(
+            config.kalshi_cfbenchmarks_persistence_stale_after_seconds
+        ),
+        source_stale=source_stale,
+        source_age_ms=latest_source_age_ms,
+        source_age_warn_ms=config.kalshi_cfbenchmarks_source_age_warn_ms,
+        kalshi_received_stale=kalshi_received_stale,
+        kalshi_age_ms=latest_kalshi_age_ms,
+        kalshi_received_warn_ms=(
+            config.kalshi_cfbenchmarks_kalshi_received_warn_ms
+        ),
+        metadata_stale_since=_datetime_or_none(heartbeat_metadata.get("stale_since")),
+        metadata_warnings=metadata_warnings,
+    )
+    recovery_state = _str_or_none(heartbeat_metadata.get("recovery_state"))
+    last_connected_at = _datetime_or_none(heartbeat_metadata.get("last_connected_at"))
+    last_successful_subscribe_at = _datetime_or_none(
+        heartbeat_metadata.get("last_successful_subscribe_at")
+    )
+    last_subscription_ack_at = _datetime_or_none(
+        heartbeat_metadata.get("last_subscription_ack_at")
+    )
+    current_subscription_at = _latest_datetime(
+        last_connected_at,
+        last_successful_subscribe_at,
+        last_subscription_ack_at,
+    )
+    status_category = _status_category(
+        enabled=effective_enabled,
+        signer_ready=effective_signer_ready,
+        blockers=blockers,
+        connection_state=connection_state,
+        latest_tick=latest_tick,
+        last_valid_tick_at=last_valid_tick_at,
+        current_subscription_at=current_subscription_at,
+        recovery_state=recovery_state,
+        worker_heartbeat_stale=worker_heartbeat_stale,
+        transport_stale=transport_stale,
+        persistence_stale=persistence_stale,
+        source_stale=source_stale,
+        kalshi_received_stale=kalshi_received_stale,
+        warnings=warnings,
+        last_error_type=_str_or_none(heartbeat_metadata.get("last_error_type")),
+    )
+    recommended_action = _recommended_action(
+        status_category=status_category,
+        stale_reason=stale_reason,
+        blockers=blockers,
+        last_error_type=_str_or_none(heartbeat_metadata.get("last_error_type")),
+    )
 
     return BrtiReferenceStatusSnapshot(
         configured=effective_configured,
@@ -242,8 +357,23 @@ def build_brti_reference_status(
         ),
         subscribed_channels=_string_list(heartbeat_metadata.get("subscribed_channels")),
         connection_state=connection_state,
-        last_connected_at=_datetime_or_none(heartbeat_metadata.get("last_connected_at")),
+        status_category=status_category,
+        connection_state_detail=_connection_state_detail(
+            connection_state=connection_state,
+            recovery_state=recovery_state,
+            stale_reason=stale_reason,
+        ),
+        worker_heartbeat_at=worker_heartbeat_at,
+        worker_heartbeat_age_ms=worker_heartbeat_age_ms,
+        worker_started_at=worker_started_at,
+        worker_heartbeat_stale=worker_heartbeat_stale,
+        last_connected_at=last_connected_at,
+        last_successful_subscribe_at=last_successful_subscribe_at,
+        last_subscription_ack_at=last_subscription_ack_at,
         latest_tick_received_at=latest_received_at,
+        last_valid_tick_at=last_valid_tick_at,
+        last_healthy_at=_datetime_or_none(heartbeat_metadata.get("last_healthy_at")),
+        last_recovered_at=_datetime_or_none(heartbeat_metadata.get("last_recovered_at")),
         latest_source_ts=latest_tick.source_ts if latest_tick else None,
         latest_parsed_value=latest_tick.parsed_value if latest_tick else None,
         latest_trailing_60s_avg=latest_tick.trailing_60s_avg if latest_tick else None,
@@ -277,11 +407,28 @@ def build_brti_reference_status(
         persistence_stale=persistence_stale,
         trade_ready_fresh=trade_ready_fresh,
         stale=stale,
+        stale_reason=stale_reason,
+        stale_age_ms=stale_age_ms,
+        stale_since=stale_since,
         last_message_at=last_message_at,
         last_persisted_at=last_persisted_at,
+        time_since_last_message_ms=time_since_last_message_ms,
+        time_since_last_persisted_ms=time_since_last_persisted_ms,
+        time_since_last_valid_tick_ms=time_since_last_valid_tick_ms,
         last_error_type=_str_or_none(heartbeat_metadata.get("last_error_type")),
         last_error_message=_str_or_none(heartbeat_metadata.get("last_error_message")),
         reconnect_count=_int_or_zero(heartbeat_metadata.get("reconnect_count")),
+        recovery_state=recovery_state,
+        consecutive_stale_count=_int_or_zero(
+            heartbeat_metadata.get("consecutive_stale_count")
+        ),
+        consecutive_reconnect_count=_int_or_zero(
+            heartbeat_metadata.get("consecutive_reconnect_count")
+        ),
+        consecutive_fresh_tick_count=_int_or_zero(
+            heartbeat_metadata.get("consecutive_fresh_tick_count")
+        ),
+        recommended_action=recommended_action,
         warnings=sorted(set(warnings)),
         blockers=sorted(set(blockers)),
         checked_at=checked_at,
@@ -405,6 +552,210 @@ def build_brti_reference_latest(config: AppConfig) -> BrtiReferenceLatestSnapsho
         subscription_id=latest_tick.subscription_id,
         raw_payload_hash=latest_tick.raw_payload_hash,
     )
+
+
+def _reference_tick_valid(tick: ReferenceTick | None) -> bool:
+    return (
+        tick is not None
+        and tick.parse_status == "valid"
+        and tick.received_at is not None
+        and tick.parsed_value is not None
+    )
+
+
+def _stale_details(
+    *,
+    checked_at: datetime,
+    worker_heartbeat_stale: bool,
+    worker_heartbeat_at: datetime | None,
+    worker_heartbeat_stale_after_seconds: float,
+    transport_stale: bool,
+    last_message_at: datetime | None,
+    transport_stale_after_seconds: float,
+    persistence_stale: bool,
+    last_persisted_at: datetime | None,
+    persistence_stale_after_seconds: float,
+    source_stale: bool,
+    source_age_ms: int | None,
+    source_age_warn_ms: int,
+    kalshi_received_stale: bool,
+    kalshi_age_ms: int | None,
+    kalshi_received_warn_ms: int,
+    metadata_stale_since: datetime | None,
+    metadata_warnings: list[str],
+) -> tuple[str | None, int | None, datetime | None]:
+    if worker_heartbeat_stale:
+        return _time_stale_details(
+            "brti_reference_worker_heartbeat_stale",
+            checked_at=checked_at,
+            value_at=worker_heartbeat_at,
+            stale_after_seconds=worker_heartbeat_stale_after_seconds,
+            metadata_stale_since=metadata_stale_since,
+        )
+    worker_timeout_reason = _worker_timeout_reason(metadata_warnings)
+    if worker_timeout_reason is not None:
+        stale_age_ms = _age_ms(checked_at, metadata_stale_since)
+        return worker_timeout_reason, stale_age_ms, metadata_stale_since
+    if transport_stale:
+        return _time_stale_details(
+            "brti_reference_transport_stale",
+            checked_at=checked_at,
+            value_at=last_message_at,
+            stale_after_seconds=transport_stale_after_seconds,
+            metadata_stale_since=metadata_stale_since,
+        )
+    if persistence_stale:
+        return _time_stale_details(
+            "brti_reference_persistence_stale",
+            checked_at=checked_at,
+            value_at=last_persisted_at,
+            stale_after_seconds=persistence_stale_after_seconds,
+            metadata_stale_since=metadata_stale_since,
+        )
+    if source_stale:
+        stale_age_ms = None
+        if source_age_ms is not None:
+            stale_age_ms = max(0, source_age_ms - source_age_warn_ms)
+        return "brti_reference_source_age_stale", stale_age_ms, metadata_stale_since
+    if kalshi_received_stale:
+        stale_age_ms = None
+        if kalshi_age_ms is not None:
+            stale_age_ms = max(0, kalshi_age_ms - kalshi_received_warn_ms)
+        return (
+            "brti_reference_kalshi_received_stale",
+            stale_age_ms,
+            metadata_stale_since,
+        )
+    return None, None, None
+
+
+def _worker_timeout_reason(warnings: list[str]) -> str | None:
+    for warning in (
+        "brti_reference_first_tick_timeout",
+        "brti_reference_no_valid_tick_timeout",
+    ):
+        if warning in warnings:
+            return warning
+    return None
+
+
+def _time_stale_details(
+    reason: str,
+    *,
+    checked_at: datetime,
+    value_at: datetime | None,
+    stale_after_seconds: float,
+    metadata_stale_since: datetime | None,
+) -> tuple[str, int | None, datetime | None]:
+    if value_at is None:
+        return reason, None, metadata_stale_since
+    threshold_at = _as_utc(value_at) + timedelta(seconds=stale_after_seconds)
+    stale_age_ms = max(0, int((_as_utc(checked_at) - threshold_at).total_seconds() * 1000))
+    return reason, stale_age_ms, metadata_stale_since or threshold_at
+
+
+def _status_category(
+    *,
+    enabled: bool,
+    signer_ready: bool,
+    blockers: list[str],
+    connection_state: str,
+    latest_tick: ReferenceTick | None,
+    last_valid_tick_at: datetime | None,
+    current_subscription_at: datetime | None,
+    recovery_state: str | None,
+    worker_heartbeat_stale: bool,
+    transport_stale: bool,
+    persistence_stale: bool,
+    source_stale: bool,
+    kalshi_received_stale: bool,
+    warnings: list[str],
+    last_error_type: str | None,
+) -> str:
+    if not enabled:
+        return "disabled"
+    if not signer_ready or blockers:
+        return "waiting"
+    if worker_heartbeat_stale:
+        return "worker_stale"
+    if "brti_persistence_failed" in warnings:
+        return "persistence_error"
+    if _worker_timeout_reason(warnings) is not None or connection_state in {
+        "stale",
+        "reconnect_pending",
+    }:
+        return "stale_transport"
+    if connection_state == "error" or last_error_type is not None:
+        return "stale_transport"
+    if transport_stale:
+        return "stale_transport"
+    if persistence_stale:
+        return "stale_persistence"
+    if source_stale or kalshi_received_stale:
+        return "upstream_lag"
+    if recovery_state in {"connecting", "waiting_for_fresh_tick", "recovering"}:
+        return "waiting"
+    if current_subscription_at is not None and (
+        last_valid_tick_at is None or _as_utc(last_valid_tick_at) < current_subscription_at
+    ):
+        return "waiting"
+    if latest_tick is None or not _reference_tick_valid(latest_tick) or connection_state in {
+        "waiting_for_worker",
+        "waiting_for_fresh_tick",
+        "connected",
+    }:
+        return "waiting"
+    return "healthy"
+
+
+def _recommended_action(
+    *,
+    status_category: str,
+    stale_reason: str | None,
+    blockers: list[str],
+    last_error_type: str | None,
+) -> str | None:
+    if status_category == "disabled":
+        return None
+    if blockers:
+        if "kalshi_cfbenchmarks_subscription_error" in blockers:
+            return "check_kalshi_cfbenchmarks_entitlement_or_index_id"
+        if "kalshi_cfbenchmarks_credentials_not_configured_or_not_parseable" in blockers:
+            return "check_worker_kalshi_credentials"
+        if "database_not_configured_for_brti_diagnostics" in blockers:
+            return "configure_database_url_for_reference_diagnostics"
+        return "inspect_reference_blockers"
+    if status_category == "worker_stale":
+        return "restart_or_inspect_railway_worker"
+    if status_category == "persistence_error" or last_error_type:
+        return "inspect_database_and_worker_logs"
+    if stale_reason in {
+        "brti_reference_transport_stale",
+        "brti_reference_first_tick_timeout",
+        "brti_reference_no_valid_tick_timeout",
+    }:
+        return "inspect_cfbenchmarks_websocket_subscription"
+    if status_category == "stale_persistence":
+        return "inspect_reference_tick_persistence"
+    if status_category == "upstream_lag":
+        return "monitor_cfbenchmarks_source_age"
+    if status_category == "waiting":
+        return "wait_for_worker_subscription_and_first_tick"
+    return None
+
+
+def _connection_state_detail(
+    *,
+    connection_state: str,
+    recovery_state: str | None,
+    stale_reason: str | None,
+) -> str | None:
+    details = [connection_state]
+    if recovery_state:
+        details.append(recovery_state)
+    if stale_reason:
+        details.append(stale_reason)
+    return ":".join(details) if details else None
 
 
 def _is_stale(
