@@ -311,6 +311,80 @@ def test_strategy_keeps_hard_brti_age_block_when_trade_ready_fresh_relaxed(
     assert decision.measurements["gate_results"]["reference"]["status"] == "block"
 
 
+def test_strategy_gate_summary_blocks_contract_ask_pullback(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(session, now=now)
+    OrderbookRepository(session).insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker="KXBTC15M-ACTIVE",
+            received_at=now - timedelta(seconds=10),
+            sequence_number=124,
+            yes_bid=Decimal("0.60"),
+            yes_ask=Decimal("0.66"),
+            no_bid=Decimal("0.34"),
+            no_ask=Decimal("0.40"),
+            yes_spread=Decimal("0.06"),
+            no_spread=Decimal("0.06"),
+            yes_bid_count=Decimal("3"),
+            yes_ask_count=Decimal("3"),
+            no_bid_count=Decimal("3"),
+            no_ask_count=Decimal("3"),
+            book_status="ok",
+        )
+    )
+    session.commit()
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_CONTRACT_NOT_CONFIRMED
+    assert decision.primary_reason == "ask_pullback_above_threshold"
+    assert (
+        decision.measurements["gate_results"]["contract_confirmation"]["status"]
+        == "block"
+    )
+    assert (
+        decision.measurements["gate_results"]["contract_confirmation"]["reason"]
+        == "ask_pullback_above_threshold"
+    )
+
+
+def test_strategy_gate_summary_blocks_insufficient_contract_history(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config(
+        {
+            "STRATEGY_CONTRACT_LOOKBACK_SECONDS": "1",
+            "STRATEGY_CONTRACT_ASK_PULLBACK_LOOKBACK_SECONDS": "1",
+        }
+    )
+    safety = assess_startup_safety(config)
+    _seed_observable_context(session, now=now)
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_CONTRACT_NOT_CONFIRMED
+    assert decision.primary_reason == "insufficient_contract_history"
+    assert (
+        decision.measurements["gate_results"]["contract_confirmation"]["status"]
+        == "block"
+    )
+    assert (
+        decision.measurements["gate_results"]["contract_confirmation"]["reason"]
+        == "insufficient_contract_history"
+    )
+
+
 def test_strategy_gate_summary_blocks_unsafe_startup(session) -> None:
     now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
     config = load_config({"TRADING_ENABLED": "true"})

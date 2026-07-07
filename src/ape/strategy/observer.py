@@ -2273,8 +2273,9 @@ def _gate_results(
     contract_status = "not_evaluated" if contract_mid_move_cents is None else "pass"
     contract_reason = None
     contract_reasons = {
+        "insufficient_contract_history",
         "contract_mid_move_below_threshold",
-        "contract_ask_pullback_above_threshold",
+        "ask_pullback_above_threshold",
         "dry_run_intended_entry_price_too_low",
         "dry_run_intended_entry_price_too_high",
         "dry_run_intended_entry_price_outside_range",
