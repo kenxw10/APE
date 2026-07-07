@@ -404,6 +404,7 @@ def evaluate_strategy_observer(
     thresholds = _thresholds(config)
 
     market: Market | None = None
+    active_market: Market | None = None
     reference_tick: ReferenceTick | None = None
     orderbook: OrderbookSnapshot | None = None
     latest_trade: PublicTrade | None = None
@@ -565,14 +566,45 @@ def evaluate_strategy_observer(
         )
 
     dry_run_repository = StrategyDryRunRepository(session)
+    markets_repository = MarketsRepository(session)
+    active_market = markets_repository.get_active_market(
+        now=evaluated_at,
+        series_ticker=config.kalshi_btc15_series_ticker,
+    )
     if _dry_run_runtime_enabled(config, safety):
-        managing_position = dry_run_repository.get_latest_open_position(
+        latest_open_position = dry_run_repository.get_latest_open_position(
             strategy_id=config.strategy_id
         )
+        if latest_open_position is not None:
+            open_position_count = dry_run_repository.count_open_positions(
+                strategy_id=config.strategy_id
+            )
+            active_market_position = (
+                None
+                if active_market is None
+                else dry_run_repository.get_open_position_by_market(
+                    strategy_id=config.strategy_id,
+                    market_ticker=active_market.market_ticker,
+                )
+            )
+            can_open_additional = (
+                open_position_count < config.strategy_dry_run_max_open_positions
+                and (
+                    not config.strategy_dry_run_one_entry_per_market
+                    or active_market_position is None
+                )
+            )
+            latest_position_is_active_market = (
+                active_market is not None
+                and latest_open_position.market_ticker == active_market.market_ticker
+            )
+            if not can_open_additional or not latest_position_is_active_market:
+                managing_position = latest_open_position
+
         if managing_position is not None:
             dry_run_position_id = managing_position.position_id
             candidate_side = managing_position.side_candidate
-            market = MarketsRepository(session).get_market_by_ticker(
+            market = markets_repository.get_market_by_ticker(
                 managing_position.market_ticker
             )
             if market is None:
@@ -583,10 +615,7 @@ def evaluate_strategy_observer(
                 )
 
     if managing_position is None:
-        market = MarketsRepository(session).get_active_market(
-            now=evaluated_at,
-            series_ticker=config.kalshi_btc15_series_ticker,
-        )
+        market = active_market
     elif market is not None and (
         market.open_time is None
         or market.close_time is None
@@ -601,10 +630,6 @@ def evaluate_strategy_observer(
     if market is None:
         return decision(STATE_NO_ACTIVE_MARKET, "no_active_persisted_market")
 
-    active_market = MarketsRepository(session).get_active_market(
-        now=evaluated_at,
-        series_ticker=config.kalshi_btc15_series_ticker,
-    )
     if managing_position is None:
         market = active_market
     elif (
@@ -1216,7 +1241,8 @@ def build_recent_strategy_dry_run_positions(
             session_factory = create_session_factory(engine)
             with session_factory() as session:
                 rows = StrategyDryRunRepository(session).list_recent_positions(
-                    limit=capped_limit
+                    limit=capped_limit,
+                    strategy_id=config.strategy_id,
                 )
         finally:
             engine.dispose()
@@ -1254,7 +1280,8 @@ def build_recent_strategy_dry_run_events(
             session_factory = create_session_factory(engine)
             with session_factory() as session:
                 rows = StrategyDryRunRepository(session).list_recent_events(
-                    limit=capped_limit
+                    limit=capped_limit,
+                    strategy_id=config.strategy_id,
                 )
         finally:
             engine.dispose()

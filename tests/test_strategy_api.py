@@ -389,6 +389,10 @@ def test_strategy_dry_run_status_scopes_latest_event_to_configured_strategy(
         app = create_app(config)
         with TestClient(app) as client:
             response = client.get("/strategy/dry-run/status")
+            recent_positions_response = client.get(
+                "/strategy/dry-run/positions/recent?limit=10"
+            )
+            recent_events_response = client.get("/strategy/dry-run/events/recent?limit=10")
 
         assert response.status_code == 200
         body = response.json()
@@ -398,5 +402,13 @@ def test_strategy_dry_run_status_scopes_latest_event_to_configured_strategy(
         assert body["latest_enter_decision"]["decision_id"] == (
             "strategy-KXBTC15M-CURRENT-1-enter"
         )
+        recent_positions = recent_positions_response.json()
+        assert recent_positions["count"] == 1
+        assert recent_positions["positions"][0]["position_id"] == (
+            "dryrun-btc15-KXBTC15M-CURRENT"
+        )
+        recent_events = recent_events_response.json()
+        assert recent_events["count"] == 1
+        assert recent_events["events"][0]["event_id"] == "dryrun-event-current-enter"
     finally:
         engine.dispose()

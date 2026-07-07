@@ -13,6 +13,7 @@ from ape.repositories.inputs import (
     OrderbookSnapshotInput,
     PublicTradeInput,
     ReferenceTickInput,
+    StrategyDryRunPositionInput,
     WorkerHeartbeatInput,
 )
 from ape.repositories.markets import MarketsRepository
@@ -176,6 +177,53 @@ def test_strategy_entry_bounds_allow_offset_to_reach_minimum(session) -> None:
 
     assert decision.decision_state == STATE_ENTER_DRY_RUN
     assert decision.measurements["dry_run_intended_entry_price"] == "0.56"
+
+
+def test_strategy_dry_run_allows_additional_entry_when_multi_position_enabled(
+    session,
+) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config(
+        {
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+            "STRATEGY_DRY_RUN_MAX_OPEN_POSITIONS": "2",
+            "STRATEGY_DRY_RUN_ONE_ENTRY_PER_MARKET": "false",
+        }
+    )
+    safety = assess_startup_safety(config)
+    _seed_observable_context(session, now=now)
+    StrategyDryRunRepository(session).insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="dryrun-existing-position",
+            strategy_id=config.strategy_id,
+            market_ticker="KXBTC15M-ACTIVE",
+            decision_id="strategy-existing-enter",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now - timedelta(seconds=30),
+            open_price=Decimal("0.63"),
+            contract_count=1,
+            boundary=Decimal("62000"),
+            brti_at_entry=Decimal("62100"),
+            distance_bps_at_entry=Decimal("16.10305958"),
+            entry_reason="dry_run_entry_signal",
+            status="OPEN",
+            measurements={"desired_side_ask": "0.62"},
+        )
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_ENTER_DRY_RUN
+    assert decision.primary_reason == "dry_run_entry_signal"
+    assert decision.measurements["managed_position_id"] is None
 
 
 def test_strategy_dry_run_mode_without_flag_stays_observe_only(session) -> None:

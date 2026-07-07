@@ -203,21 +203,42 @@ class StrategyDryRunRepository:
             )
         )
 
-    def list_recent_positions(self, limit: int = 100) -> list[StrategyDryRunPosition]:
+    def list_recent_positions(
+        self,
+        limit: int = 100,
+        *,
+        strategy_id: str | None = None,
+    ) -> list[StrategyDryRunPosition]:
+        statement = select(StrategyDryRunPosition)
+        if strategy_id is not None:
+            statement = statement.where(StrategyDryRunPosition.strategy_id == strategy_id)
         return list(
             self.session.scalars(
-                select(StrategyDryRunPosition)
-                .order_by(desc(StrategyDryRunPosition.opened_at), desc(StrategyDryRunPosition.id))
-                .limit(limit)
+                statement.order_by(
+                    desc(StrategyDryRunPosition.opened_at),
+                    desc(StrategyDryRunPosition.id),
+                ).limit(limit)
             )
         )
 
-    def list_recent_events(self, limit: int = 100) -> list[StrategyDryRunEvent]:
+    def list_recent_events(
+        self,
+        limit: int = 100,
+        *,
+        strategy_id: str | None = None,
+    ) -> list[StrategyDryRunEvent]:
+        statement = select(StrategyDryRunEvent)
+        if strategy_id is not None:
+            statement = statement.join(
+                StrategyDryRunPosition,
+                StrategyDryRunEvent.position_id == StrategyDryRunPosition.position_id,
+            ).where(StrategyDryRunPosition.strategy_id == strategy_id)
         return list(
             self.session.scalars(
-                select(StrategyDryRunEvent)
-                .order_by(desc(StrategyDryRunEvent.occurred_at), desc(StrategyDryRunEvent.id))
-                .limit(limit)
+                statement.order_by(
+                    desc(StrategyDryRunEvent.occurred_at),
+                    desc(StrategyDryRunEvent.id),
+                ).limit(limit)
             )
         )
 
