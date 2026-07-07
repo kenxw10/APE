@@ -609,7 +609,9 @@ function brtiTransportLabel(brtiStatus: BrtiReferenceStatusResponse | null): str
     return "WAITING";
   }
   if (
+    brtiStatus.stale ||
     brtiStatus.transport_stale ||
+    brtiStatus.status_category === "worker_stale" ||
     brtiStatus.status_category === "stale_transport" ||
     brtiStatus.status_category === "stale_persistence"
   ) {
