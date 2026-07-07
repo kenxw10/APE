@@ -79,11 +79,8 @@ RETENTION_POLICIES: tuple[RetentionPolicy, ...] = (
     RetentionPolicy(
         table_name="strategy_dry_run_positions",
         retention_config_key="storage_retention_dry_run_positions_seconds",
-        timestamp_expression="COALESCE(closed_at, opened_at)",
-        delete_condition_sql=(
-            "(closed_at IS NOT NULL AND closed_at < :cutoff) "
-            "OR (closed_at IS NULL AND opened_at < :cutoff)"
-        ),
+        timestamp_expression="closed_at",
+        delete_condition_sql="closed_at IS NOT NULL AND closed_at < :cutoff",
     ),
     RetentionPolicy(
         table_name="strategy_dry_run_events",

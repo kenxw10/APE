@@ -553,8 +553,12 @@ def evaluate_strategy_observer(
             distance_bps=distance_bps,
             seconds_left=seconds_left,
             measurements=measurements,
-            blockers=blockers or ([] if state == STATE_OBSERVE_ONLY_MARKET else [reason]),
-            warnings=warnings or [],
+            blockers=(
+                blockers
+                if blockers is not None
+                else ([] if state == STATE_OBSERVE_ONLY_MARKET else [reason])
+            ),
+            warnings=warnings if warnings is not None else [],
             raw_context_hash=context_hash,
         )
 

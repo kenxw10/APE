@@ -426,6 +426,7 @@ def test_strategy_dry_run_management_uses_exit_bid_depth(session) -> None:
 
     assert decision.decision_state == STATE_MANAGE_POSITION
     assert decision.primary_reason == "dry_run_position_open"
+    assert decision.blockers == []
     assert decision.measurements["desired_top_book_size"] == "3"
     assert decision.measurements["managed_position_id"] == "dryrun-managed-position"
 

@@ -16,6 +16,7 @@ from ape.db.models import (
     ReferenceTick,
     StorageRetentionRun,
     StrategyDecision,
+    StrategyDryRunPosition,
     WorkerHeartbeat,
 )
 from ape.db.session import create_engine_from_config, create_session_factory
@@ -25,6 +26,7 @@ from ape.repositories.inputs import (
     PublicTradeInput,
     ReferenceTickInput,
     StrategyDecisionInput,
+    StrategyDryRunPositionInput,
     WorkerHeartbeatInput,
 )
 from ape.repositories.markets import MarketsRepository
@@ -33,6 +35,7 @@ from ape.repositories.public_trades import PublicTradesRepository
 from ape.repositories.reference_ticks import ReferenceTicksRepository
 from ape.repositories.storage_retention import StorageRetentionRepository
 from ape.repositories.strategy_decisions import StrategyDecisionsRepository
+from ape.repositories.strategy_dry_run import StrategyDryRunRepository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import assess_startup_safety
 from ape.storage import retention as retention_module
@@ -89,6 +92,59 @@ def test_storage_retention_deletes_old_rows_in_chunks(retention_db) -> None:
         assert audit_row.status == RETENTION_SUCCESS
         assert audit_row.deleted_rows["orderbook_snapshots"] == 1
         assert audit_row.deleted_rows["markets"] == 2
+
+
+def test_storage_retention_keeps_open_dry_run_positions(retention_db) -> None:
+    database_url, session_factory = retention_db
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    config = _retention_config(database_url, row_seconds=60)
+
+    with session_factory() as session:
+        repository = StrategyDryRunRepository(session)
+        repository.insert_position_if_absent(
+            StrategyDryRunPositionInput(
+                position_id="dryrun-open-old",
+                strategy_id="btc15_momentum_v1",
+                market_ticker="KXBTC15M-OPEN",
+                decision_id="decision-open",
+                side_candidate="YES",
+                economic_side="YES",
+                opened_at=now - timedelta(seconds=120),
+                open_price=Decimal("0.63"),
+                contract_count=1,
+                entry_reason="dry_run_entry_signal",
+                status="OPEN",
+            )
+        )
+        repository.insert_position_if_absent(
+            StrategyDryRunPositionInput(
+                position_id="dryrun-closed-old",
+                strategy_id="btc15_momentum_v1",
+                market_ticker="KXBTC15M-CLOSED",
+                decision_id="decision-closed",
+                side_candidate="YES",
+                economic_side="YES",
+                opened_at=now - timedelta(seconds=180),
+                open_price=Decimal("0.63"),
+                contract_count=1,
+                entry_reason="dry_run_entry_signal",
+                status="CLOSED",
+                closed_at=now - timedelta(seconds=120),
+                close_price=Decimal("0.73"),
+                close_reason="dry_run_profit_target_reached",
+                realized_pnl_cents=Decimal("10"),
+            )
+        )
+        session.commit()
+
+    result = run_storage_retention_once(config, session_factory, now=lambda: now)
+
+    assert result.deleted_rows["strategy_dry_run_positions"] == 1
+    with session_factory() as session:
+        positions = list(session.scalars(select(StrategyDryRunPosition)))
+        assert len(positions) == 1
+        assert positions[0].position_id == "dryrun-open-old"
+        assert positions[0].status == "OPEN"
 
 
 def test_storage_retention_strips_raw_payload_without_losing_normalized_fields(
@@ -406,6 +462,8 @@ def _retention_config(
             "STORAGE_RETENTION_REFERENCE_TICKS_SECONDS": str(row_seconds),
             "STORAGE_RETENTION_WORKER_HEARTBEATS_SECONDS": str(row_seconds),
             "STORAGE_RETENTION_STRATEGY_DECISIONS_SECONDS": str(row_seconds),
+            "STORAGE_RETENTION_DRY_RUN_POSITIONS_SECONDS": str(row_seconds),
+            "STORAGE_RETENTION_DRY_RUN_EVENTS_SECONDS": str(row_seconds),
             "STORAGE_RETENTION_MARKETS_SECONDS": str(row_seconds),
             "STORAGE_RETENTION_RAW_PAYLOAD_ORDERBOOK_SECONDS": str(raw_seconds),
             "STORAGE_RETENTION_RAW_PAYLOAD_PUBLIC_TRADES_SECONDS": str(raw_seconds),
