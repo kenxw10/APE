@@ -30,6 +30,7 @@ from ape.strategy.observer import (
     STATE_EXIT_SIGNAL,
     STATE_FORCE_EXIT,
     STATE_IMPULSE_TOO_WEAK,
+    STATE_LIVE_GUARD_BLOCKED,
     STATE_MANAGE_POSITION,
     STATE_OBSERVE_ONLY_MARKET,
     STATE_REFERENCE_STALE,
@@ -279,6 +280,57 @@ def test_strategy_blocks_when_brti_backend_age_exceeds_limit(session) -> None:
     assert decision.decision_state == STATE_REFERENCE_STALE
     assert decision.primary_reason == "brti_reference_backend_age_exceeds_limit"
     assert decision.measurements["gate_results"]["reference"]["status"] == "block"
+
+
+def test_strategy_keeps_hard_brti_age_block_when_trade_ready_fresh_relaxed(
+    session,
+) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config(
+        {
+            "STRATEGY_REFERENCE_MAX_AGE_MS": "2000",
+            "STRATEGY_REFERENCE_REQUIRE_TRADE_READY_FRESH": "false",
+        }
+    )
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        reference_received_lag_ms=3_000,
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_REFERENCE_STALE
+    assert decision.primary_reason == "brti_reference_backend_age_exceeds_limit"
+    assert decision.measurements["gate_results"]["reference"]["status"] == "block"
+
+
+def test_strategy_gate_summary_blocks_unsafe_startup(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"TRADING_ENABLED": "true"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(session, now=now)
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_LIVE_GUARD_BLOCKED
+    assert decision.primary_reason == "startup_safety_not_observer_safe"
+    assert decision.measurements["gate_results"]["safety"]["status"] == "block"
+    assert (
+        decision.measurements["gate_results"]["safety"]["reason"]
+        == "startup_safety_not_observer_safe"
+    )
 
 
 def test_strategy_dry_run_allows_additional_entry_when_multi_position_enabled(

@@ -2298,8 +2298,14 @@ def _gate_results(
         dry_run_risk_status = "block"
         dry_run_risk_reason = primary_reason
 
+    safety_status = "pass"
+    safety_reason = None
+    if decision_state == STATE_LIVE_GUARD_BLOCKED:
+        safety_status = "block"
+        safety_reason = primary_reason
+
     return {
-        "safety": {"status": "pass"},
+        "safety": {"status": safety_status, "reason": safety_reason},
         "market": {
             "status": "block" if decision_state == STATE_NO_ACTIVE_MARKET else "pass",
             "reason": primary_reason if decision_state == STATE_NO_ACTIVE_MARKET else None,
@@ -2427,8 +2433,6 @@ def _strategy_reference_stale_reason(
     metadata_reason = _metadata_stale_reason(reference_worker_metadata)
     if not _valid_reference_tick(reference_tick):
         return metadata_reason or "brti_reference_missing"
-    if not config.strategy_reference_require_trade_ready_fresh:
-        return None
     if worker_heartbeat_stale:
         return "brti_reference_worker_heartbeat_stale"
     if transport_stale:
@@ -2445,6 +2449,8 @@ def _strategy_reference_stale_reason(
         and brti_source_age_ms > config.strategy_reference_source_max_age_ms
     ):
         return "brti_reference_source_age_exceeds_hard_limit"
+    if not config.strategy_reference_require_trade_ready_fresh:
+        return None
     return metadata_reason
 
 
