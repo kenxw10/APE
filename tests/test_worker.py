@@ -47,6 +47,7 @@ def test_worker_disabled_websocket_records_idle_heartbeat(tmp_path) -> None:
             assert heartbeat is not None
             assert heartbeat.metadata_["mode"] == "idle"
             assert heartbeat.metadata_["ws"]["connection_state"] == "disabled"
+            assert heartbeat.metadata_["strategy"]["dry_run"]["enabled"] is False
     finally:
         engine.dispose()
 

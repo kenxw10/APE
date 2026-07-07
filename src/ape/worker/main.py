@@ -44,7 +44,7 @@ def run_worker(
         LOGGER.info(
             "Starting ape-worker env=%s app_mode=%s safety=%s db_configured=%s "
             "ws_enabled=%s brti_enabled=%s strategy_observer_enabled=%s "
-            "storage_retention_enabled=%s",
+            "strategy_dry_run_enabled=%s storage_retention_enabled=%s",
             config.env,
             config.app_mode.value,
             "safe" if safety.is_safe else "blocked",
@@ -52,6 +52,7 @@ def run_worker(
             config.kalshi_ws_enabled,
             config.kalshi_cfbenchmarks_enabled,
             config.strategy_observer_enabled,
+            config.strategy_dry_run_enabled,
             config.storage_retention_enabled,
         )
 
@@ -167,6 +168,14 @@ def _record_idle_heartbeat(
                                 "last_primary_reason": None,
                                 "last_decision_id": None,
                                 "warnings": ["strategy_observer_disabled"],
+                                "blockers": [],
+                            },
+                            "dry_run": {
+                                "enabled": False,
+                                "open_position_count": 0,
+                                "latest_event_type": None,
+                                "latest_position_id": None,
+                                "warnings": ["strategy_dry_run_disabled"],
                                 "blockers": [],
                             }
                         },

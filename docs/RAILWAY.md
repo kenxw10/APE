@@ -33,6 +33,8 @@ After PR 8 merges, the strategy observer ledger is still disabled by default. En
 
 After PR 8a merges, storage retention is still disabled by default. Enable it only on the Railway worker service with `STORAGE_RETENTION_ENABLED=true` after `/storage/status` and migrations are validated. Retention deletes old observer data in bounded batches, strips old raw payload JSON, writes audit rows, and does not add public delete controls or automatic `VACUUM FULL`.
 
+After PR 9 merges, dry-run remains disabled by default. Enable it only on the Railway worker service with `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`, `STRATEGY_DRY_RUN_ENABLED=true`, `TRADING_ENABLED=false`, and `EXECUTE=false` after market WebSocket, BRTI, strategy observer, and storage retention are healthy. Dry-run writes hypothetical simulated positions/events only; it does not place orders, paper trade, live trade, read balances, or use private/user channels.
+
 ## Create Railway Project
 
 1. Create a new Railway project for APE.
@@ -74,6 +76,10 @@ Useful API endpoints:
 /strategy/status
 /strategy/decisions/latest
 /strategy/decisions/recent
+/strategy/dry-run/status
+/strategy/dry-run/positions/open
+/strategy/dry-run/positions/recent
+/strategy/dry-run/events/recent
 /storage/status
 ```
 
@@ -103,6 +109,8 @@ When `KALSHI_WS_ENABLED=false`, the worker records heartbeat-only diagnostics. W
 When `KALSHI_CFBENCHMARKS_ENABLED=true`, the worker also subscribes to Kalshi's authenticated `cfbenchmarks_value` channel with `index_ids=["BRTI"]` and stores observer-only reference ticks in `reference_ticks`. By default this runs on a dedicated BRTI WebSocket connection so BTC15 market rollover/resubscribe does not disconnect the reference feed. This does not add strategy, paper trading, live trading, orders, private channels, or execution.
 
 When `STRATEGY_OBSERVER_ENABLED=true`, the worker also evaluates the observer-only strategy ledger from persisted database rows. It reads active market metadata, BRTI ticks, Kalshi orderbook snapshots, and public trades; then writes a diagnostic row to `strategy_decisions`. It does not call Kalshi REST, subscribe to private channels, place orders, paper trade, live trade, or emit enter/fill/execution states.
+
+When `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`, and `STRATEGY_DRY_RUN_ENABLED=true`, the same strategy worker evaluates the dry-run momentum gates and may write hypothetical rows to `strategy_dry_run_positions` and `strategy_dry_run_events`. This is not paper trading: there are no Kalshi order API calls, no account balance reads, no private/user WebSocket channels, no real fills, and no execution controls.
 
 When `STORAGE_RETENTION_ENABLED=true`, the worker also runs the storage retention loop. It strips old raw payload JSON and deletes old observer rows in bounded chunks, then records each run in `storage_retention_runs` and worker heartbeat metadata. A failed retention run should not stop market WebSocket, BRTI, or strategy observer loops.
 
@@ -330,6 +338,8 @@ STORAGE_RETENTION_PUBLIC_TRADES_SECONDS=86400
 STORAGE_RETENTION_REFERENCE_TICKS_SECONDS=86400
 STORAGE_RETENTION_WORKER_HEARTBEATS_SECONDS=21600
 STORAGE_RETENTION_STRATEGY_DECISIONS_SECONDS=1209600
+STORAGE_RETENTION_DRY_RUN_POSITIONS_SECONDS=2592000
+STORAGE_RETENTION_DRY_RUN_EVENTS_SECONDS=2592000
 STORAGE_RETENTION_MARKETS_SECONDS=2592000
 STORAGE_RETENTION_RAW_PAYLOAD_ORDERBOOK_SECONDS=900
 STORAGE_RETENTION_RAW_PAYLOAD_PUBLIC_TRADES_SECONDS=3600
@@ -376,12 +386,81 @@ Expected behavior:
 - No endpoint can trigger deletion on request.
 - No `VACUUM FULL` runs automatically. Postgres deletes free space for reuse, but physical disk size may not shrink immediately. Manual `VACUUM FULL` can lock tables and is outside this PR.
 
+## Dry-Run Strategy Checkpoint After PR 9
+
+Only after PR 9 is merged and market WebSocket, BRTI, strategy observer, and storage retention are healthy, update the Railway worker service:
+
+```text
+APP_MODE=DRY_RUN
+STRATEGY_OBSERVER_ENABLED=true
+STRATEGY_DRY_RUN_ENABLED=true
+TRADING_ENABLED=false
+EXECUTE=false
+STRATEGY_ID=btc15_momentum_v1
+STRATEGY_DRY_RUN_MAX_OPEN_POSITIONS=1
+STRATEGY_DRY_RUN_ONE_ENTRY_PER_MARKET=true
+STRATEGY_DRY_RUN_POSITION_SIZE_CONTRACTS=1
+STRATEGY_DRY_RUN_ENTRY_PRICE_OFFSET_CENTS=1
+STRATEGY_BRTI_LOOKBACK_SHORT_SECONDS=30
+STRATEGY_BRTI_LOOKBACK_MEDIUM_SECONDS=90
+STRATEGY_BRTI_LOOKBACK_LONG_SECONDS=180
+STRATEGY_BRTI_MIN_MOVE_SHORT_BPS=2.0
+STRATEGY_BRTI_MIN_MOVE_MEDIUM_BPS=4.5
+STRATEGY_BRTI_MIN_MOVE_LONG_BPS=6.0
+STRATEGY_BRTI_DIRECTIONAL_TICK_RATIO_MIN=0.62
+STRATEGY_BRTI_MAX_BOUNDARY_CROSSES_90S=1
+STRATEGY_BRTI_MAX_RETRACE_FRACTION=0.40
+STRATEGY_CONTRACT_LOOKBACK_SECONDS=45
+STRATEGY_CONTRACT_MIN_MID_MOVE_CENTS=4
+STRATEGY_CONTRACT_ASK_PULLBACK_LOOKBACK_SECONDS=15
+STRATEGY_CONTRACT_MAX_ASK_PULLBACK_CENTS=2
+STRATEGY_TRADE_CONFIRMATION_LOOKBACK_SECONDS=30
+STRATEGY_TRADE_CONFIRMATION_MIN_RATIO=0.60
+STRATEGY_TRADE_CONFIRMATION_MIN_TRADES=3
+STRATEGY_MIN_TOP_BOOK_SIZE_CONTRACTS=2
+STRATEGY_DRY_RUN_MAX_ENTRY_PRICE=0.78
+STRATEGY_DRY_RUN_MIN_ENTRY_PRICE=0.56
+```
+
+To disable dry-run, set:
+
+```text
+STRATEGY_DRY_RUN_ENABLED=false
+APP_MODE=OBSERVER
+```
+
+After enabling dry-run, redeploy the worker and validate:
+
+```powershell
+Invoke-RestMethod https://ape-api-production.up.railway.app/strategy/dry-run/status
+Invoke-RestMethod https://ape-api-production.up.railway.app/strategy/dry-run/positions/open
+Invoke-RestMethod "https://ape-api-production.up.railway.app/strategy/dry-run/positions/recent?limit=100"
+Invoke-RestMethod "https://ape-api-production.up.railway.app/strategy/dry-run/events/recent?limit=100"
+Invoke-RestMethod https://ape-api-production.up.railway.app/strategy/status
+Invoke-RestMethod https://ape-api-production.up.railway.app/strategy/decisions/latest
+Invoke-RestMethod https://ape-api-production.up.railway.app/storage/status
+Invoke-RestMethod https://ape-api-production.up.railway.app/ws/status
+Invoke-RestMethod https://ape-api-production.up.railway.app/reference/brti/status
+Invoke-RestMethod https://ape-api-production.up.railway.app/health
+Invoke-RestMethod https://ape-api-production.up.railway.app/safety
+Invoke-RestMethod https://ape-api-production.up.railway.app/db/status
+Invoke-RestMethod https://ape-api-production.up.railway.app/ready
+```
+
+Expected behavior:
+
+- `/strategy/dry-run/status` shows `enabled=true`, `app_mode=DRY_RUN`, `trading_enabled=false`, `execute=false`, and no safety blockers.
+- `ENTER_DRY_RUN` appears only when all safety, data-quality, timing, BRTI impulse, anti-chop, contract, trade-confirmation, and dry-run risk gates pass.
+- Dry-run positions/events are hypothetical ledger rows only and contain no order IDs, client order IDs, account data, credentials, raw payloads, or execution controls.
+- `ENTER_PAPER` and `ENTER_LIVE` must not appear.
+- If dry-run is disabled or `APP_MODE=OBSERVER`, the evaluator should return observer/diagnostic states rather than `ENTER_DRY_RUN`.
+
 ## Explicitly Not Included
 
 - Live trading
 - Paper trading
 - Order placement
-- Strategy execution
+- Real or paper strategy execution beyond dry-run simulation
 - Private/user WebSocket subscriptions
 - Vercel secrets or trading controls
 - Railway cron

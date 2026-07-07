@@ -18,7 +18,8 @@ Rules:
 - Kalshi REST resolver PRs may add read-only authenticated diagnostics only when explicitly scoped; they must not add order placement, paper trading, strategy decisions, WebSocket ingestion, or BRTI ingestion.
 - Kalshi WebSocket PRs may add observer-only public ticker/orderbook/trade capture only when explicitly scoped; they must not add private user channels, order placement, paper trading, strategy decisions, or execution.
 - BRTI/CF Benchmarks PRs may add observer-only reference-feed capture only when explicitly scoped; they must not add strategy decisions, paper trading, live trading, order placement, private/user channels, or execution controls.
-- Database schema/repository changes are allowed only in PRs that explicitly authorize storage work.
+- Dry-run strategy PRs may add hypothetical ledger simulation only when explicitly scoped; they must not add paper trading, live trading, Kalshi order placement, account reads, private/user channels, or execution controls.
+- Database schema/repository changes are allowed only in PRs that explicitly authorize storage or ledger work.
 - Railway worker services should be always-on processes, not cron jobs, unless a later PR explicitly changes that decision.
 
 PR 5 post-merge checkpoint:
@@ -141,3 +142,28 @@ PR 8a post-merge checkpoint:
 - Do not run automatic `VACUUM FULL`. PostgreSQL deletes make space reusable
   but may not immediately reduce Railway physical disk usage; manual
   `VACUUM FULL` can lock tables and is outside PR 8a.
+
+PR 9 post-merge checkpoint:
+
+- Set `APP_MODE=DRY_RUN` on the Railway worker only after market WebSocket,
+  BRTI, strategy observer, and storage retention are healthy.
+- Set `STRATEGY_OBSERVER_ENABLED=true` and `STRATEGY_DRY_RUN_ENABLED=true`
+  on the Railway worker only.
+- Keep `TRADING_ENABLED=false` and `EXECUTE=false`.
+- Keep API and dashboard read-only; do not add dry-run controls, Kalshi
+  credentials, WebSocket settings, BRTI env vars, strategy env vars, or storage
+  retention env vars to Vercel.
+- Redeploy the Railway worker.
+- Validate worker logs, `/strategy/dry-run/status`,
+  `/strategy/dry-run/positions/open`,
+  `/strategy/dry-run/positions/recent`, `/strategy/dry-run/events/recent`,
+  `/strategy/status`, `/strategy/decisions/latest`,
+  `/strategy/decisions/recent`, `/storage/status`, `/ws/status`,
+  `/reference/brti/status`, `/reference/brti/latest`,
+  `/reference/brti/series`, `/health`, `/safety`, `/db/status`, and `/ready`.
+- Confirm dry-run rows are hypothetical only and contain no order IDs, client
+  order IDs, account data, credentials, raw payloads, private-channel data, or
+  execution controls.
+- Confirm `ENTER_DRY_RUN` appears only in explicit DRY_RUN mode with dry-run
+  enabled and all gates passed.
+- Confirm `ENTER_PAPER` and `ENTER_LIVE` do not appear.

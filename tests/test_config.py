@@ -51,6 +51,32 @@ def test_default_config_is_observer_only() -> None:
     assert config.strategy_observer_enabled is False
     assert config.strategy_observer_poll_seconds == 1.0
     assert config.strategy_observer_decision_ttl_seconds == 5
+    assert config.strategy_dry_run_enabled is False
+    assert config.strategy_id == "btc15_momentum_v1"
+    assert config.strategy_dry_run_max_open_positions == 1
+    assert config.strategy_dry_run_one_entry_per_market is True
+    assert config.strategy_dry_run_position_size_contracts == 1
+    assert config.strategy_dry_run_entry_price_offset_cents == 1
+    assert config.strategy_dry_run_min_seconds_between_decisions == 1
+    assert config.strategy_brti_lookback_short_seconds == 30
+    assert config.strategy_brti_lookback_medium_seconds == 90
+    assert config.strategy_brti_lookback_long_seconds == 180
+    assert config.strategy_brti_min_move_short_bps == 2.0
+    assert config.strategy_brti_min_move_medium_bps == 4.5
+    assert config.strategy_brti_min_move_long_bps == 6.0
+    assert config.strategy_brti_directional_tick_ratio_min == 0.62
+    assert config.strategy_brti_max_boundary_crosses_90s == 1
+    assert config.strategy_brti_max_retrace_fraction == 0.40
+    assert config.strategy_contract_lookback_seconds == 45
+    assert config.strategy_contract_min_mid_move_cents == 4
+    assert config.strategy_contract_ask_pullback_lookback_seconds == 15
+    assert config.strategy_contract_max_ask_pullback_cents == 2
+    assert config.strategy_trade_confirmation_lookback_seconds == 30
+    assert config.strategy_trade_confirmation_min_ratio == 0.60
+    assert config.strategy_trade_confirmation_min_trades == 3
+    assert config.strategy_min_top_book_size_contracts == 2
+    assert config.strategy_dry_run_max_entry_price == 0.78
+    assert config.strategy_dry_run_min_entry_price == 0.56
     assert config.strategy_min_boundary_distance_bps == 3.5
     assert config.strategy_reference_max_age_ms == 2000
     assert config.strategy_kalshi_book_max_age_ms == 2000
@@ -69,6 +95,8 @@ def test_default_config_is_observer_only() -> None:
     assert config.storage_retention_reference_ticks_seconds == 86400
     assert config.storage_retention_worker_heartbeats_seconds == 21600
     assert config.storage_retention_strategy_decisions_seconds == 1209600
+    assert config.storage_retention_dry_run_positions_seconds == 2592000
+    assert config.storage_retention_dry_run_events_seconds == 2592000
     assert config.storage_retention_markets_seconds == 2592000
     assert config.storage_retention_raw_payload_orderbook_seconds == 900
     assert config.storage_retention_raw_payload_public_trades_seconds == 3600
@@ -187,6 +215,32 @@ def test_strategy_observer_env_vars_parse_safely() -> None:
             "STRATEGY_OBSERVER_ENABLED": "true",
             "STRATEGY_OBSERVER_POLL_SECONDS": "2",
             "STRATEGY_OBSERVER_DECISION_TTL_SECONDS": "6",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+            "STRATEGY_ID": "btc15_momentum_test",
+            "STRATEGY_DRY_RUN_MAX_OPEN_POSITIONS": "2",
+            "STRATEGY_DRY_RUN_ONE_ENTRY_PER_MARKET": "false",
+            "STRATEGY_DRY_RUN_POSITION_SIZE_CONTRACTS": "3",
+            "STRATEGY_DRY_RUN_ENTRY_PRICE_OFFSET_CENTS": "2",
+            "STRATEGY_DRY_RUN_MIN_SECONDS_BETWEEN_DECISIONS": "1.5",
+            "STRATEGY_BRTI_LOOKBACK_SHORT_SECONDS": "31",
+            "STRATEGY_BRTI_LOOKBACK_MEDIUM_SECONDS": "91",
+            "STRATEGY_BRTI_LOOKBACK_LONG_SECONDS": "181",
+            "STRATEGY_BRTI_MIN_MOVE_SHORT_BPS": "2.1",
+            "STRATEGY_BRTI_MIN_MOVE_MEDIUM_BPS": "4.6",
+            "STRATEGY_BRTI_MIN_MOVE_LONG_BPS": "6.1",
+            "STRATEGY_BRTI_DIRECTIONAL_TICK_RATIO_MIN": "0.63",
+            "STRATEGY_BRTI_MAX_BOUNDARY_CROSSES_90S": "2",
+            "STRATEGY_BRTI_MAX_RETRACE_FRACTION": "0.41",
+            "STRATEGY_CONTRACT_LOOKBACK_SECONDS": "46",
+            "STRATEGY_CONTRACT_MIN_MID_MOVE_CENTS": "5",
+            "STRATEGY_CONTRACT_ASK_PULLBACK_LOOKBACK_SECONDS": "16",
+            "STRATEGY_CONTRACT_MAX_ASK_PULLBACK_CENTS": "3",
+            "STRATEGY_TRADE_CONFIRMATION_LOOKBACK_SECONDS": "31",
+            "STRATEGY_TRADE_CONFIRMATION_MIN_RATIO": "0.61",
+            "STRATEGY_TRADE_CONFIRMATION_MIN_TRADES": "4",
+            "STRATEGY_MIN_TOP_BOOK_SIZE_CONTRACTS": "3",
+            "STRATEGY_DRY_RUN_MAX_ENTRY_PRICE": "0.80",
+            "STRATEGY_DRY_RUN_MIN_ENTRY_PRICE": "0.55",
             "STRATEGY_MIN_BOUNDARY_DISTANCE_BPS": "4.5",
             "STRATEGY_REFERENCE_MAX_AGE_MS": "2500",
             "STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2600",
@@ -201,6 +255,32 @@ def test_strategy_observer_env_vars_parse_safely() -> None:
     assert config.strategy_observer_enabled is True
     assert config.strategy_observer_poll_seconds == 2
     assert config.strategy_observer_decision_ttl_seconds == 6
+    assert config.strategy_dry_run_enabled is True
+    assert config.strategy_id == "btc15_momentum_test"
+    assert config.strategy_dry_run_max_open_positions == 2
+    assert config.strategy_dry_run_one_entry_per_market is False
+    assert config.strategy_dry_run_position_size_contracts == 3
+    assert config.strategy_dry_run_entry_price_offset_cents == 2
+    assert config.strategy_dry_run_min_seconds_between_decisions == 1.5
+    assert config.strategy_brti_lookback_short_seconds == 31
+    assert config.strategy_brti_lookback_medium_seconds == 91
+    assert config.strategy_brti_lookback_long_seconds == 181
+    assert config.strategy_brti_min_move_short_bps == 2.1
+    assert config.strategy_brti_min_move_medium_bps == 4.6
+    assert config.strategy_brti_min_move_long_bps == 6.1
+    assert config.strategy_brti_directional_tick_ratio_min == 0.63
+    assert config.strategy_brti_max_boundary_crosses_90s == 2
+    assert config.strategy_brti_max_retrace_fraction == 0.41
+    assert config.strategy_contract_lookback_seconds == 46
+    assert config.strategy_contract_min_mid_move_cents == 5
+    assert config.strategy_contract_ask_pullback_lookback_seconds == 16
+    assert config.strategy_contract_max_ask_pullback_cents == 3
+    assert config.strategy_trade_confirmation_lookback_seconds == 31
+    assert config.strategy_trade_confirmation_min_ratio == 0.61
+    assert config.strategy_trade_confirmation_min_trades == 4
+    assert config.strategy_min_top_book_size_contracts == 3
+    assert config.strategy_dry_run_max_entry_price == 0.80
+    assert config.strategy_dry_run_min_entry_price == 0.55
     assert config.strategy_min_boundary_distance_bps == 4.5
     assert config.strategy_reference_max_age_ms == 2500
     assert config.strategy_kalshi_book_max_age_ms == 2600
@@ -209,6 +289,21 @@ def test_strategy_observer_env_vars_parse_safely() -> None:
     assert config.strategy_min_entry_ask == 0.57
     assert config.strategy_max_entry_ask == 0.79
     assert config.strategy_max_spread_cents == 5
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("STRATEGY_ID", " "),
+        ("STRATEGY_DRY_RUN_MAX_OPEN_POSITIONS", "-1"),
+        ("STRATEGY_DRY_RUN_POSITION_SIZE_CONTRACTS", "-1"),
+        ("STRATEGY_DRY_RUN_ENTRY_PRICE_OFFSET_CENTS", "-1"),
+        ("STRATEGY_MIN_TOP_BOOK_SIZE_CONTRACTS", "-1"),
+    ],
+)
+def test_invalid_strategy_dry_run_env_vars_fail(key: str, value: str) -> None:
+    with pytest.raises(ConfigError):
+        load_config({key: value})
 
 
 def test_storage_retention_env_vars_parse_safely() -> None:
@@ -224,6 +319,8 @@ def test_storage_retention_env_vars_parse_safely() -> None:
             "STORAGE_RETENTION_REFERENCE_TICKS_SECONDS": "86402",
             "STORAGE_RETENTION_WORKER_HEARTBEATS_SECONDS": "21601",
             "STORAGE_RETENTION_STRATEGY_DECISIONS_SECONDS": "1209601",
+            "STORAGE_RETENTION_DRY_RUN_POSITIONS_SECONDS": "2592001",
+            "STORAGE_RETENTION_DRY_RUN_EVENTS_SECONDS": "2592002",
             "STORAGE_RETENTION_MARKETS_SECONDS": "2592001",
             "STORAGE_RETENTION_RAW_PAYLOAD_ORDERBOOK_SECONDS": "901",
             "STORAGE_RETENTION_RAW_PAYLOAD_PUBLIC_TRADES_SECONDS": "3601",
@@ -243,6 +340,8 @@ def test_storage_retention_env_vars_parse_safely() -> None:
     assert config.storage_retention_reference_ticks_seconds == 86402
     assert config.storage_retention_worker_heartbeats_seconds == 21601
     assert config.storage_retention_strategy_decisions_seconds == 1209601
+    assert config.storage_retention_dry_run_positions_seconds == 2592001
+    assert config.storage_retention_dry_run_events_seconds == 2592002
     assert config.storage_retention_markets_seconds == 2592001
     assert config.storage_retention_raw_payload_orderbook_seconds == 901
     assert config.storage_retention_raw_payload_public_trades_seconds == 3601

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
@@ -31,3 +33,23 @@ class OrderbookRepository:
             .order_by(desc(OrderbookSnapshot.received_at), desc(OrderbookSnapshot.id))
             .limit(1)
         )
+
+    def get_snapshots_since(
+        self,
+        market_ticker: str,
+        since: datetime,
+        *,
+        limit: int,
+    ) -> list[OrderbookSnapshot]:
+        rows = list(
+            self.session.scalars(
+                select(OrderbookSnapshot)
+                .where(
+                    OrderbookSnapshot.market_ticker == market_ticker,
+                    OrderbookSnapshot.received_at >= since,
+                )
+                .order_by(desc(OrderbookSnapshot.received_at), desc(OrderbookSnapshot.id))
+                .limit(limit)
+            )
+        )
+        return list(reversed(rows))

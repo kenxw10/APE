@@ -48,12 +48,22 @@ def test_kalshi_credentials_do_not_enable_trading_or_execution() -> None:
     assert any("observer-only REST diagnostics" in warning for warning in assessment.warnings)
 
 
-@pytest.mark.parametrize("mode", ["DRY_RUN", "PAPER", "LIVE"])
-def test_non_observer_modes_are_blocked_in_pr_1(mode: str) -> None:
+def test_dry_run_mode_is_startup_safe_without_trading_or_execute() -> None:
+    assessment = assess_startup_safety(load_config({"APP_MODE": "DRY_RUN"}))
+
+    assert assessment.mode == "DRY_RUN"
+    assert assessment.trading_enabled is False
+    assert assessment.execute is False
+    assert assessment.is_safe is True
+    assert assessment.blockers == []
+
+
+@pytest.mark.parametrize("mode", ["PAPER", "LIVE"])
+def test_paper_and_live_modes_are_still_blocked(mode: str) -> None:
     assessment = assess_startup_safety(load_config({"APP_MODE": mode}))
 
     assert assessment.is_safe is False
-    assert any("APP_MODE=OBSERVER" in blocker for blocker in assessment.blockers)
+    assert any("OBSERVER or DRY_RUN" in blocker for blocker in assessment.blockers)
 
 
 def test_unsafe_assessment_raises_on_startup() -> None:

@@ -15,6 +15,8 @@ from ape.repositories.inputs import (
     PublicTradeInput,
     ReferenceTickInput,
     StrategyDecisionInput,
+    StrategyDryRunEventInput,
+    StrategyDryRunPositionInput,
     WorkerHeartbeatInput,
 )
 from ape.repositories.markets import MarketsRepository
@@ -22,6 +24,7 @@ from ape.repositories.orderbook import OrderbookRepository
 from ape.repositories.public_trades import PublicTradesRepository, _recent_trades_statement
 from ape.repositories.reference_ticks import ReferenceTicksRepository
 from ape.repositories.strategy_decisions import StrategyDecisionsRepository
+from ape.repositories.strategy_dry_run import StrategyDryRunRepository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 
 
@@ -150,6 +153,32 @@ def test_orderbook_repository_inserts_and_reads_latest_snapshot(session) -> None
     assert repository.get_latest_snapshot_any().market_ticker == "KXBTC-TEST-001"
 
 
+def test_orderbook_repository_limits_to_newest_snapshots_since(session) -> None:
+    repository = OrderbookRepository(session)
+    now = datetime.now(UTC)
+    for offset_seconds, bid in ((3, "47"), (2, "48"), (1, "49"), (0, "50")):
+        repository.insert_snapshot(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC-TEST-001",
+                received_at=now - timedelta(seconds=offset_seconds),
+                yes_bid=Decimal(bid),
+                book_status="ok",
+            )
+        )
+
+    rows = repository.get_snapshots_since(
+        "KXBTC-TEST-001",
+        now - timedelta(seconds=10),
+        limit=2,
+    )
+
+    assert [row.yes_bid for row in rows] == [
+        Decimal("49.00000000"),
+        Decimal("50.00000000"),
+    ]
+    assert rows[0].received_at <= rows[1].received_at
+
+
 def test_public_trades_repository_inserts_and_reads_recent_trades(session) -> None:
     repository = PublicTradesRepository(session)
     now = datetime.now(UTC)
@@ -207,6 +236,130 @@ def test_strategy_decisions_repository_inserts_and_reads_decision(session) -> No
     assert decision is not None
     assert decision.decision_state == "skip"
     assert repository.list_recent_decisions(limit=1)[0].decision_id == "decision-1"
+
+
+def test_strategy_dry_run_repository_is_idempotent_and_closes_position(session) -> None:
+    repository = StrategyDryRunRepository(session)
+    now = datetime.now(UTC)
+    position = StrategyDryRunPositionInput(
+        position_id="dryrun-position-1",
+        strategy_id="btc15_momentum_v1",
+        market_ticker="KXBTC-TEST-001",
+        decision_id="decision-enter",
+        side_candidate="YES",
+        economic_side="YES",
+        opened_at=now,
+        open_price=Decimal("0.63"),
+        contract_count=1,
+        boundary=Decimal("62000"),
+        brti_at_entry=Decimal("62100"),
+        distance_bps_at_entry=Decimal("16.1"),
+        entry_reason="dry_run_entry_signal",
+        status="OPEN",
+        measurements={"desired_side_ask": "0.62"},
+    )
+
+    created = repository.insert_position_if_absent(position)
+    duplicate = repository.insert_position_if_absent(position)
+    repository.insert_event_if_absent(
+        StrategyDryRunEventInput(
+            event_id="dryrun-event-enter-1",
+            event_type="ENTER_DRY_RUN",
+            occurred_at=now,
+            position_id=position.position_id,
+            decision_id=position.decision_id,
+            market_ticker=position.market_ticker,
+            side_candidate="YES",
+            price=Decimal("0.63"),
+            contract_count=1,
+            reason="dry_run_entry_signal",
+            measurements={"desired_side_ask": "0.62"},
+        )
+    )
+    repository.insert_event_if_absent(
+        StrategyDryRunEventInput(
+            event_id="dryrun-event-enter-1",
+            event_type="ENTER_DRY_RUN",
+            occurred_at=now,
+        )
+    )
+    closed = repository.close_position(
+        position_id=position.position_id,
+        closed_at=now + timedelta(seconds=30),
+        close_price=Decimal("0.73"),
+        close_reason="dry_run_profit_target_reached",
+        status="CLOSED",
+        realized_pnl_cents=Decimal("10"),
+        measurements={"desired_side_bid": "0.73"},
+    )
+
+    assert duplicate.id == created.id
+    assert repository.count_open_positions(strategy_id="btc15_momentum_v1") == 0
+    assert closed is not None
+    assert closed.status == "CLOSED"
+    assert repository.list_recent_events(limit=10)[0].event_id == "dryrun-event-enter-1"
+
+
+def test_strategy_dry_run_events_remain_queryable_after_position_delete(session) -> None:
+    repository = StrategyDryRunRepository(session)
+    now = datetime.now(UTC)
+    position = repository.insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="dryrun-retained-event-position",
+            strategy_id="btc15_momentum_v1",
+            market_ticker="KXBTC-TEST-001",
+            decision_id="decision-enter",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now,
+            open_price=Decimal("0.63"),
+            contract_count=1,
+            boundary=Decimal("62000"),
+            brti_at_entry=Decimal("62100"),
+            distance_bps_at_entry=Decimal("16.1"),
+            entry_reason="dry_run_entry_signal",
+            status="CLOSED",
+            closed_at=now + timedelta(seconds=30),
+            close_price=Decimal("0.73"),
+            close_reason="dry_run_profit_target_reached",
+            realized_pnl_cents=Decimal("10"),
+            measurements={"desired_side_ask": "0.62"},
+        )
+    )
+    repository.insert_event_if_absent(
+        StrategyDryRunEventInput(
+            event_id="dryrun-retained-event-enter",
+            event_type="ENTER_DRY_RUN",
+            occurred_at=now,
+            position_id=position.position_id,
+            decision_id=position.decision_id,
+            market_ticker=position.market_ticker,
+            side_candidate="YES",
+            price=Decimal("0.63"),
+            contract_count=1,
+            reason="dry_run_entry_signal",
+            measurements={"desired_side_ask": "0.62"},
+        )
+    )
+    session.delete(position)
+    session.flush()
+
+    latest_event = repository.get_latest_event(strategy_id="btc15_momentum_v1")
+    latest_enter_id = repository.get_latest_enter_decision_id(
+        strategy_id="btc15_momentum_v1"
+    )
+    recent_events = repository.list_recent_events(
+        limit=10,
+        strategy_id="btc15_momentum_v1",
+    )
+
+    assert latest_event is not None
+    assert latest_event.event_id == "dryrun-retained-event-enter"
+    assert latest_event.strategy_id == "btc15_momentum_v1"
+    assert latest_enter_id == "decision-enter"
+    assert [event.event_id for event in recent_events] == [
+        "dryrun-retained-event-enter"
+    ]
 
 
 def test_worker_heartbeat_repository_records_and_reads_latest(session) -> None:

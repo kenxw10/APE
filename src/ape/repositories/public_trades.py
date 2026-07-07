@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
@@ -36,6 +38,30 @@ class PublicTradesRepository:
                 desc(PublicTrade.id),
             ).limit(1)
         )
+
+    def get_trades_since(
+        self,
+        market_ticker: str,
+        since: datetime,
+        *,
+        limit: int,
+    ) -> list[PublicTrade]:
+        rows = list(
+            self.session.scalars(
+                select(PublicTrade)
+                .where(
+                    PublicTrade.market_ticker == market_ticker,
+                    PublicTrade.received_at >= since,
+                )
+                .order_by(
+                    desc(PublicTrade.executed_at).nulls_last(),
+                    desc(PublicTrade.received_at),
+                    desc(PublicTrade.id),
+                )
+                .limit(limit)
+            )
+        )
+        return list(reversed(rows))
 
 
 def _recent_trades_statement(market_ticker: str, limit: int):

@@ -215,6 +215,87 @@ class StrategyDecision(Base):
     raw_context_hash: Mapped[str | None] = mapped_column(String(128))
 
 
+class StrategyDryRunPosition(Base):
+    __tablename__ = "strategy_dry_run_positions"
+    __table_args__ = (
+        UniqueConstraint(
+            "position_id",
+            name="uq_strategy_dry_run_positions_position_id",
+        ),
+        Index(
+            "ix_strategy_dry_run_positions_status_opened",
+            "status",
+            "opened_at",
+        ),
+        Index(
+            "ix_strategy_dry_run_positions_market_status",
+            "market_ticker",
+            "status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    position_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    market_ticker: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    decision_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    side_candidate: Mapped[str] = mapped_column(String(32), nullable=False)
+    economic_side: Mapped[str] = mapped_column(String(32), nullable=False)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    open_price: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    contract_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    boundary: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    brti_at_entry: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    distance_bps_at_entry: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    entry_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    close_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    close_reason: Mapped[str | None] = mapped_column(Text)
+    realized_pnl_cents: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    measurements: Mapped[Any | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+        nullable=False,
+    )
+
+
+class StrategyDryRunEvent(Base):
+    __tablename__ = "strategy_dry_run_events"
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_strategy_dry_run_events_event_id"),
+        Index("ix_strategy_dry_run_events_occurred_at", "occurred_at"),
+        Index("ix_strategy_dry_run_events_market_occurred", "market_ticker", "occurred_at"),
+        Index("ix_strategy_dry_run_events_type_occurred", "event_type", "occurred_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    strategy_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    position_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    decision_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    market_ticker: Mapped[str | None] = mapped_column(String(128), index=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    side_candidate: Mapped[str | None] = mapped_column(String(32))
+    price: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    contract_count: Mapped[int | None] = mapped_column(Integer)
+    reason: Mapped[str | None] = mapped_column(Text)
+    measurements: Mapped[Any | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+    )
+
+
 class WorkerHeartbeat(Base):
     __tablename__ = "worker_heartbeats"
     __table_args__ = (
