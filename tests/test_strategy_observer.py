@@ -32,6 +32,7 @@ from ape.strategy.observer import (
     STATE_IMPULSE_TOO_WEAK,
     STATE_LIVE_GUARD_BLOCKED,
     STATE_MANAGE_POSITION,
+    STATE_NO_ACTIVE_MARKET,
     STATE_OBSERVE_ONLY_MARKET,
     STATE_REFERENCE_STALE,
     STATE_RISK_BLOCKED,
@@ -410,6 +411,32 @@ def test_strategy_gate_summary_blocks_unsafe_startup(session) -> None:
         == "startup_safety_not_observer_safe"
     )
     assert decision.measurements["gate_results"]["market"]["status"] == "not_evaluated"
+    assert (
+        decision.measurements["gate_results"]["boundary"]["status"]
+        == "not_evaluated"
+    )
+
+
+def test_strategy_gate_summary_marks_boundary_unevaluated_without_market(
+    session,
+) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({})
+    safety = assess_startup_safety(config)
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_NO_ACTIVE_MARKET
+    assert decision.measurements["gate_results"]["market"]["status"] == "block"
+    assert (
+        decision.measurements["gate_results"]["boundary"]["status"]
+        == "not_evaluated"
+    )
 
 
 def test_strategy_dry_run_allows_additional_entry_when_multi_position_enabled(
@@ -926,6 +953,11 @@ def test_strategy_dry_run_mode_without_flag_stays_observe_only(session) -> None:
     assert decision.decision_state == STATE_OBSERVE_ONLY_MARKET
     assert decision.primary_reason == "dry_run_disabled_observe_only"
     assert decision.measurements["dry_run_risk_state"] == "dry_run_disabled"
+    assert decision.measurements["gate_results"]["dry_run_risk"]["status"] == "block"
+    assert (
+        decision.measurements["gate_results"]["dry_run_risk"]["reason"]
+        == "dry_run_disabled_observe_only"
+    )
 
 
 def test_strategy_blocks_weak_brti_impulse(session) -> None:

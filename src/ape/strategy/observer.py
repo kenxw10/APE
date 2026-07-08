@@ -2292,7 +2292,14 @@ def _gate_results(
 
     dry_run_risk_status = "not_evaluated" if dry_run_risk_state is None else "pass"
     dry_run_risk_reason = None
-    if decision_state == STATE_RISK_BLOCKED:
+    if dry_run_risk_state == "dry_run_disabled":
+        dry_run_risk_status = (
+            "block" if config.app_mode is AppMode.DRY_RUN else "not_evaluated"
+        )
+        dry_run_risk_reason = (
+            primary_reason if dry_run_risk_status == "block" else None
+        )
+    elif decision_state == STATE_RISK_BLOCKED:
         dry_run_risk_status = "block"
         dry_run_risk_reason = primary_reason
 
@@ -2315,7 +2322,9 @@ def _gate_results(
         },
         "boundary": {
             "status": (
-                "block" if decision_state == STATE_MARKET_NOT_PARSEABLE else "pass"
+                "block"
+                if decision_state == STATE_MARKET_NOT_PARSEABLE
+                else "not_evaluated" if boundary is None else "pass"
             ),
             "reason": (
                 primary_reason if decision_state == STATE_MARKET_NOT_PARSEABLE else None
