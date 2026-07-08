@@ -107,6 +107,9 @@ class AppConfig:
     strategy_dry_run_min_entry_price: float = 0.56
     strategy_min_boundary_distance_bps: float = 3.5
     strategy_reference_max_age_ms: int = 2_000
+    strategy_reference_source_max_age_ms: int = 45_000
+    strategy_reference_source_warn_ms: int = 10_000
+    strategy_reference_require_trade_ready_fresh: bool = True
     strategy_kalshi_book_max_age_ms: int = 2_000
     strategy_no_entry_first_seconds: int = 300
     strategy_no_entry_last_seconds: int = 60
@@ -423,6 +426,18 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         strategy_reference_max_age_ms=_parse_int(
             "STRATEGY_REFERENCE_MAX_AGE_MS",
             _get(source, "STRATEGY_REFERENCE_MAX_AGE_MS", "2000"),
+        ),
+        strategy_reference_source_max_age_ms=_parse_int(
+            "STRATEGY_REFERENCE_SOURCE_MAX_AGE_MS",
+            _get(source, "STRATEGY_REFERENCE_SOURCE_MAX_AGE_MS", "45000"),
+        ),
+        strategy_reference_source_warn_ms=_parse_int(
+            "STRATEGY_REFERENCE_SOURCE_WARN_MS",
+            _get(source, "STRATEGY_REFERENCE_SOURCE_WARN_MS", "10000"),
+        ),
+        strategy_reference_require_trade_ready_fresh=_parse_bool(
+            "STRATEGY_REFERENCE_REQUIRE_TRADE_READY_FRESH",
+            _get(source, "STRATEGY_REFERENCE_REQUIRE_TRADE_READY_FRESH", "true"),
         ),
         strategy_kalshi_book_max_age_ms=_parse_int(
             "STRATEGY_KALSHI_BOOK_MAX_AGE_MS",

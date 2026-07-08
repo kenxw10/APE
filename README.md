@@ -107,6 +107,7 @@ Invoke-RestMethod "http://127.0.0.1:8000/reference/brti/series?window_seconds=90
 Invoke-RestMethod http://127.0.0.1:8000/strategy/status
 Invoke-RestMethod http://127.0.0.1:8000/strategy/decisions/latest
 Invoke-RestMethod "http://127.0.0.1:8000/strategy/decisions/recent?limit=100"
+Invoke-RestMethod "http://127.0.0.1:8000/strategy/gates/recent?limit=100"
 Invoke-RestMethod http://127.0.0.1:8000/strategy/dry-run/status
 Invoke-RestMethod http://127.0.0.1:8000/strategy/dry-run/positions/open
 Invoke-RestMethod "http://127.0.0.1:8000/strategy/dry-run/positions/recent?limit=100"
@@ -235,7 +236,7 @@ Expected behavior: the latest decision state is one of the observer-safe diagnos
 
 ## Dry-Run Strategy Engine
 
-PR 9 is dry-run only. It upgrades the strategy observer from a skip ledger to a momentum evaluator that can emit `ENTER_DRY_RUN`, `MANAGE_POSITION`, `EXIT_SIGNAL`, and `FORCE_EXIT` simulation states only when all safety and strategy gates pass.
+PR 9 is dry-run only. It upgrades the strategy observer from a skip ledger to a momentum evaluator that can emit `ENTER_DRY_RUN`, `MANAGE_POSITION`, `EXIT_SIGNAL`, and `FORCE_EXIT` simulation states only when all safety and strategy gates pass. PR 9a stabilizes dry-run trade readiness by separating fresh backend BRTI receipt age from upstream source age, preserving warning-only source lag, and recording per-gate pass/warn/block diagnostics.
 
 Required Railway worker settings for dry-run validation:
 
@@ -263,9 +264,10 @@ Read-only dry-run endpoints:
 /strategy/dry-run/positions/open
 /strategy/dry-run/positions/recent?limit=100
 /strategy/dry-run/events/recent?limit=100
+/strategy/gates/recent?limit=100
 ```
 
-The evaluator checks safety, active market, boundary parsing, BRTI freshness, Kalshi book freshness, entry timing, boundary distance, spread/depth, BRTI impulse, anti-chop, contract confirmation, recent public-trade confirmation, and dry-run risk limits. Observer mode still stops at `OBSERVE_ONLY_MARKET`; PR 9 never emits `ENTER_PAPER` or `ENTER_LIVE`.
+The evaluator checks safety, active market, boundary parsing, BRTI freshness, Kalshi book freshness, entry timing, boundary distance, spread/depth, BRTI impulse, anti-chop, contract confirmation, recent public-trade confirmation, and dry-run risk limits. Backend BRTI receipt age is the hard freshness gate for strategy use; upstream source age above `STRATEGY_REFERENCE_SOURCE_WARN_MS` is a warning until it exceeds `STRATEGY_REFERENCE_SOURCE_MAX_AGE_MS`. Too-few public trades are reported as a trade-confirmation warning instead of silently hiding the rest of the gate result. Observer mode still stops at `OBSERVE_ONLY_MARKET`; PR 9/9a never emits `ENTER_PAPER` or `ENTER_LIVE`.
 
 ## Storage Retention
 

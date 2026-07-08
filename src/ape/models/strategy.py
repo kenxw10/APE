@@ -13,6 +13,7 @@ from ape.strategy.observer import (
     StrategyDryRunPositionSnapshot,
     StrategyDryRunPositionsSnapshot,
     StrategyDryRunStatusSnapshot,
+    StrategyGateSummarySnapshot,
     StrategyRecentDecisionsSnapshot,
     StrategyStatusSnapshot,
 )
@@ -63,11 +64,25 @@ class StrategyStatusResponse(BaseModel):
     distance_bps: Decimal | None
     seconds_left: int | None
     latest_measurements_summary: JsonPayload | None
+    gate_results_summary: JsonPayload | None
     decision_age_seconds: float | None
     stale: bool
     warnings: list[str]
     blockers: list[str]
     checked_at: datetime
+
+
+class StrategyGateSummaryResponse(BaseModel):
+    limit: int
+    count: int
+    checked_at: datetime
+    by_state: JsonPayload
+    by_reason: JsonPayload
+    by_gate: JsonPayload
+    latest_decision: StrategyDecisionResponse
+    latest_enter_dry_run: StrategyDecisionResponse
+    latest_blockers: list[str]
+    current_open_position_count: int
 
 
 class StrategyDryRunPositionResponse(BaseModel):
@@ -156,6 +171,23 @@ def strategy_recent_decisions_response(
 
 def strategy_status_response(snapshot: StrategyStatusSnapshot) -> StrategyStatusResponse:
     return StrategyStatusResponse(**snapshot.__dict__)
+
+
+def strategy_gate_summary_response(
+    snapshot: StrategyGateSummarySnapshot,
+) -> StrategyGateSummaryResponse:
+    return StrategyGateSummaryResponse(
+        limit=snapshot.limit,
+        count=snapshot.count,
+        checked_at=snapshot.checked_at,
+        by_state=snapshot.by_state,
+        by_reason=snapshot.by_reason,
+        by_gate=snapshot.by_gate,
+        latest_decision=strategy_decision_response(snapshot.latest_decision),
+        latest_enter_dry_run=strategy_decision_response(snapshot.latest_enter_dry_run),
+        latest_blockers=snapshot.latest_blockers,
+        current_open_position_count=snapshot.current_open_position_count,
+    )
 
 
 def strategy_dry_run_position_response(

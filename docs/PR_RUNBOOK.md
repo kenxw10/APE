@@ -143,7 +143,7 @@ PR 8a post-merge checkpoint:
   but may not immediately reduce Railway physical disk usage; manual
   `VACUUM FULL` can lock tables and is outside PR 8a.
 
-PR 9 post-merge checkpoint:
+PR 9a post-merge checkpoint:
 
 - Set `APP_MODE=DRY_RUN` on the Railway worker only after market WebSocket,
   BRTI, strategy observer, and storage retention are healthy.
@@ -158,7 +158,7 @@ PR 9 post-merge checkpoint:
   `/strategy/dry-run/positions/open`,
   `/strategy/dry-run/positions/recent`, `/strategy/dry-run/events/recent`,
   `/strategy/status`, `/strategy/decisions/latest`,
-  `/strategy/decisions/recent`, `/storage/status`, `/ws/status`,
+  `/strategy/decisions/recent`, `/strategy/gates/recent`, `/storage/status`, `/ws/status`,
   `/reference/brti/status`, `/reference/brti/latest`,
   `/reference/brti/series`, `/health`, `/safety`, `/db/status`, and `/ready`.
 - Confirm dry-run rows are hypothetical only and contain no order IDs, client
@@ -166,4 +166,7 @@ PR 9 post-merge checkpoint:
   execution controls.
 - Confirm `ENTER_DRY_RUN` appears only in explicit DRY_RUN mode with dry-run
   enabled and all gates passed.
+- Confirm `/strategy/gates/recent` exposes pass/warn/block summaries for recent
+  dry-run readiness checks, including BRTI source-age warnings and public-trade
+  sample-size warnings, without raw payloads or execution controls.
 - Confirm `ENTER_PAPER` and `ENTER_LIVE` do not appear.
