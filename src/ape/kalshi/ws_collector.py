@@ -564,7 +564,15 @@ class KalshiWsCollector:
                     include_reference=brti_enabled,
                 )
                 if include_market:
-                    self.status.reconnect_count = 0
+                    if _market_reconnect_result(read_result):
+                        self.status.connection_state = "reconnect_pending"
+                        self.status.reconnect_count += 1
+                        self.record_heartbeat(
+                            include_market=True,
+                            include_reference=False,
+                        )
+                    else:
+                        self.status.reconnect_count = 0
                 if include_reference and not _reference_reconnect_result(read_result):
                     self.brti_status.reconnect_count = 0
             finally:
@@ -2131,6 +2139,16 @@ def _reference_reconnect_result(value: str | None) -> bool:
     return value in {
         "brti_reference_first_tick_timeout",
         "brti_reference_no_valid_tick_timeout",
+    }
+
+
+def _market_reconnect_result(value: str | None) -> bool:
+    return value in {
+        "kalshi_orderbook_transport_stale",
+        "kalshi_orderbook_snapshot_resync_failed",
+        "kalshi_orderbook_sequence_gap_or_reset",
+        "orderbook_reset_after_buffer_overflow",
+        "orderbook_sequence_gap_reset",
     }
 
 

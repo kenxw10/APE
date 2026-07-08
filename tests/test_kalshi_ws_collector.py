@@ -82,6 +82,11 @@ class SlowNoMessageFakeWebSocket(FakeWebSocket):
         raise StopAsyncIteration
 
 
+class FailingPingSlowNoMessageFakeWebSocket(SlowNoMessageFakeWebSocket):
+    def ping(self):
+        raise RuntimeError("transport ping failed")
+
+
 def test_collector_subscribes_and_persists_mock_messages(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_collector.sqlite'}"
     config = load_config(
@@ -2423,6 +2428,62 @@ def test_collector_resets_backoff_after_successful_websocket_cycle(tmp_path) -> 
         assert websocket_factory_calls == 2
         assert collector.status.reconnect_count == 0
         assert collector.status.connection_state == "subscribed"
+    finally:
+        engine.dispose()
+
+
+def test_collector_counts_quiet_market_ping_failure_as_reconnect(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_market_ping_failure.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "0.01",
+            "KALSHI_WS_MAX_RECONNECT_SECONDS": "0.01",
+            "STRATEGY_KALSHI_BOOK_STREAM_MAX_AGE_MS": "2",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    current_time = NOW
+
+    def advance_time() -> None:
+        nonlocal current_time
+        current_time = current_time + timedelta(seconds=1)
+
+    websocket = FailingPingSlowNoMessageFakeWebSocket(advance_time)
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: current_time,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                "ape-worker"
+            )
+
+            assert heartbeat is not None
+            ws_metadata = heartbeat.metadata_["ws"]
+            assert collector.status.reconnect_count == 1
+            assert collector.status.connection_state == "reconnect_pending"
+            assert ws_metadata["reconnect_count"] == 1
+            assert ws_metadata["connection_state"] == "reconnect_pending"
+            assert "kalshi_orderbook_transport_stale" in ws_metadata["warnings"]
     finally:
         engine.dispose()
 
