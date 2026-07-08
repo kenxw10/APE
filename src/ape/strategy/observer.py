@@ -2844,7 +2844,7 @@ def _orderbook_stream_unusable_reason(
         return "kalshi_orderbook_stream_stale"
     if active_market_ticker is not None and active_market_ticker != market_ticker:
         return "kalshi_orderbook_active_ticker_mismatch"
-    if metadata.get("orderbook_initialized") is False:
+    if metadata.get("orderbook_initialized") is not True:
         return "kalshi_orderbook_uninitialized"
     sequence_reset_reasons = {
         "orderbook_sequence_gap_reset",
@@ -2854,6 +2854,11 @@ def _orderbook_stream_unusable_reason(
     }
     if any(reason in sequence_reset_reasons for reason in warnings + blockers):
         return "kalshi_orderbook_sequence_gap_or_reset"
+    if any(
+        reason.startswith(("invalid_orderbook_delta_", "invalid_orderbook_snapshot_"))
+        for reason in warnings + blockers
+    ):
+        return "kalshi_orderbook_invalid_update"
     if blockers:
         return "kalshi_orderbook_stream_stale"
     if stream_age_ms is None:

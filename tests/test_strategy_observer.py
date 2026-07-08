@@ -609,6 +609,60 @@ def test_strategy_blocks_old_orderbook_when_sequence_reset_warning_active(
     assert decision.primary_reason == "kalshi_orderbook_sequence_gap_or_reset"
 
 
+def test_strategy_blocks_old_orderbook_when_invalid_update_warning_active(
+    session,
+) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        latest_orderbook_received_at=now - timedelta(seconds=5),
+    )
+    _record_feed_heartbeat(
+        session,
+        now=now,
+        orderbook_warnings=["invalid_orderbook_delta_delta_fp"],
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_KALSHI_STALE
+    assert decision.primary_reason == "kalshi_orderbook_invalid_update"
+
+
+def test_strategy_blocks_old_orderbook_without_initialized_proof(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        latest_orderbook_received_at=now - timedelta(seconds=5),
+    )
+    _record_feed_heartbeat(
+        session,
+        now=now,
+        orderbook_initialized=None,
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_KALSHI_STALE
+    assert decision.primary_reason == "kalshi_orderbook_uninitialized"
+
+
 def test_strategy_blocks_old_orderbook_when_carry_forward_cap_exceeded(session) -> None:
     now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
     config = load_config({"STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000"})
@@ -1392,6 +1446,13 @@ def test_strategy_observer_runtime_records_decision_and_heartbeat(tmp_path) -> N
                             "enabled": True,
                             "connection_state": "subscribed",
                             "active_market_ticker": "KXBTC15M-ACTIVE",
+                            "last_message_at": (
+                                now - timedelta(seconds=1)
+                            ).isoformat(),
+                            "last_orderbook_at": (
+                                now - timedelta(milliseconds=500)
+                            ).isoformat(),
+                            "orderbook_initialized": True,
                         },
                         "reference": {
                             "brti": {
@@ -1607,6 +1668,7 @@ def _record_feed_heartbeat(
     orderbook_stream_last_message_at: datetime | None = None,
     orderbook_active_market_ticker: str = "KXBTC15M-ACTIVE",
     orderbook_warnings: list[str] | None = None,
+    orderbook_initialized: bool | None = True,
     brti_last_valid_message_at: datetime | None = None,
     brti_last_valid_message_source_ts: datetime | None = None,
     brti_last_valid_message_value: str | None = "62110",
@@ -1615,6 +1677,20 @@ def _record_feed_heartbeat(
 ) -> None:
     stream_at = orderbook_stream_last_message_at or now - timedelta(seconds=1)
     brti_message_at = brti_last_valid_message_at or now - timedelta(seconds=1)
+    ws_metadata: dict[str, object] = {
+        "enabled": True,
+        "connection_state": "subscribed",
+        "active_market_ticker": orderbook_active_market_ticker,
+        "last_message_at": stream_at.isoformat(),
+        "last_ticker_at": stream_at.isoformat(),
+        "last_trade_at": stream_at.isoformat(),
+        "last_orderbook_at": (now - timedelta(seconds=5)).isoformat(),
+        "orderbook_sequence_number": 123,
+        "warnings": orderbook_warnings or [],
+        "blockers": [],
+    }
+    if orderbook_initialized is not None:
+        ws_metadata["orderbook_initialized"] = orderbook_initialized
     WorkerHeartbeatRepository(session).record_heartbeat(
         WorkerHeartbeatInput(
             service_name="ape-worker",
@@ -1624,19 +1700,7 @@ def _record_feed_heartbeat(
             is_safe=True,
             metadata={
                 "mode": "kalshi_ws",
-                "ws": {
-                    "enabled": True,
-                    "connection_state": "subscribed",
-                    "active_market_ticker": orderbook_active_market_ticker,
-                    "last_message_at": stream_at.isoformat(),
-                    "last_ticker_at": stream_at.isoformat(),
-                    "last_trade_at": stream_at.isoformat(),
-                    "last_orderbook_at": (now - timedelta(seconds=5)).isoformat(),
-                    "orderbook_initialized": True,
-                    "orderbook_sequence_number": 123,
-                    "warnings": orderbook_warnings or [],
-                    "blockers": [],
-                },
+                "ws": ws_metadata,
                 "reference": {
                     "brti": {
                         "enabled": True,
