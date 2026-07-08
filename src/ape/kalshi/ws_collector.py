@@ -38,6 +38,11 @@ from ape.repositories.public_trades import PublicTradesRepository
 from ape.repositories.reference_ticks import ReferenceTicksRepository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import SafetyAssessment
+from ape.worker.services import (
+    WORKER_SERVICE_AGGREGATE,
+    WORKER_SERVICE_MARKET_WS,
+    WORKER_SERVICE_REFERENCE_BRTI,
+)
 
 LOGGER = logging.getLogger(__name__)
 MAX_HEARTBEAT_INTERVAL_SECONDS = 10.0
@@ -251,6 +256,8 @@ class KalshiWsCollector:
             index_ids=list(config.kalshi_cfbenchmarks_index_ids),
         )
         self._last_heartbeat_at: datetime | None = None
+        self._last_market_heartbeat_at: datetime | None = None
+        self._last_reference_heartbeat_at: datetime | None = None
         self._force_next_heartbeat = False
         self._forced_diagnostic_signatures: set[str] = set()
 
@@ -358,7 +365,10 @@ class KalshiWsCollector:
                 self.brti_status.blockers = [
                     "kalshi_cfbenchmarks_credentials_not_configured_or_not_parseable"
                 ]
-            self.record_heartbeat()
+            self.record_heartbeat(
+                include_market=include_market,
+                include_reference=include_reference,
+            )
             return
 
         if self.session_factory is None:
@@ -387,13 +397,19 @@ class KalshiWsCollector:
                     )
             except KalshiError as exc:
                 self._set_error("resolver_error", exc)
-                self.record_heartbeat()
+                self.record_heartbeat(
+                    include_market=include_market,
+                    include_reference=include_reference,
+                )
                 if not brti_enabled:
                     return
             except SQLAlchemyError as exc:
                 self._set_error("resolver_database_error", exc)
                 self.status.blockers = ["market_resolver_database_error"]
-                self.record_heartbeat()
+                self.record_heartbeat(
+                    include_market=include_market,
+                    include_reference=include_reference,
+                )
                 if not brti_enabled:
                     return
             else:
@@ -408,13 +424,19 @@ class KalshiWsCollector:
                         if resolver_result.market
                         else None
                     )
-                    self.record_heartbeat()
+                    self.record_heartbeat(
+                        include_market=include_market,
+                        include_reference=include_reference,
+                    )
                     if not brti_enabled:
                         return
                 elif resolver_result.market is None:
                     self.status.connection_state = "no_active_market"
                     self.status.blockers = ["no_active_market"]
-                    self.record_heartbeat()
+                    self.record_heartbeat(
+                        include_market=include_market,
+                        include_reference=include_reference,
+                    )
                     if not brti_enabled:
                         return
                 else:
@@ -453,7 +475,10 @@ class KalshiWsCollector:
                     self.brti_status.recovery_state = "connecting"
                 if include_market:
                     self.status.last_connected_at = self.now()
-                self.record_heartbeat()
+                self.record_heartbeat(
+                    include_market=include_market,
+                    include_reference=include_reference,
+                )
 
                 await self._subscribe(
                     websocket,
@@ -466,7 +491,10 @@ class KalshiWsCollector:
                     self.brti_status.connection_state = "subscribed"
                     self.brti_status.last_successful_subscribe_at = self.now()
                     self.brti_status.recovery_state = "waiting_for_fresh_tick"
-                self.record_heartbeat()
+                self.record_heartbeat(
+                    include_market=include_market,
+                    include_reference=include_reference,
+                )
 
                 read_result = await self._read_messages(
                     websocket,
@@ -489,7 +517,10 @@ class KalshiWsCollector:
             if brti_enabled:
                 self.brti_status.reconnect_count += 1
                 self._set_reference_error(exc.__class__.__name__, exc)
-            self.record_heartbeat()
+            self.record_heartbeat(
+                include_market=include_market,
+                include_reference=include_reference,
+            )
 
     async def _subscribe(
         self,
@@ -560,7 +591,10 @@ class KalshiWsCollector:
             if _market_window_closed(self.now(), market_close_time):
                 self.status.connection_state = "market_roll_reresolve"
                 self._add_warning("active_market_window_closed")
-                self.record_heartbeat()
+                self.record_heartbeat(
+                    include_market=market_ticker is not None,
+                    include_reference=include_reference,
+                )
                 return "market_roll_reresolve"
 
             try:
@@ -578,24 +612,37 @@ class KalshiWsCollector:
             except TimeoutError:
                 if include_reference and self._reference_stale_reason(self.now()) is not None:
                     reconnect_reason = self._handle_reference_stale_if_due(self.now())
-                    self.record_heartbeat()
+                    self.record_heartbeat(
+                        include_market=market_ticker is not None,
+                        include_reference=True,
+                    )
                     if reconnect_reason is not None:
                         return reconnect_reason
                     continue
                 self.status.connection_state = "market_roll_reresolve"
                 self._add_warning("active_market_window_closed")
-                self.record_heartbeat()
+                self.record_heartbeat(
+                    include_market=market_ticker is not None,
+                    include_reference=include_reference,
+                )
                 return "market_roll_reresolve"
 
             received_at = self.now()
             parsed_json = _json_or_none(raw_message)
             if parsed_json is None:
                 self._add_warning("invalid_websocket_json")
-                self.record_heartbeat(force=False)
+                self.record_heartbeat(
+                    force=False,
+                    include_market=market_ticker is not None,
+                    include_reference=include_reference,
+                )
                 if include_reference:
                     reconnect_reason = self._handle_reference_stale_if_due(received_at)
                     if reconnect_reason is not None:
-                        self.record_heartbeat()
+                        self.record_heartbeat(
+                            include_market=market_ticker is not None,
+                            include_reference=True,
+                        )
                         return reconnect_reason
                 continue
 
@@ -608,10 +655,17 @@ class KalshiWsCollector:
                 )
                 self.brti_status.last_message_at = received_at
                 self._handle_reference_message(reference_message)
-                self.record_heartbeat(force=self._consume_force_next_heartbeat())
+                self.record_heartbeat(
+                    force=(
+                        self._consume_force_next_heartbeat()
+                        or self._reference_liveness_heartbeat_due(received_at)
+                    ),
+                    include_market=False,
+                    include_reference=True,
+                )
                 reconnect_reason = self._handle_reference_stale_if_due(received_at)
                 if reconnect_reason is not None:
-                    self.record_heartbeat()
+                    self.record_heartbeat(include_market=False, include_reference=True)
                     return reconnect_reason
                 continue
 
@@ -620,19 +674,33 @@ class KalshiWsCollector:
                 received_at=received_at,
                 market_ticker=market_ticker,
             ):
-                self.record_heartbeat(force=self._consume_force_next_heartbeat())
+                self.record_heartbeat(
+                    force=(
+                        self._consume_force_next_heartbeat()
+                        or self._reference_liveness_heartbeat_due(received_at)
+                    ),
+                    include_market=False,
+                    include_reference=True,
+                )
                 reconnect_reason = self._handle_reference_stale_if_due(received_at)
                 if reconnect_reason is not None:
-                    self.record_heartbeat()
+                    self.record_heartbeat(include_market=False, include_reference=True)
                     return reconnect_reason
                 continue
 
             if market_ticker is None:
-                self.record_heartbeat(force=False)
+                self.record_heartbeat(
+                    force=False,
+                    include_market=False,
+                    include_reference=include_reference,
+                )
                 if include_reference:
                     reconnect_reason = self._handle_reference_stale_if_due(received_at)
                     if reconnect_reason is not None:
-                        self.record_heartbeat()
+                        self.record_heartbeat(
+                            include_market=False,
+                            include_reference=True,
+                        )
                         return reconnect_reason
                 continue
 
@@ -646,18 +714,20 @@ class KalshiWsCollector:
             if resubscribe_reason is not None:
                 self.status.connection_state = "resubscribe_pending"
                 self._add_warning("kalshi_ws_resubscribe_requested")
-                self.record_heartbeat()
+                self.record_heartbeat(include_market=True, include_reference=False)
                 return resubscribe_reason
             self.record_heartbeat(
                 force=(
                     self._consume_force_next_heartbeat()
                     or self._market_liveness_heartbeat_due(received_at)
-                )
+                ),
+                include_market=True,
+                include_reference=False,
             )
             if include_reference:
                 reconnect_reason = self._handle_reference_stale_if_due(received_at)
                 if reconnect_reason is not None:
-                    self.record_heartbeat()
+                    self.record_heartbeat(include_market=False, include_reference=True)
                     return reconnect_reason
 
         return None
@@ -726,7 +796,7 @@ class KalshiWsCollector:
                 or warnings_cleared
             )
             if warnings_cleared or liveness_recovered:
-                self.record_heartbeat()
+                self.record_market_heartbeat()
             return None
 
         if message.kind == "orderbook_delta":
@@ -763,7 +833,7 @@ class KalshiWsCollector:
                 self._clear_warnings("orderbook_delta_before_snapshot") or warnings_cleared
             )
             if warnings_cleared:
-                self.record_heartbeat()
+                self.record_market_heartbeat()
             return None
 
         if message.kind == "trade" and message.trade is not None:
@@ -777,7 +847,7 @@ class KalshiWsCollector:
             if message.warning:
                 self._add_warning(message.warning)
             if warnings_cleared:
-                self.record_heartbeat()
+                self.record_market_heartbeat()
             return None
 
         if message.kind == "invalid":
@@ -878,7 +948,7 @@ class KalshiWsCollector:
             self._set_error(exc.__class__.__name__, exc)
             self._add_warning("orderbook_persistence_failed")
             self._add_blocker("orderbook_persistence_failed")
-            self.record_heartbeat()
+            self.record_market_heartbeat()
             return False
 
         self._mark_persistence_success(
@@ -900,7 +970,7 @@ class KalshiWsCollector:
             LOGGER.warning("Kalshi WS trade persistence failed.", exc_info=True)
             self._set_error(exc.__class__.__name__, exc)
             self._add_warning("trade_persistence_failed")
-            self.record_heartbeat()
+            self.record_market_heartbeat()
             return False
 
         self._mark_persistence_success(warning="trade_persistence_failed")
@@ -980,7 +1050,7 @@ class KalshiWsCollector:
             LOGGER.warning("Kalshi BRTI persistence failed.", exc_info=True)
             self._set_reference_error(exc.__class__.__name__, exc)
             self._add_reference_warning("brti_persistence_failed")
-            self.record_heartbeat()
+            self.record_reference_heartbeat()
             return False
 
         self.brti_status.connection_state = "subscribed"
@@ -1225,11 +1295,27 @@ class KalshiWsCollector:
     def _reference_subscription_error_active(self) -> bool:
         return "kalshi_cfbenchmarks_subscription_error" in self.brti_status.blockers
 
-    def record_heartbeat(self, *, force: bool = True) -> None:
+    def record_heartbeat(
+        self,
+        *,
+        force: bool = True,
+        include_market: bool = True,
+        include_reference: bool = True,
+    ) -> None:
         if self.session_factory is None:
             return
 
         heartbeat_at = self.now()
+        if include_market and self.config.kalshi_ws_enabled:
+            self._record_market_heartbeat_at(
+                heartbeat_at,
+                force=(force or self._market_liveness_heartbeat_due(heartbeat_at)),
+            )
+        if include_reference and self._reference_collection_enabled():
+            self._record_reference_heartbeat_at(
+                heartbeat_at,
+                force=(force or self._reference_liveness_heartbeat_due(heartbeat_at)),
+            )
         if not force and not self._heartbeat_due(heartbeat_at):
             return
         self._refresh_reference_valid_message_age(heartbeat_at)
@@ -1244,7 +1330,9 @@ class KalshiWsCollector:
                         "brti": self.brti_status.as_metadata(),
                     },
                 }
-                latest_heartbeat = repository.get_latest_heartbeat("ape-worker")
+                latest_heartbeat = repository.get_latest_heartbeat(
+                    WORKER_SERVICE_AGGREGATE
+                )
                 metadata_keys = _enabled_non_collector_metadata_keys(self.config)
                 if latest_heartbeat is not None and metadata_keys:
                     _preserve_existing_worker_metadata(
@@ -1254,7 +1342,7 @@ class KalshiWsCollector:
                     )
                 repository.record_heartbeat(
                     WorkerHeartbeatInput(
-                        service_name="ape-worker",
+                        service_name=WORKER_SERVICE_AGGREGATE,
                         started_at=self.started_at,
                         heartbeat_at=heartbeat_at,
                         app_mode=self.config.app_mode.value,
@@ -1268,6 +1356,84 @@ class KalshiWsCollector:
             return
 
         self._last_heartbeat_at = heartbeat_at
+
+    def record_market_heartbeat(self, *, force: bool = True) -> None:
+        self.record_heartbeat(
+            force=force,
+            include_market=True,
+            include_reference=False,
+        )
+
+    def record_reference_heartbeat(self, *, force: bool = True) -> None:
+        self.record_heartbeat(
+            force=force,
+            include_market=False,
+            include_reference=True,
+        )
+
+    def _record_market_heartbeat_at(
+        self,
+        heartbeat_at: datetime,
+        *,
+        force: bool,
+    ) -> None:
+        if not force and not self._market_liveness_heartbeat_due(heartbeat_at):
+            return
+        if self._record_component_heartbeat(
+            service_name=WORKER_SERVICE_MARKET_WS,
+            heartbeat_at=heartbeat_at,
+            metadata={"mode": "market_ws", "ws": self.status.as_metadata()},
+            failure_message="Kalshi market WS heartbeat persistence failed.",
+        ):
+            self._last_market_heartbeat_at = heartbeat_at
+
+    def _record_reference_heartbeat_at(
+        self,
+        heartbeat_at: datetime,
+        *,
+        force: bool,
+    ) -> None:
+        if not force and not self._reference_liveness_heartbeat_due(heartbeat_at):
+            return
+        self._refresh_reference_valid_message_age(heartbeat_at)
+        if self._record_component_heartbeat(
+            service_name=WORKER_SERVICE_REFERENCE_BRTI,
+            heartbeat_at=heartbeat_at,
+            metadata={
+                "mode": "reference_brti",
+                "reference": {"brti": self.brti_status.as_metadata()},
+            },
+            failure_message="Kalshi BRTI heartbeat persistence failed.",
+        ):
+            self._last_reference_heartbeat_at = heartbeat_at
+
+    def _record_component_heartbeat(
+        self,
+        *,
+        service_name: str,
+        heartbeat_at: datetime,
+        metadata: dict[str, Any],
+        failure_message: str,
+    ) -> bool:
+        if self.session_factory is None:
+            return False
+        try:
+            with self.session_factory() as session:
+                WorkerHeartbeatRepository(session).record_heartbeat(
+                    WorkerHeartbeatInput(
+                        service_name=service_name,
+                        started_at=self.started_at,
+                        heartbeat_at=heartbeat_at,
+                        app_mode=self.config.app_mode.value,
+                        is_safe=self.safety.is_safe,
+                        metadata=metadata,
+                    )
+                )
+                session.commit()
+        except SQLAlchemyError:
+            LOGGER.warning(failure_message, exc_info=True)
+            return False
+        return True
 
     def _refresh_reference_valid_message_age(self, heartbeat_at: datetime) -> None:
         if self.brti_status.last_valid_message_at is None:
@@ -1320,20 +1486,32 @@ class KalshiWsCollector:
         return elapsed >= heartbeat_interval_seconds(self.config)
 
     def _market_liveness_heartbeat_due(self, heartbeat_at: datetime) -> bool:
-        if not (
-            self.config.kalshi_ws_enabled
-            and self.config.strategy_kalshi_book_require_stream_live
-        ):
+        if not self.config.kalshi_ws_enabled:
             return False
-        if self._last_heartbeat_at is None:
+        if self._last_market_heartbeat_at is None:
             return True
-        stream_max_seconds = max(
+        interval_seconds = min(
             MIN_HEARTBEAT_INTERVAL_SECONDS,
-            self.config.strategy_kalshi_book_stream_max_age_ms / 1000,
+            max(0.001, self.config.strategy_kalshi_book_stream_max_age_ms / 2000),
         )
-        interval_seconds = max(MIN_HEARTBEAT_INTERVAL_SECONDS, stream_max_seconds / 2)
         elapsed = (
-            heartbeat_at.astimezone(UTC) - self._last_heartbeat_at.astimezone(UTC)
+            heartbeat_at.astimezone(UTC)
+            - self._last_market_heartbeat_at.astimezone(UTC)
+        ).total_seconds()
+        return elapsed >= interval_seconds
+
+    def _reference_liveness_heartbeat_due(self, heartbeat_at: datetime) -> bool:
+        if not self._reference_collection_enabled():
+            return False
+        if self._last_reference_heartbeat_at is None:
+            return True
+        interval_seconds = min(
+            MIN_HEARTBEAT_INTERVAL_SECONDS,
+            max(0.001, self.config.strategy_reference_stream_max_age_ms / 2000),
+        )
+        elapsed = (
+            heartbeat_at.astimezone(UTC)
+            - self._last_reference_heartbeat_at.astimezone(UTC)
         ).total_seconds()
         return elapsed >= interval_seconds
 

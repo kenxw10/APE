@@ -45,6 +45,11 @@ from ape.repositories.strategy_dry_run import (
 )
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import SafetyAssessment, assess_startup_safety
+from ape.worker.feed_liveness import load_market_feed_liveness, load_reference_feed_liveness
+from ape.worker.services import (
+    WORKER_SERVICE_AGGREGATE,
+    WORKER_SERVICE_STRATEGY,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -181,6 +186,13 @@ class StrategyStatusSnapshot:
     distance_bps: Decimal | None
     seconds_left: int | None
     latest_measurements_summary: JsonPayload | None
+    market_liveness_source: str | None
+    reference_liveness_source: str | None
+    market_component_heartbeat_at: str | None
+    reference_component_heartbeat_at: str | None
+    market_component_heartbeat_age_ms: int | None
+    reference_component_heartbeat_age_ms: int | None
+    liveness_source_mismatch: bool | None
     gate_results_summary: JsonPayload | None
     decision_age_seconds: float | None
     stale: bool
@@ -299,6 +311,7 @@ class StrategyObserver:
         self.now = now or (lambda: datetime.now(UTC))
         self.status = StrategyObserverRuntimeStatus(enabled=config.strategy_observer_enabled)
         self.status.dry_run_enabled = _dry_run_runtime_enabled(config, safety)
+        self._last_strategy_heartbeat_at: datetime | None = None
 
     async def run(
         self,
@@ -385,7 +398,20 @@ class StrategyObserver:
                         "dry_run": self.status.dry_run_metadata(),
                     },
                 }
-                latest_heartbeat = repository.get_latest_heartbeat("ape-worker")
+                heartbeat_at = self.now()
+                repository.record_heartbeat(
+                    WorkerHeartbeatInput(
+                        service_name=WORKER_SERVICE_STRATEGY,
+                        started_at=self.started_at,
+                        heartbeat_at=heartbeat_at,
+                        app_mode=self.config.app_mode.value,
+                        is_safe=self.safety.is_safe,
+                        metadata=metadata,
+                    )
+                )
+                latest_heartbeat = repository.get_latest_heartbeat(
+                    WORKER_SERVICE_AGGREGATE
+                )
                 metadata_keys = _enabled_collector_metadata_keys(self.config)
                 if latest_heartbeat is not None and metadata_keys:
                     _preserve_existing_worker_metadata(
@@ -395,15 +421,16 @@ class StrategyObserver:
                     )
                 repository.record_heartbeat(
                     WorkerHeartbeatInput(
-                        service_name="ape-worker",
+                        service_name=WORKER_SERVICE_AGGREGATE,
                         started_at=self.started_at,
-                        heartbeat_at=self.now(),
+                        heartbeat_at=heartbeat_at,
                         app_mode=self.config.app_mode.value,
                         is_safe=self.safety.is_safe,
                         metadata=metadata,
                     )
                 )
                 session.commit()
+                self._last_strategy_heartbeat_at = heartbeat_at
         except SQLAlchemyError:
             LOGGER.warning("Strategy observer heartbeat persistence failed.", exc_info=True)
 
@@ -427,6 +454,15 @@ def evaluate_strategy_observer(
     orderbook_worker_metadata: dict[str, Any] | None = None
     reference_worker_heartbeat_at: datetime | None = None
     reference_worker_heartbeat_age_ms: int | None = None
+    market_liveness_source = "missing"
+    reference_liveness_source = "missing"
+    market_component_heartbeat_at: datetime | None = None
+    reference_component_heartbeat_at: datetime | None = None
+    market_component_heartbeat_age_ms: int | None = None
+    reference_component_heartbeat_age_ms: int | None = None
+    latest_aggregate_heartbeat_mode: str | None = None
+    latest_component_heartbeat_mode: str | None = None
+    liveness_source_mismatch = False
     boundary: Decimal | None = None
     boundary_source: str | None = None
     brti_value: Decimal | None = None
@@ -526,6 +562,15 @@ def evaluate_strategy_observer(
             orderbook_worker_metadata=orderbook_worker_metadata,
             reference_worker_heartbeat_at=reference_worker_heartbeat_at,
             reference_worker_heartbeat_age_ms=reference_worker_heartbeat_age_ms,
+            market_liveness_source=market_liveness_source,
+            reference_liveness_source=reference_liveness_source,
+            market_component_heartbeat_at=market_component_heartbeat_at,
+            reference_component_heartbeat_at=reference_component_heartbeat_at,
+            market_component_heartbeat_age_ms=market_component_heartbeat_age_ms,
+            reference_component_heartbeat_age_ms=reference_component_heartbeat_age_ms,
+            latest_aggregate_heartbeat_mode=latest_aggregate_heartbeat_mode,
+            latest_component_heartbeat_mode=latest_component_heartbeat_mode,
+            liveness_source_mismatch=liveness_source_mismatch,
             brti_value=brti_value,
             brti_backend_age_ms=brti_backend_age_ms,
             brti_source_age_ms=brti_source_age_ms,
@@ -835,15 +880,42 @@ def evaluate_strategy_observer(
     if boundary is None:
         return decision(STATE_MARKET_NOT_PARSEABLE, "market_boundary_not_parseable")
 
-    heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
-    if heartbeat is not None:
-        reference_worker_metadata = _reference_worker_metadata(heartbeat.metadata_)
-        orderbook_worker_metadata = _ws_worker_metadata(heartbeat.metadata_)
-        reference_worker_heartbeat_at = _as_utc(heartbeat.heartbeat_at)
-        reference_worker_heartbeat_age_ms = _age_ms(
-            reference_worker_heartbeat_at,
-            evaluated_at,
-        )
+    market_liveness = load_market_feed_liveness(
+        session,
+        config,
+        checked_at=evaluated_at,
+        active_market_ticker=market.market_ticker,
+    )
+    reference_liveness = load_reference_feed_liveness(
+        session,
+        config,
+        checked_at=evaluated_at,
+    )
+    reference_worker_metadata = reference_liveness.metadata
+    orderbook_worker_metadata = market_liveness.metadata
+    reference_worker_heartbeat_at = reference_liveness.heartbeat_at
+    reference_worker_heartbeat_age_ms = reference_liveness.heartbeat_age_ms
+    market_liveness_source = market_liveness.source
+    reference_liveness_source = reference_liveness.source
+    market_component_heartbeat_at = market_liveness.component_heartbeat_at
+    reference_component_heartbeat_at = reference_liveness.component_heartbeat_at
+    market_component_heartbeat_age_ms = market_liveness.component_heartbeat_age_ms
+    reference_component_heartbeat_age_ms = reference_liveness.component_heartbeat_age_ms
+    latest_aggregate_heartbeat_mode = (
+        market_liveness.latest_aggregate_heartbeat_mode
+        or reference_liveness.latest_aggregate_heartbeat_mode
+    )
+    latest_component_heartbeat_mode = (
+        market_liveness.latest_component_heartbeat_mode
+        or reference_liveness.latest_component_heartbeat_mode
+    )
+    liveness_source_mismatch = (
+        market_liveness.liveness_source_mismatch
+        or reference_liveness.liveness_source_mismatch
+    )
+    accumulated_warnings.extend(market_liveness.warnings)
+    accumulated_warnings.extend(reference_liveness.warnings)
+    if orderbook_worker_metadata is not None:
         orderbook_stream_connection_state = _metadata_text(
             orderbook_worker_metadata,
             "connection_state",
@@ -860,15 +932,8 @@ def evaluate_strategy_observer(
             orderbook_worker_metadata,
             "blockers",
         )
-        orderbook_stream_age_ms = _age_ms(
-            _latest_datetime(
-                _metadata_datetime(orderbook_worker_metadata, "last_message_at"),
-                _metadata_datetime(orderbook_worker_metadata, "last_ticker_at"),
-                _metadata_datetime(orderbook_worker_metadata, "last_trade_at"),
-                _metadata_datetime(orderbook_worker_metadata, "last_orderbook_at"),
-            ),
-            evaluated_at,
-        )
+        orderbook_stream_age_ms = market_liveness.stream_age_ms
+    if reference_worker_metadata is not None:
         brti_reference_status_category = _metadata_text(
             reference_worker_metadata,
             "status_category",
@@ -893,10 +958,7 @@ def evaluate_strategy_observer(
             reference_worker_metadata,
             "valid_message_carried_forward",
         )
-        brti_reference_stream_age_ms = _age_ms(
-            brti_reference_last_valid_message_at,
-            evaluated_at,
-        )
+        brti_reference_stream_age_ms = reference_liveness.stream_age_ms
         brti_reference_backend_transport_lag_ms = (
             _metadata_int(reference_worker_metadata, "backend_transport_lag_ms")
             or _age_ms(
@@ -1413,10 +1475,22 @@ def build_strategy_status(
             session_factory = create_session_factory(engine)
             with session_factory() as session:
                 latest_decision = StrategyDecisionsRepository(session).get_latest_decision()
-                heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
-                worker_metadata = _strategy_worker_metadata(
-                    heartbeat.metadata_ if heartbeat else None
+                heartbeat_repository = WorkerHeartbeatRepository(session)
+                component_heartbeat = heartbeat_repository.get_latest_heartbeat(
+                    WORKER_SERVICE_STRATEGY
                 )
+                worker_metadata = _strategy_worker_metadata(
+                    component_heartbeat.metadata_ if component_heartbeat else None
+                )
+                if worker_metadata is None:
+                    heartbeat = heartbeat_repository.get_latest_heartbeat(
+                        WORKER_SERVICE_AGGREGATE
+                    )
+                    worker_metadata = _strategy_worker_metadata(
+                        heartbeat.metadata_ if heartbeat else None
+                    )
+                    if worker_metadata is not None:
+                        warnings.append("feed_liveness_legacy_aggregate_fallback")
         finally:
             engine.dispose()
     except SQLAlchemyError:
@@ -1634,12 +1708,22 @@ def build_strategy_dry_run_status(
                     latest_enter_decision = StrategyDecisionsRepository(
                         session
                     ).get_decision_by_id(latest_enter_id)
-                heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
-                    "ape-worker"
+                heartbeat_repository = WorkerHeartbeatRepository(session)
+                component_heartbeat = heartbeat_repository.get_latest_heartbeat(
+                    WORKER_SERVICE_STRATEGY
                 )
                 worker_metadata = _strategy_dry_run_worker_metadata(
-                    heartbeat.metadata_ if heartbeat else None
+                    component_heartbeat.metadata_ if component_heartbeat else None
                 )
+                if worker_metadata is None:
+                    heartbeat = heartbeat_repository.get_latest_heartbeat(
+                        WORKER_SERVICE_AGGREGATE
+                    )
+                    worker_metadata = _strategy_dry_run_worker_metadata(
+                        heartbeat.metadata_ if heartbeat else None
+                    )
+                    if worker_metadata is not None:
+                        warnings.append("feed_liveness_legacy_aggregate_fallback")
         finally:
             engine.dispose()
     except SQLAlchemyError:
@@ -1912,6 +1996,18 @@ def _status_snapshot(
     else:
         connection_state = "unknown"
 
+    latest_measurements_summary = (
+        _measurement_summary(latest_decision.measurements)
+        if latest_decision is not None
+        else None
+    )
+    gate_results_summary = (
+        _gate_results_summary(latest_decision.measurements.get("gate_results"))
+        if latest_decision is not None
+        and isinstance(latest_decision.measurements, dict)
+        else None
+    )
+
     return StrategyStatusSnapshot(
         enabled=effective_enabled,
         worker_observed_enabled=worker_observed_enabled,
@@ -1930,17 +2026,36 @@ def _status_snapshot(
         brti_value=latest_decision.brti_value if latest_decision else None,
         distance_bps=latest_decision.distance_bps if latest_decision else None,
         seconds_left=latest_decision.seconds_left if latest_decision else None,
-        latest_measurements_summary=(
-            _measurement_summary(latest_decision.measurements)
-            if latest_decision is not None
-            else None
+        latest_measurements_summary=latest_measurements_summary,
+        market_liveness_source=_summary_text(
+            latest_measurements_summary,
+            "market_liveness_source",
         ),
-        gate_results_summary=(
-            _gate_results_summary(latest_decision.measurements.get("gate_results"))
-            if latest_decision is not None
-            and isinstance(latest_decision.measurements, dict)
-            else None
+        reference_liveness_source=_summary_text(
+            latest_measurements_summary,
+            "reference_liveness_source",
         ),
+        market_component_heartbeat_at=_summary_text(
+            latest_measurements_summary,
+            "market_component_heartbeat_at",
+        ),
+        reference_component_heartbeat_at=_summary_text(
+            latest_measurements_summary,
+            "reference_component_heartbeat_at",
+        ),
+        market_component_heartbeat_age_ms=_summary_int(
+            latest_measurements_summary,
+            "market_component_heartbeat_age_ms",
+        ),
+        reference_component_heartbeat_age_ms=_summary_int(
+            latest_measurements_summary,
+            "reference_component_heartbeat_age_ms",
+        ),
+        liveness_source_mismatch=_summary_bool(
+            latest_measurements_summary,
+            "liveness_source_mismatch",
+        ),
+        gate_results_summary=gate_results_summary,
         decision_age_seconds=decision_age_seconds,
         stale=stale,
         warnings=_unique_strings(warnings),
@@ -1966,6 +2081,15 @@ def _measurements(
     orderbook_worker_metadata: dict[str, Any] | None,
     reference_worker_heartbeat_at: datetime | None,
     reference_worker_heartbeat_age_ms: int | None,
+    market_liveness_source: str,
+    reference_liveness_source: str,
+    market_component_heartbeat_at: datetime | None,
+    reference_component_heartbeat_at: datetime | None,
+    market_component_heartbeat_age_ms: int | None,
+    reference_component_heartbeat_age_ms: int | None,
+    latest_aggregate_heartbeat_mode: str | None,
+    latest_component_heartbeat_mode: str | None,
+    liveness_source_mismatch: bool,
     brti_value: Decimal | None,
     brti_backend_age_ms: int | None,
     brti_source_age_ms: int | None,
@@ -2188,6 +2312,19 @@ def _measurements(
             reference_worker_heartbeat_at
         ),
         "brti_reference_worker_heartbeat_age_ms": reference_worker_heartbeat_age_ms,
+        "market_liveness_source": market_liveness_source,
+        "reference_liveness_source": reference_liveness_source,
+        "market_component_heartbeat_at": _isoformat_or_none(
+            market_component_heartbeat_at
+        ),
+        "reference_component_heartbeat_at": _isoformat_or_none(
+            reference_component_heartbeat_at
+        ),
+        "market_component_heartbeat_age_ms": market_component_heartbeat_age_ms,
+        "reference_component_heartbeat_age_ms": reference_component_heartbeat_age_ms,
+        "latest_aggregate_heartbeat_mode": latest_aggregate_heartbeat_mode,
+        "latest_component_heartbeat_mode": latest_component_heartbeat_mode,
+        "liveness_source_mismatch": liveness_source_mismatch,
         "distance_bps": _decimal_text(distance_bps),
         "candidate_side": candidate_side,
         "yes_bid": _decimal_text(getattr(orderbook, "yes_bid", None)),
@@ -2389,6 +2526,15 @@ def _measurement_summary(measurements: Any) -> JsonPayload | None:
         "brti_reference_carry_forward_allowed",
         "brti_reference_carry_forward_age_ms",
         "brti_reference_liveness_reason",
+        "market_liveness_source",
+        "reference_liveness_source",
+        "market_component_heartbeat_at",
+        "reference_component_heartbeat_at",
+        "market_component_heartbeat_age_ms",
+        "reference_component_heartbeat_age_ms",
+        "latest_aggregate_heartbeat_mode",
+        "latest_component_heartbeat_mode",
+        "liveness_source_mismatch",
         "distance_bps",
         "candidate_side",
         "seconds_left",
@@ -2423,6 +2569,33 @@ def _measurement_summary(measurements: Any) -> JsonPayload | None:
         "gate_results_summary",
     )
     return {key: measurements.get(key) for key in keys if key in measurements}
+
+
+def _summary_text(summary: JsonPayload | None, key: str) -> str | None:
+    if not isinstance(summary, dict):
+        return None
+    value = summary.get(key)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _summary_int(summary: JsonPayload | None, key: str) -> int | None:
+    if not isinstance(summary, dict):
+        return None
+    value = summary.get(key)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _summary_bool(summary: JsonPayload | None, key: str) -> bool | None:
+    if not isinstance(summary, dict):
+        return None
+    value = summary.get(key)
+    return value if isinstance(value, bool) else None
 
 
 def _gate_results_summary(gate_results: Any) -> JsonPayload | None:

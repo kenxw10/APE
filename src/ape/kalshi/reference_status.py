@@ -13,9 +13,8 @@ from ape.db.session import create_engine_from_config, create_session_factory
 from ape.kalshi.diagnostics import build_kalshi_config_diagnostic
 from ape.kalshi.reference_messages import BRTI_SOURCE
 from ape.repositories.reference_ticks import ReferenceTicksRepository
-from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
+from ape.worker.feed_liveness import load_reference_feed_liveness
 
-WORKER_SERVICE_NAME = "ape-worker"
 BRTI_SERIES_MAX_WINDOW_SECONDS = 900
 BRTI_SERIES_MAX_POINTS = 16_000
 
@@ -33,9 +32,15 @@ class BrtiReferenceStatusSnapshot:
     connection_state: str
     status_category: str
     connection_state_detail: str | None
+    liveness_source: str
     worker_heartbeat_at: datetime | None
     worker_heartbeat_age_ms: int | None
     worker_started_at: datetime | None
+    component_heartbeat_at: datetime | None
+    component_heartbeat_age_ms: int | None
+    latest_aggregate_heartbeat_mode: str | None
+    latest_component_heartbeat_mode: str | None
+    liveness_source_mismatch: bool
     worker_heartbeat_stale: bool
     last_connected_at: datetime | None
     last_successful_subscribe_at: datetime | None
@@ -143,8 +148,15 @@ def build_brti_reference_status(
     warnings: list[str] = []
     blockers: list[str] = []
     heartbeat_metadata: dict[str, Any] = {}
+    liveness_source = "missing"
     worker_heartbeat_at: datetime | None = None
+    worker_heartbeat_age_ms: int | None = None
     worker_started_at: datetime | None = None
+    component_heartbeat_at: datetime | None = None
+    component_heartbeat_age_ms: int | None = None
+    latest_aggregate_heartbeat_mode: str | None = None
+    latest_component_heartbeat_mode: str | None = None
+    liveness_source_mismatch = False
     latest_tick: ReferenceTick | None = None
 
     config_enabled = config.kalshi_cfbenchmarks_enabled
@@ -161,15 +173,27 @@ def build_brti_reference_status(
             try:
                 session_factory = create_session_factory(engine)
                 with session_factory() as session:
-                    heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
-                        WORKER_SERVICE_NAME
+                    liveness = load_reference_feed_liveness(
+                        session,
+                        config,
+                        checked_at=checked_at,
                     )
-                    if heartbeat is not None and isinstance(heartbeat.metadata_, dict):
-                        worker_heartbeat_at = _as_utc(heartbeat.heartbeat_at)
-                        worker_started_at = _as_utc(heartbeat.started_at)
-                        reference = _dict_or_empty(heartbeat.metadata_.get("reference"))
-                        heartbeat_metadata = _dict_or_empty(reference.get("brti"))
-                    latest_tick = ReferenceTicksRepository(session).get_latest_tick(BRTI_SOURCE)
+                    heartbeat_metadata = liveness.metadata or {}
+                    warnings.extend(liveness.warnings)
+                    liveness_source = liveness.source
+                    worker_heartbeat_at = liveness.heartbeat_at
+                    worker_heartbeat_age_ms = liveness.heartbeat_age_ms
+                    worker_started_at = liveness.started_at
+                    component_heartbeat_at = liveness.component_heartbeat_at
+                    component_heartbeat_age_ms = liveness.component_heartbeat_age_ms
+                    latest_aggregate_heartbeat_mode = (
+                        liveness.latest_aggregate_heartbeat_mode
+                    )
+                    latest_component_heartbeat_mode = (
+                        liveness.latest_component_heartbeat_mode
+                    )
+                    liveness_source_mismatch = liveness.liveness_source_mismatch
+                    latest_tick = liveness.latest_tick
             finally:
                 engine.dispose()
         except SQLAlchemyError:
@@ -197,7 +221,6 @@ def build_brti_reference_status(
     if effective_enabled and not effective_signer_ready:
         blockers.append("kalshi_cfbenchmarks_credentials_not_configured_or_not_parseable")
 
-    worker_heartbeat_age_ms = _age_ms(checked_at, worker_heartbeat_at)
     worker_heartbeat_stale = _is_stale(
         enabled=effective_enabled and effective_signer_ready and not blockers,
         latest_tick_received_at=worker_heartbeat_at,
@@ -374,9 +397,15 @@ def build_brti_reference_status(
             recovery_state=recovery_state,
             stale_reason=stale_reason,
         ),
+        liveness_source=liveness_source,
         worker_heartbeat_at=worker_heartbeat_at,
         worker_heartbeat_age_ms=worker_heartbeat_age_ms,
         worker_started_at=worker_started_at,
+        component_heartbeat_at=component_heartbeat_at,
+        component_heartbeat_age_ms=component_heartbeat_age_ms,
+        latest_aggregate_heartbeat_mode=latest_aggregate_heartbeat_mode,
+        latest_component_heartbeat_mode=latest_component_heartbeat_mode,
+        liveness_source_mismatch=liveness_source_mismatch,
         worker_heartbeat_stale=worker_heartbeat_stale,
         last_connected_at=last_connected_at,
         last_successful_subscribe_at=last_successful_subscribe_at,

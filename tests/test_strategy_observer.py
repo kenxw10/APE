@@ -41,6 +41,11 @@ from ape.strategy.observer import (
     StrategyObserver,
     evaluate_strategy_observer,
 )
+from ape.worker.services import (
+    WORKER_SERVICE_AGGREGATE,
+    WORKER_SERVICE_MARKET_WS,
+    WORKER_SERVICE_REFERENCE_BRTI,
+)
 
 
 @pytest.fixture
@@ -553,6 +558,79 @@ def test_strategy_uses_fresh_orderbook_when_stream_heartbeat_is_stale(
     assert decision.measurements["orderbook_stream_age_ms"] == 4000
     assert decision.measurements["orderbook_liveness_reason"] is None
     assert decision.measurements["gate_results"]["book"]["status"] == "pass"
+
+
+def test_strategy_prefers_component_liveness_over_stale_aggregate(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config(
+        {
+            "STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000",
+            "STRATEGY_KALSHI_BOOK_STREAM_MAX_AGE_MS": "3000",
+        }
+    )
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        latest_orderbook_received_at=now - timedelta(milliseconds=500),
+    )
+    _record_feed_heartbeat(
+        session,
+        now=now,
+        orderbook_stream_last_message_at=now - timedelta(milliseconds=500),
+        brti_last_valid_message_at=now - timedelta(milliseconds=500),
+    )
+    WorkerHeartbeatRepository(session).record_heartbeat(
+        WorkerHeartbeatInput(
+            service_name=WORKER_SERVICE_AGGREGATE,
+            started_at=now - timedelta(minutes=1),
+            heartbeat_at=now,
+            app_mode="OBSERVER",
+            is_safe=True,
+            metadata={
+                "mode": "strategy_observer",
+                "ws": {
+                    "enabled": True,
+                    "connection_state": "subscribed",
+                    "active_market_ticker": "KXBTC15M-ACTIVE",
+                    "last_message_at": (now - timedelta(seconds=30)).isoformat(),
+                    "last_ticker_at": (now - timedelta(seconds=30)).isoformat(),
+                    "last_trade_at": (now - timedelta(seconds=30)).isoformat(),
+                    "last_orderbook_at": (now - timedelta(seconds=30)).isoformat(),
+                    "orderbook_initialized": True,
+                    "warnings": [],
+                    "blockers": [],
+                },
+                "reference": {
+                    "brti": {
+                        "enabled": True,
+                        "connection_state": "subscribed",
+                        "last_message_at": (now - timedelta(seconds=30)).isoformat(),
+                        "last_valid_message_at": (
+                            now - timedelta(seconds=30)
+                        ).isoformat(),
+                        "warnings": ["brti_reference_transport_stale"],
+                        "blockers": [],
+                    }
+                },
+            },
+        )
+    )
+    session.commit()
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state != STATE_KALSHI_STALE
+    assert decision.decision_state != STATE_REFERENCE_STALE
+    assert decision.measurements["market_liveness_source"] == "component"
+    assert decision.measurements["reference_liveness_source"] == "component"
+    assert decision.measurements["orderbook_stream_age_ms"] == 500
+    assert decision.measurements["brti_reference_stream_age_ms"] == 500
 
 
 def test_strategy_blocks_old_orderbook_when_active_ticker_mismatches(session) -> None:
@@ -1691,41 +1769,63 @@ def _record_feed_heartbeat(
     }
     if orderbook_initialized is not None:
         ws_metadata["orderbook_initialized"] = orderbook_initialized
-    WorkerHeartbeatRepository(session).record_heartbeat(
+    reference_metadata = {
+        "enabled": True,
+        "connection_state": "subscribed",
+        "last_message_at": brti_message_at.isoformat(),
+        "last_valid_message_at": brti_message_at.isoformat(),
+        "last_valid_message_source_ts": (
+            brti_last_valid_message_source_ts.isoformat()
+            if brti_last_valid_message_source_ts is not None
+            else None
+        ),
+        "last_valid_message_value": brti_last_valid_message_value,
+        "valid_message_age_ms": (
+            brti_valid_message_age_ms
+            if brti_valid_message_age_ms is not None
+            else int((now - brti_message_at).total_seconds() * 1000)
+        ),
+        "valid_message_carried_forward": brti_carried_forward,
+        "reference_stream_live": ((now - brti_message_at).total_seconds() <= 3),
+        "warnings": [],
+        "blockers": [],
+    }
+    repository = WorkerHeartbeatRepository(session)
+    heartbeat_at = now - timedelta(milliseconds=250)
+    repository.record_heartbeat(
         WorkerHeartbeatInput(
-            service_name="ape-worker",
+            service_name=WORKER_SERVICE_MARKET_WS,
             started_at=now - timedelta(minutes=1),
-            heartbeat_at=now - timedelta(milliseconds=250),
+            heartbeat_at=heartbeat_at,
+            app_mode="OBSERVER",
+            is_safe=True,
+            metadata={"mode": "market_ws", "ws": ws_metadata},
+        )
+    )
+    repository.record_heartbeat(
+        WorkerHeartbeatInput(
+            service_name=WORKER_SERVICE_REFERENCE_BRTI,
+            started_at=now - timedelta(minutes=1),
+            heartbeat_at=heartbeat_at,
+            app_mode="OBSERVER",
+            is_safe=True,
+            metadata={
+                "mode": "reference_brti",
+                "reference": {"brti": reference_metadata},
+            },
+        )
+    )
+    repository.record_heartbeat(
+        WorkerHeartbeatInput(
+            service_name=WORKER_SERVICE_AGGREGATE,
+            started_at=now - timedelta(minutes=1),
+            heartbeat_at=heartbeat_at,
             app_mode="OBSERVER",
             is_safe=True,
             metadata={
                 "mode": "kalshi_ws",
                 "ws": ws_metadata,
-                "reference": {
-                    "brti": {
-                        "enabled": True,
-                        "connection_state": "subscribed",
-                        "last_message_at": brti_message_at.isoformat(),
-                        "last_valid_message_at": brti_message_at.isoformat(),
-                        "last_valid_message_source_ts": (
-                            brti_last_valid_message_source_ts.isoformat()
-                            if brti_last_valid_message_source_ts is not None
-                            else None
-                        ),
-                        "last_valid_message_value": brti_last_valid_message_value,
-                        "valid_message_age_ms": (
-                            brti_valid_message_age_ms
-                            if brti_valid_message_age_ms is not None
-                            else int((now - brti_message_at).total_seconds() * 1000)
-                        ),
-                        "valid_message_carried_forward": brti_carried_forward,
-                        "reference_stream_live": (
-                            (now - brti_message_at).total_seconds() <= 3
-                        ),
-                        "warnings": [],
-                        "blockers": [],
-                    }
-                },
+                "reference": {"brti": reference_metadata},
             },
         )
     )
