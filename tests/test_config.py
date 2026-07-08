@@ -82,7 +82,13 @@ def test_default_config_is_observer_only() -> None:
     assert config.strategy_reference_source_max_age_ms == 45000
     assert config.strategy_reference_source_warn_ms == 10000
     assert config.strategy_reference_require_trade_ready_fresh is True
+    assert config.strategy_reference_stream_max_age_ms == 3000
+    assert config.strategy_reference_carry_forward_max_age_ms == 15000
+    assert config.strategy_reference_allow_duplicate_source_ts_carry_forward is True
     assert config.strategy_kalshi_book_max_age_ms == 2000
+    assert config.strategy_kalshi_book_stream_max_age_ms == 3000
+    assert config.strategy_kalshi_book_carry_forward_max_age_ms == 30000
+    assert config.strategy_kalshi_book_require_stream_live is True
     assert config.strategy_no_entry_first_seconds == 300
     assert config.strategy_no_entry_last_seconds == 60
     assert config.strategy_min_entry_ask == 0.56
@@ -255,6 +261,12 @@ def test_strategy_observer_env_vars_parse_safely() -> None:
             "STRATEGY_REFERENCE_SOURCE_MAX_AGE_MS": "46000",
             "STRATEGY_REFERENCE_SOURCE_WARN_MS": "11000",
             "STRATEGY_REFERENCE_REQUIRE_TRADE_READY_FRESH": "false",
+            "STRATEGY_REFERENCE_STREAM_MAX_AGE_MS": "3100",
+            "STRATEGY_REFERENCE_CARRY_FORWARD_MAX_AGE_MS": "16000",
+            "STRATEGY_REFERENCE_ALLOW_DUPLICATE_SOURCE_TS_CARRY_FORWARD": "false",
+            "STRATEGY_KALSHI_BOOK_STREAM_MAX_AGE_MS": "3200",
+            "STRATEGY_KALSHI_BOOK_CARRY_FORWARD_MAX_AGE_MS": "31000",
+            "STRATEGY_KALSHI_BOOK_REQUIRE_STREAM_LIVE": "false",
         }
     )
 
@@ -292,7 +304,13 @@ def test_strategy_observer_env_vars_parse_safely() -> None:
     assert config.strategy_reference_source_max_age_ms == 46000
     assert config.strategy_reference_source_warn_ms == 11000
     assert config.strategy_reference_require_trade_ready_fresh is False
+    assert config.strategy_reference_stream_max_age_ms == 3100
+    assert config.strategy_reference_carry_forward_max_age_ms == 16000
+    assert config.strategy_reference_allow_duplicate_source_ts_carry_forward is False
     assert config.strategy_kalshi_book_max_age_ms == 2600
+    assert config.strategy_kalshi_book_stream_max_age_ms == 3200
+    assert config.strategy_kalshi_book_carry_forward_max_age_ms == 31000
+    assert config.strategy_kalshi_book_require_stream_live is False
     assert config.strategy_no_entry_first_seconds == 301
     assert config.strategy_no_entry_last_seconds == 61
     assert config.strategy_min_entry_ask == 0.57

@@ -213,6 +213,17 @@ def build_brti_reference_status(
         _datetime_or_none(heartbeat_metadata.get("last_persisted_at")),
         latest_received_at,
     )
+    last_valid_message_at = _datetime_or_none(
+        heartbeat_metadata.get("last_valid_message_at")
+    )
+    valid_message_carried_forward = (
+        _bool_or_none(heartbeat_metadata.get("valid_message_carried_forward")) is True
+    )
+    persistence_fresh_at = (
+        _latest_datetime(last_persisted_at, last_valid_message_at)
+        if valid_message_carried_forward
+        else last_persisted_at
+    )
     last_valid_tick_at = _latest_datetime(
         _datetime_or_none(heartbeat_metadata.get("last_valid_tick_at")),
         latest_received_at if _reference_tick_valid(latest_tick) else None,
@@ -238,7 +249,7 @@ def build_brti_reference_status(
     )
     persistence_stale = _is_stale(
         enabled=effective_enabled and effective_signer_ready and not blockers,
-        latest_tick_received_at=last_persisted_at,
+        latest_tick_received_at=persistence_fresh_at,
         checked_at=checked_at,
         stale_after_seconds=config.kalshi_cfbenchmarks_persistence_stale_after_seconds,
     )
@@ -290,7 +301,7 @@ def build_brti_reference_status(
             config.kalshi_cfbenchmarks_transport_stale_after_seconds
         ),
         persistence_stale=persistence_stale,
-        last_persisted_at=last_persisted_at,
+        last_persisted_at=persistence_fresh_at,
         persistence_stale_after_seconds=(
             config.kalshi_cfbenchmarks_persistence_stale_after_seconds
         ),

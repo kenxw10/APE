@@ -110,7 +110,13 @@ class AppConfig:
     strategy_reference_source_max_age_ms: int = 45_000
     strategy_reference_source_warn_ms: int = 10_000
     strategy_reference_require_trade_ready_fresh: bool = True
+    strategy_reference_stream_max_age_ms: int = 3_000
+    strategy_reference_carry_forward_max_age_ms: int = 15_000
+    strategy_reference_allow_duplicate_source_ts_carry_forward: bool = True
     strategy_kalshi_book_max_age_ms: int = 2_000
+    strategy_kalshi_book_stream_max_age_ms: int = 3_000
+    strategy_kalshi_book_carry_forward_max_age_ms: int = 30_000
+    strategy_kalshi_book_require_stream_live: bool = True
     strategy_no_entry_first_seconds: int = 300
     strategy_no_entry_last_seconds: int = 60
     strategy_min_entry_ask: float = 0.56
@@ -439,9 +445,37 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
             "STRATEGY_REFERENCE_REQUIRE_TRADE_READY_FRESH",
             _get(source, "STRATEGY_REFERENCE_REQUIRE_TRADE_READY_FRESH", "true"),
         ),
+        strategy_reference_stream_max_age_ms=_parse_int(
+            "STRATEGY_REFERENCE_STREAM_MAX_AGE_MS",
+            _get(source, "STRATEGY_REFERENCE_STREAM_MAX_AGE_MS", "3000"),
+        ),
+        strategy_reference_carry_forward_max_age_ms=_parse_int(
+            "STRATEGY_REFERENCE_CARRY_FORWARD_MAX_AGE_MS",
+            _get(source, "STRATEGY_REFERENCE_CARRY_FORWARD_MAX_AGE_MS", "15000"),
+        ),
+        strategy_reference_allow_duplicate_source_ts_carry_forward=_parse_bool(
+            "STRATEGY_REFERENCE_ALLOW_DUPLICATE_SOURCE_TS_CARRY_FORWARD",
+            _get(
+                source,
+                "STRATEGY_REFERENCE_ALLOW_DUPLICATE_SOURCE_TS_CARRY_FORWARD",
+                "true",
+            ),
+        ),
         strategy_kalshi_book_max_age_ms=_parse_int(
             "STRATEGY_KALSHI_BOOK_MAX_AGE_MS",
             _get(source, "STRATEGY_KALSHI_BOOK_MAX_AGE_MS", "2000"),
+        ),
+        strategy_kalshi_book_stream_max_age_ms=_parse_int(
+            "STRATEGY_KALSHI_BOOK_STREAM_MAX_AGE_MS",
+            _get(source, "STRATEGY_KALSHI_BOOK_STREAM_MAX_AGE_MS", "3000"),
+        ),
+        strategy_kalshi_book_carry_forward_max_age_ms=_parse_int(
+            "STRATEGY_KALSHI_BOOK_CARRY_FORWARD_MAX_AGE_MS",
+            _get(source, "STRATEGY_KALSHI_BOOK_CARRY_FORWARD_MAX_AGE_MS", "30000"),
+        ),
+        strategy_kalshi_book_require_stream_live=_parse_bool(
+            "STRATEGY_KALSHI_BOOK_REQUIRE_STREAM_LIVE",
+            _get(source, "STRATEGY_KALSHI_BOOK_REQUIRE_STREAM_LIVE", "true"),
         ),
         strategy_no_entry_first_seconds=_parse_int(
             "STRATEGY_NO_ENTRY_FIRST_SECONDS",

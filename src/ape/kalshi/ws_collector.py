@@ -66,6 +66,10 @@ class KalshiWsCollectorStatus:
     last_ticker_at: datetime | None = None
     last_orderbook_at: datetime | None = None
     last_trade_at: datetime | None = None
+    orderbook_initialized: bool = False
+    orderbook_sequence_number: int | None = None
+    orderbook_liveness_status: str = "disabled"
+    orderbook_liveness_reason: str | None = None
     reconnect_count: int = 0
     last_error_type: str | None = None
     last_error_message: str | None = None
@@ -87,6 +91,10 @@ class KalshiWsCollectorStatus:
             "last_ticker_at": _isoformat_or_none(self.last_ticker_at),
             "last_orderbook_at": _isoformat_or_none(self.last_orderbook_at),
             "last_trade_at": _isoformat_or_none(self.last_trade_at),
+            "orderbook_initialized": self.orderbook_initialized,
+            "orderbook_sequence_number": self.orderbook_sequence_number,
+            "orderbook_liveness_status": self.orderbook_liveness_status,
+            "orderbook_liveness_reason": self.orderbook_liveness_reason,
             "reconnect_count": self.reconnect_count,
             "last_error_type": self.last_error_type,
             "last_error_message": self.last_error_message,
@@ -112,6 +120,16 @@ class BrtiReferenceStatus:
     last_message_at: datetime | None = None
     last_persisted_at: datetime | None = None
     last_valid_tick_at: datetime | None = None
+    last_valid_message_at: datetime | None = None
+    last_valid_message_source_ts: datetime | None = None
+    last_valid_message_value: str | None = None
+    last_duplicate_valid_message_at: datetime | None = None
+    last_duplicate_valid_message_source_ts: datetime | None = None
+    last_duplicate_valid_message_value: str | None = None
+    valid_message_age_ms: int | None = None
+    valid_message_duplicate_source_ts: bool = False
+    valid_message_carried_forward: bool = False
+    reference_stream_live: bool = False
     last_healthy_at: datetime | None = None
     last_recovered_at: datetime | None = None
     stale_since: datetime | None = None
@@ -161,6 +179,22 @@ class BrtiReferenceStatus:
             "last_message_at": _isoformat_or_none(self.last_message_at),
             "last_persisted_at": _isoformat_or_none(self.last_persisted_at),
             "last_valid_tick_at": _isoformat_or_none(self.last_valid_tick_at),
+            "last_valid_message_at": _isoformat_or_none(self.last_valid_message_at),
+            "last_valid_message_source_ts": _isoformat_or_none(
+                self.last_valid_message_source_ts
+            ),
+            "last_valid_message_value": self.last_valid_message_value,
+            "last_duplicate_valid_message_at": _isoformat_or_none(
+                self.last_duplicate_valid_message_at
+            ),
+            "last_duplicate_valid_message_source_ts": _isoformat_or_none(
+                self.last_duplicate_valid_message_source_ts
+            ),
+            "last_duplicate_valid_message_value": self.last_duplicate_valid_message_value,
+            "valid_message_age_ms": self.valid_message_age_ms,
+            "valid_message_duplicate_source_ts": self.valid_message_duplicate_source_ts,
+            "valid_message_carried_forward": self.valid_message_carried_forward,
+            "reference_stream_live": self.reference_stream_live,
             "last_healthy_at": _isoformat_or_none(self.last_healthy_at),
             "last_recovered_at": _isoformat_or_none(self.last_recovered_at),
             "stale_since": _isoformat_or_none(self.stale_since),
@@ -387,6 +421,12 @@ class KalshiWsCollector:
                     market_ticker = resolver_result.market.market_ticker
                     market_close_time = resolver_result.market.close_time
                     self.status.active_market_ticker = market_ticker
+                    self.status.orderbook_initialized = False
+                    self.status.orderbook_sequence_number = None
+                    self.status.orderbook_liveness_status = "waiting_for_snapshot"
+                    self.status.orderbook_liveness_reason = (
+                        "kalshi_orderbook_uninitialized"
+                    )
                     market_subscription_enabled = True
         elif include_market:
             self.status.connection_state = "disabled"
@@ -608,7 +648,12 @@ class KalshiWsCollector:
                 self._add_warning("kalshi_ws_resubscribe_requested")
                 self.record_heartbeat()
                 return resubscribe_reason
-            self.record_heartbeat(force=self._consume_force_next_heartbeat())
+            self.record_heartbeat(
+                force=(
+                    self._consume_force_next_heartbeat()
+                    or self._market_liveness_heartbeat_due(received_at)
+                )
+            )
             if include_reference:
                 reconnect_reason = self._handle_reference_stale_if_due(received_at)
                 if reconnect_reason is not None:
@@ -650,7 +695,10 @@ class KalshiWsCollector:
             return None
 
         if message.kind == "orderbook_snapshot":
+            previous_liveness_status = self.status.orderbook_liveness_status
+            previous_liveness_reason = self.status.orderbook_liveness_reason
             orderbook.apply_snapshot(message)
+            self._sync_orderbook_status(orderbook, status="live", reason=None)
             snapshot = orderbook.snapshot_input(
                 received_at=received_at,
                 sequence_number=message.seq,
@@ -660,25 +708,47 @@ class KalshiWsCollector:
             if not self._persist_orderbook(snapshot):
                 return None
             self.status.last_orderbook_at = received_at
+            liveness_recovered = (
+                previous_liveness_status != "live"
+                or previous_liveness_reason is not None
+            )
             warnings_cleared = self._clear_warning_prefixes(
                 "invalid_orderbook_snapshot_"
             )
             warnings_cleared = (
-                self._clear_warnings("orderbook_delta_before_snapshot") or warnings_cleared
+                self._clear_warnings(
+                    "orderbook_delta_before_snapshot",
+                    "orderbook_sequence_gap_reset",
+                    "orderbook_reset_after_buffer_overflow",
+                    "kalshi_websocket_buffer_overflow",
+                    "kalshi_ws_resubscribe_requested",
+                )
+                or warnings_cleared
             )
-            if warnings_cleared:
+            if warnings_cleared or liveness_recovered:
                 self.record_heartbeat()
             return None
 
         if message.kind == "orderbook_delta":
             if not orderbook.initialized:
+                self._sync_orderbook_status(
+                    orderbook,
+                    status="blocked",
+                    reason="kalshi_orderbook_uninitialized",
+                )
                 self._add_warning("orderbook_delta_before_snapshot")
                 return None
             if orderbook.has_sequence_gap(message.seq):
                 orderbook.reset()
+                self._sync_orderbook_status(
+                    orderbook,
+                    status="blocked",
+                    reason="kalshi_orderbook_sequence_gap_or_reset",
+                )
                 self._add_warning("orderbook_sequence_gap_reset")
                 return "orderbook_sequence_gap_reset"
             orderbook.apply_delta(message)
+            self._sync_orderbook_status(orderbook, status="live", reason=None)
             snapshot = orderbook.snapshot_input(
                 received_at=received_at,
                 sequence_number=message.seq,
@@ -713,6 +783,11 @@ class KalshiWsCollector:
         if message.kind == "invalid":
             if message.reason == "kalshi_websocket_buffer_overflow":
                 orderbook.reset()
+                self._sync_orderbook_status(
+                    orderbook,
+                    status="blocked",
+                    reason="kalshi_orderbook_sequence_gap_or_reset",
+                )
                 self._add_warning("orderbook_reset_after_buffer_overflow")
                 self._add_warning(message.reason)
                 return "orderbook_reset_after_buffer_overflow"
@@ -777,6 +852,18 @@ class KalshiWsCollector:
         self._force_next_heartbeat = True
         return True
 
+    def _sync_orderbook_status(
+        self,
+        orderbook: OrderbookState,
+        *,
+        status: str,
+        reason: str | None,
+    ) -> None:
+        self.status.orderbook_initialized = orderbook.initialized
+        self.status.orderbook_sequence_number = orderbook.last_sequence_number
+        self.status.orderbook_liveness_status = status
+        self.status.orderbook_liveness_reason = reason
+
     def _persist_orderbook(self, snapshot) -> bool:
         if self.session_factory is None:
             self._add_warning("database_not_configured_for_orderbook")
@@ -829,6 +916,7 @@ class KalshiWsCollector:
                 repository = ReferenceTicksRepository(session)
                 latest_received = repository.get_latest_tick(tick.source)
                 latest = repository.get_latest_tick_with_source_ts(tick.source)
+                latest_valid = repository.get_latest_valid_tick(tick.source)
                 if (
                     tick.source_ts is not None
                     and latest is not None
@@ -847,7 +935,43 @@ class KalshiWsCollector:
                     self.brti_status.skipped_tick_count += 1
                     self.brti_status.last_skipped_reason = reason
                     self.brti_status.last_skipped_at = self.now()
-                    self._add_reference_warning("brti_duplicate_or_out_of_order_source_ts")
+                    if self._duplicate_reference_message_can_carry_forward(
+                        tick,
+                        latest_valid,
+                        reason=reason,
+                    ):
+                        self._mark_reference_valid_message(
+                            tick,
+                            duplicate=True,
+                            carried_forward=True,
+                        )
+                        self._clear_reference_warnings(
+                            "brti_duplicate_or_out_of_order_source_ts",
+                            "brti_reference_duplicate_conflict",
+                            "brti_reference_first_tick_timeout",
+                            "brti_reference_no_valid_tick_timeout",
+                            "brti_reference_reconnect_requested",
+                        )
+                        self._clear_reference_blockers(
+                            "brti_reference_duplicate_conflict",
+                        )
+                        self._clear_reference_error()
+                        self._force_next_heartbeat = True
+                        return True
+                    if (
+                        reason == "duplicate_source_ts"
+                        and _reference_input_valid(tick)
+                    ):
+                        self._add_reference_warning(
+                            "brti_reference_duplicate_conflict"
+                        )
+                        self._add_reference_blocker(
+                            "brti_reference_duplicate_conflict"
+                        )
+                    else:
+                        self._add_reference_warning(
+                            "brti_duplicate_or_out_of_order_source_ts"
+                        )
                     self._force_next_heartbeat = True
                     return False
                 row = repository.insert_tick(tick)
@@ -903,8 +1027,63 @@ class KalshiWsCollector:
         self.brti_status.final_minute_average_status = row.final_minute_average_status
         self.brti_status.source_age_ms = row.source_age_ms
         if reference_tick_valid:
-            self._mark_reference_fresh(row.received_at)
+            self._mark_reference_valid_message(
+                tick,
+                duplicate=False,
+                carried_forward=False,
+            )
+            self._clear_reference_warnings(
+                "brti_duplicate_or_out_of_order_source_ts",
+                "brti_reference_duplicate_conflict",
+            )
+            self._clear_reference_blockers("brti_reference_duplicate_conflict")
         return True
+
+    def _duplicate_reference_message_can_carry_forward(
+        self,
+        tick: ReferenceTickInput,
+        latest_valid,
+        *,
+        reason: str,
+    ) -> bool:
+        if not self.config.strategy_reference_allow_duplicate_source_ts_carry_forward:
+            return False
+        if reason != "duplicate_source_ts":
+            return False
+        if not _reference_input_valid(tick):
+            return False
+        if latest_valid is None or not _reference_tick_valid(latest_valid):
+            return False
+        if latest_valid.source_ts is None or tick.source_ts is None:
+            return False
+        if _as_utc(latest_valid.source_ts) != _as_utc(tick.source_ts):
+            return False
+        return latest_valid.parsed_value == tick.parsed_value
+
+    def _mark_reference_valid_message(
+        self,
+        tick: ReferenceTickInput,
+        *,
+        duplicate: bool,
+        carried_forward: bool,
+    ) -> None:
+        received_at = _as_utc(tick.received_at)
+        self.brti_status.last_valid_message_at = received_at
+        self.brti_status.last_valid_message_source_ts = tick.source_ts
+        self.brti_status.last_valid_message_value = _decimal_text_or_none(
+            tick.parsed_value
+        )
+        self.brti_status.valid_message_age_ms = 0
+        self.brti_status.valid_message_duplicate_source_ts = duplicate
+        self.brti_status.valid_message_carried_forward = carried_forward
+        self.brti_status.reference_stream_live = True
+        if duplicate:
+            self.brti_status.last_duplicate_valid_message_at = received_at
+            self.brti_status.last_duplicate_valid_message_source_ts = tick.source_ts
+            self.brti_status.last_duplicate_valid_message_value = (
+                _decimal_text_or_none(tick.parsed_value)
+            )
+        self._mark_reference_fresh(received_at)
 
     def _seconds_until_reference_check(self, checked_at: datetime) -> float | None:
         reason = self._reference_stale_reason(checked_at)
@@ -919,7 +1098,10 @@ class KalshiWsCollector:
         if self._reference_subscription_error_active():
             return None
 
-        last_valid = self.brti_status.last_valid_tick_at
+        last_valid = _latest_datetime(
+            self.brti_status.last_valid_message_at,
+            self.brti_status.last_valid_tick_at,
+        )
         last_connected = self.brti_status.last_connected_at
         if last_connected is not None and (
             last_valid is None or _as_utc(last_valid) < _as_utc(last_connected)
@@ -955,7 +1137,10 @@ class KalshiWsCollector:
         if self._reference_subscription_error_active():
             return None
 
-        last_valid = self.brti_status.last_valid_tick_at
+        last_valid = _latest_datetime(
+            self.brti_status.last_valid_message_at,
+            self.brti_status.last_valid_tick_at,
+        )
         last_connected = self.brti_status.last_connected_at
         if last_connected is not None and (
             last_valid is None or _as_utc(last_valid) < _as_utc(last_connected)
@@ -1047,6 +1232,7 @@ class KalshiWsCollector:
         heartbeat_at = self.now()
         if not force and not self._heartbeat_due(heartbeat_at):
             return
+        self._refresh_reference_valid_message_age(heartbeat_at)
 
         try:
             with self.session_factory() as session:
@@ -1083,6 +1269,26 @@ class KalshiWsCollector:
 
         self._last_heartbeat_at = heartbeat_at
 
+    def _refresh_reference_valid_message_age(self, heartbeat_at: datetime) -> None:
+        if self.brti_status.last_valid_message_at is None:
+            self.brti_status.valid_message_age_ms = None
+            self.brti_status.reference_stream_live = False
+            return
+        age_ms = max(
+            0,
+            int(
+                (
+                    _as_utc(heartbeat_at)
+                    - _as_utc(self.brti_status.last_valid_message_at)
+                ).total_seconds()
+                * 1000
+            ),
+        )
+        self.brti_status.valid_message_age_ms = age_ms
+        self.brti_status.reference_stream_live = (
+            age_ms <= self.config.strategy_reference_stream_max_age_ms
+        )
+
     def _collector_enabled(self) -> bool:
         return self.config.kalshi_ws_enabled or self._reference_collection_enabled()
 
@@ -1112,6 +1318,24 @@ class KalshiWsCollector:
             heartbeat_at.astimezone(UTC) - self._last_heartbeat_at.astimezone(UTC)
         ).total_seconds()
         return elapsed >= heartbeat_interval_seconds(self.config)
+
+    def _market_liveness_heartbeat_due(self, heartbeat_at: datetime) -> bool:
+        if not (
+            self.config.kalshi_ws_enabled
+            and self.config.strategy_kalshi_book_require_stream_live
+        ):
+            return False
+        if self._last_heartbeat_at is None:
+            return True
+        stream_max_seconds = max(
+            MIN_HEARTBEAT_INTERVAL_SECONDS,
+            self.config.strategy_kalshi_book_stream_max_age_ms / 1000,
+        )
+        interval_seconds = max(MIN_HEARTBEAT_INTERVAL_SECONDS, stream_max_seconds / 2)
+        elapsed = (
+            heartbeat_at.astimezone(UTC) - self._last_heartbeat_at.astimezone(UTC)
+        ).total_seconds()
+        return elapsed >= interval_seconds
 
     def _set_error(self, error_type: str, exc: Exception) -> None:
         self.status.connection_state = "error"
@@ -1175,6 +1399,18 @@ class KalshiWsCollector:
             warning for warning in self.brti_status.warnings if warning not in warning_set
         ]
         return self.brti_status.warnings != existing
+
+    def _clear_reference_blockers(self, *blockers: str) -> bool:
+        if not blockers:
+            return False
+        blocker_set = set(blockers)
+        existing = self.brti_status.blockers
+        self.brti_status.blockers = [
+            blocker
+            for blocker in self.brti_status.blockers
+            if blocker not in blocker_set
+        ]
+        return self.brti_status.blockers != existing
 
     def _clear_warning_prefixes(self, *prefixes: str) -> bool:
         if not prefixes:
@@ -1331,6 +1567,14 @@ def _reference_tick_valid(value: Any) -> bool:
         getattr(value, "parse_status", None) == "valid"
         and getattr(value, "parsed_value", None) is not None
         and getattr(value, "received_at", None) is not None
+    )
+
+
+def _reference_input_valid(value: ReferenceTickInput) -> bool:
+    return (
+        value.parse_status == "valid"
+        and value.parsed_value is not None
+        and value.received_at is not None
     )
 
 

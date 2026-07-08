@@ -170,3 +170,37 @@ PR 9a post-merge checkpoint:
   dry-run readiness checks, including BRTI source-age warnings and public-trade
   sample-size warnings, without raw payloads or execution controls.
 - Confirm `ENTER_PAPER` and `ENTER_LIVE` do not appear.
+
+PR 9b post-merge checkpoint:
+
+- Keep `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`,
+  `STRATEGY_DRY_RUN_ENABLED=true`, `TRADING_ENABLED=false`, and `EXECUTE=false`
+  on the Railway worker only.
+- Keep API and dashboard read-only; do not add dry-run controls, paper/live
+  controls, order placement, private channels, account reads, or credentials to
+  Vercel.
+- Redeploy the Railway worker after setting the PR 9b liveness variables:
+  `STRATEGY_REFERENCE_STREAM_MAX_AGE_MS=3000`,
+  `STRATEGY_REFERENCE_CARRY_FORWARD_MAX_AGE_MS=15000`,
+  `STRATEGY_REFERENCE_ALLOW_DUPLICATE_SOURCE_TS_CARRY_FORWARD=true`,
+  `STRATEGY_KALSHI_BOOK_STREAM_MAX_AGE_MS=3000`,
+  `STRATEGY_KALSHI_BOOK_CARRY_FORWARD_MAX_AGE_MS=30000`, and
+  `STRATEGY_KALSHI_BOOK_REQUIRE_STREAM_LIVE=true`.
+- Validate `/strategy/status`, `/strategy/decisions/latest`,
+  `/strategy/decisions/recent`, `/strategy/gates/recent`, `/ws/status`, and
+  `/reference/brti/status`.
+- Confirm unchanged orderbooks and unchanged valid BRTI source timestamps show
+  explicit carry-forward warnings only while stream liveness is proven and the
+  hard caps are not exceeded.
+- Confirm stale blockers such as `kalshi_orderbook_stream_stale`,
+  `kalshi_orderbook_sequence_gap_or_reset`,
+  `kalshi_orderbook_active_ticker_mismatch`,
+  `kalshi_orderbook_carry_forward_age_exceeds_limit`,
+  `brti_reference_stream_stale`, `brti_reference_transport_stale`,
+  `brti_reference_persistence_stale`,
+  `brti_reference_worker_heartbeat_stale`, and
+  `brti_reference_carry_forward_age_exceeds_limit` only appear for true
+  feed/liveness failures.
+- Confirm this PR did not tune strategy thresholds and did not add paper/live,
+  order, fill, private-channel, account, executor, or dashboard control
+  behavior.

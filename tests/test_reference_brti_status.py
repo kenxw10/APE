@@ -313,6 +313,78 @@ def test_brti_status_reports_stale_persisted_tick(tmp_path) -> None:
         engine.dispose()
 
 
+def test_brti_status_uses_carried_forward_valid_message_for_persistence_freshness(
+    tmp_path,
+) -> None:
+    now = datetime.now(UTC)
+    old_tick_time = now - timedelta(seconds=10)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_brti_carried_duplicate.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_PERSISTENCE_STALE_AFTER_SECONDS": "5",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        with session_factory() as session:
+            ReferenceTicksRepository(session).insert_tick(
+                ReferenceTickInput(
+                    source=BRTI_SOURCE,
+                    received_at=old_tick_time,
+                    source_ts=old_tick_time,
+                    parse_status="valid",
+                    parsed_value=Decimal("68000.12"),
+                )
+            )
+            WorkerHeartbeatRepository(session).record_heartbeat(
+                WorkerHeartbeatInput(
+                    service_name="ape-worker",
+                    started_at=now - timedelta(minutes=1),
+                    heartbeat_at=now,
+                    app_mode="OBSERVER",
+                    is_safe=True,
+                    metadata={
+                        "reference": {
+                            "brti": {
+                                "enabled": True,
+                                "configured": True,
+                                "signer_ready": True,
+                                "connection_state": "subscribed",
+                                "last_message_at": _isoformat_z(now),
+                                "last_valid_message_at": _isoformat_z(now),
+                                "valid_message_carried_forward": True,
+                                "last_persisted_at": _isoformat_z(old_tick_time),
+                                "last_valid_tick_at": _isoformat_z(old_tick_time),
+                                "warnings": [],
+                                "blockers": [],
+                            }
+                        }
+                    },
+                )
+            )
+            session.commit()
+
+        app = create_app(config)
+        with TestClient(app) as client:
+            response = client.get("/reference/brti/status")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["persistence_stale"] is False
+        assert body["stale"] is False
+        assert body["status_category"] == "healthy"
+        assert "brti_reference_persistence_stale" not in body["warnings"]
+        assert body["last_persisted_at"] == _isoformat_z(old_tick_time)
+    finally:
+        engine.dispose()
+
+
 def test_brti_source_age_over_legacy_threshold_does_not_fail_observer_health(tmp_path) -> None:
     now = datetime.now(UTC)
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_brti_stale_source_age.sqlite'}"
