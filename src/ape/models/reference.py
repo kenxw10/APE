@@ -25,9 +25,15 @@ class BrtiReferenceStatusResponse(BaseModel):
     connection_state: str
     status_category: str
     connection_state_detail: str | None
+    liveness_source: str
     worker_heartbeat_at: datetime | None
     worker_heartbeat_age_ms: int | None
     worker_started_at: datetime | None
+    component_heartbeat_at: datetime | None
+    component_heartbeat_age_ms: int | None
+    latest_aggregate_heartbeat_mode: str | None
+    latest_component_heartbeat_mode: str | None
+    liveness_source_mismatch: bool
     worker_heartbeat_stale: bool
     last_connected_at: datetime | None
     last_successful_subscribe_at: datetime | None

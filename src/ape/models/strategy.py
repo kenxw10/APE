@@ -64,6 +64,13 @@ class StrategyStatusResponse(BaseModel):
     distance_bps: Decimal | None
     seconds_left: int | None
     latest_measurements_summary: JsonPayload | None
+    market_liveness_source: str | None
+    reference_liveness_source: str | None
+    market_component_heartbeat_at: str | None
+    reference_component_heartbeat_at: str | None
+    market_component_heartbeat_age_ms: int | None
+    reference_component_heartbeat_age_ms: int | None
+    liveness_source_mismatch: bool | None
     gate_results_summary: JsonPayload | None
     decision_age_seconds: float | None
     stale: bool

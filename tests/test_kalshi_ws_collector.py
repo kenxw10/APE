@@ -26,6 +26,11 @@ from ape.repositories.public_trades import PublicTradesRepository
 from ape.repositories.reference_ticks import ReferenceTicksRepository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import assess_startup_safety
+from ape.worker.services import (
+    WORKER_SERVICE_AGGREGATE,
+    WORKER_SERVICE_MARKET_WS,
+    WORKER_SERVICE_REFERENCE_BRTI,
+)
 
 NOW = datetime(2026, 7, 5, 14, 35, tzinfo=UTC)
 
@@ -147,6 +152,9 @@ def test_collector_subscribes_and_persists_mock_messages(tmp_path) -> None:
             latest_book = OrderbookRepository(session).get_latest_snapshot("KXBTC15M-TEST")
             latest_trade = PublicTradesRepository(session).get_latest_trade("KXBTC15M-TEST")
             heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+            market_heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                WORKER_SERVICE_MARKET_WS
+            )
 
             assert latest_book is not None
             assert latest_book.sequence_number == 2
@@ -163,6 +171,13 @@ def test_collector_subscribes_and_persists_mock_messages(tmp_path) -> None:
             assert heartbeat is not None
             assert heartbeat.metadata_["ws"]["connection_state"] == "subscribed"
             assert heartbeat.metadata_["ws"]["active_market_ticker"] == "KXBTC15M-TEST"
+            assert market_heartbeat is not None
+            assert market_heartbeat.metadata_["mode"] == "market_ws"
+            assert market_heartbeat.metadata_["ws"]["connection_state"] == "subscribed"
+            assert (
+                market_heartbeat.metadata_["ws"]["active_market_ticker"]
+                == "KXBTC15M-TEST"
+            )
 
         assert websocket.sent == [
             {
@@ -348,6 +363,9 @@ def test_collector_subscribes_to_brti_with_market_channels_and_persists_tick(tmp
         with session_factory() as session:
             latest_tick = ReferenceTicksRepository(session).get_latest_tick(BRTI_SOURCE)
             heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+            reference_heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                WORKER_SERVICE_REFERENCE_BRTI
+            )
 
             assert latest_tick is not None
             assert latest_tick.parsed_value == Decimal("68000.12000000")
@@ -359,6 +377,11 @@ def test_collector_subscribes_to_brti_with_market_channels_and_persists_tick(tmp
             assert brti_metadata["subscription_id"] == 99
             assert brti_metadata["subscription_request_id"] == 3
             assert brti_metadata["latest_value"] == "68000.12"
+            assert reference_heartbeat is not None
+            reference_metadata = reference_heartbeat.metadata_["reference"]["brti"]
+            assert reference_heartbeat.metadata_["mode"] == "reference_brti"
+            assert reference_metadata["connection_state"] == "subscribed"
+            assert reference_metadata["subscription_id"] == 99
 
         assert websocket.sent[-1] == {
             "id": 3,
@@ -426,6 +449,12 @@ def test_collector_uses_dedicated_brti_connection_by_default(tmp_path) -> None:
             latest_book = OrderbookRepository(session).get_latest_snapshot("KXBTC15M-TEST")
             latest_tick = ReferenceTicksRepository(session).get_latest_tick(BRTI_SOURCE)
             heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+            market_heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                WORKER_SERVICE_MARKET_WS
+            )
+            reference_heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                WORKER_SERVICE_REFERENCE_BRTI
+            )
 
             assert latest_book is not None
             assert latest_tick is not None
@@ -437,6 +466,10 @@ def test_collector_uses_dedicated_brti_connection_by_default(tmp_path) -> None:
             assert brti_metadata["subscribed_channels"] == ["cfbenchmarks_value"]
             assert brti_metadata["subscription_request_id"] == 1
             assert brti_metadata["connection_state"] == "subscribed"
+            assert market_heartbeat is not None
+            assert market_heartbeat.metadata_["mode"] == "market_ws"
+            assert reference_heartbeat is not None
+            assert reference_heartbeat.metadata_["mode"] == "reference_brti"
 
         assert market_websocket.sent == [
             {
@@ -1608,9 +1641,15 @@ def test_collector_throttles_repeated_invalid_parse_heartbeats(tmp_path) -> None
 
         with session_factory() as session:
             heartbeat_count = session.scalar(select(func.count()).select_from(WorkerHeartbeat))
+            market_heartbeat_count = session.scalar(
+                select(func.count())
+                .select_from(WorkerHeartbeat)
+                .where(WorkerHeartbeat.service_name == WORKER_SERVICE_MARKET_WS)
+            )
             heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
 
-            assert heartbeat_count == 3
+            assert heartbeat_count == 6
+            assert market_heartbeat_count == 3
             assert heartbeat is not None
             ws_metadata = heartbeat.metadata_["ws"]
             assert ws_metadata["warnings"] == ["invalid_orderbook_snapshot_yes_level_size"]
@@ -2122,9 +2161,21 @@ def test_collector_persists_market_liveness_heartbeats_before_stream_gate(
 
         with session_factory() as session:
             heartbeat_count = session.scalar(select(func.count()).select_from(WorkerHeartbeat))
+            market_heartbeat_count = session.scalar(
+                select(func.count())
+                .select_from(WorkerHeartbeat)
+                .where(WorkerHeartbeat.service_name == WORKER_SERVICE_MARKET_WS)
+            )
+            aggregate_heartbeat_count = session.scalar(
+                select(func.count())
+                .select_from(WorkerHeartbeat)
+                .where(WorkerHeartbeat.service_name == WORKER_SERVICE_AGGREGATE)
+            )
             heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
 
-            assert heartbeat_count == 27
+            assert heartbeat_count == 104
+            assert market_heartbeat_count == 52
+            assert aggregate_heartbeat_count == 52
             assert heartbeat is not None
             assert heartbeat.metadata_["ws"]["last_message_at"] == "2026-07-05T14:35:50Z"
     finally:

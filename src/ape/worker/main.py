@@ -15,6 +15,13 @@ from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import SafetyError, assert_startup_safe, assess_startup_safety
 from ape.storage.retention import StorageRetentionWorker
 from ape.strategy.observer import StrategyObserver
+from ape.worker.services import (
+    WORKER_SERVICE_AGGREGATE,
+    WORKER_SERVICE_MARKET_WS,
+    WORKER_SERVICE_REFERENCE_BRTI,
+    WORKER_SERVICE_STORAGE_RETENTION,
+    WORKER_SERVICE_STRATEGY,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -134,66 +141,94 @@ def _record_idle_heartbeat(
 
     try:
         with session_factory() as session:
-            WorkerHeartbeatRepository(session).record_heartbeat(
+            repository = WorkerHeartbeatRepository(session)
+            metadata = {
+                "mode": "idle",
+                "ws": {
+                    "enabled": False,
+                    "connection_state": "disabled",
+                    "warnings": ["kalshi_ws_disabled"],
+                    "blockers": [],
+                },
+                "reference": {
+                    "brti": {
+                        "enabled": config.kalshi_cfbenchmarks_enabled,
+                        "source": "kalshi_cfbenchmarks_brti",
+                        "index_ids": list(config.kalshi_cfbenchmarks_index_ids),
+                        "connection_state": "disabled",
+                        "warnings": [],
+                        "blockers": [],
+                    }
+                },
+                "strategy": {
+                    "observer": {
+                        "enabled": config.strategy_observer_enabled,
+                        "connection_state": "disabled",
+                        "last_evaluated_at": None,
+                        "last_decision_state": None,
+                        "last_primary_reason": None,
+                        "last_decision_id": None,
+                        "warnings": ["strategy_observer_disabled"],
+                        "blockers": [],
+                    },
+                    "dry_run": {
+                        "enabled": False,
+                        "open_position_count": 0,
+                        "latest_event_type": None,
+                        "latest_position_id": None,
+                        "warnings": ["strategy_dry_run_disabled"],
+                        "blockers": [],
+                    }
+                },
+                "storage": {
+                    "retention": {
+                        "enabled": config.storage_retention_enabled,
+                        "connection_state": "disabled",
+                        "last_run_id": None,
+                        "last_started_at": None,
+                        "last_finished_at": None,
+                        "last_status": None,
+                        "last_deleted_rows": {},
+                        "last_raw_payload_stripped_rows": {},
+                        "warnings": ["storage_retention_disabled"],
+                        "blockers": [],
+                    }
+                },
+            }
+            component_metadata = (
+                (WORKER_SERVICE_MARKET_WS, {"mode": "market_ws", "ws": metadata["ws"]}),
+                (
+                    WORKER_SERVICE_REFERENCE_BRTI,
+                    {"mode": "reference_brti", "reference": metadata["reference"]},
+                ),
+                (
+                    WORKER_SERVICE_STRATEGY,
+                    {"mode": "strategy_observer", "strategy": metadata["strategy"]},
+                ),
+                (
+                    WORKER_SERVICE_STORAGE_RETENTION,
+                    {"mode": "storage_retention", "storage": metadata["storage"]},
+                ),
+            )
+            for service_name, service_metadata in component_metadata:
+                repository.record_heartbeat(
+                    WorkerHeartbeatInput(
+                        service_name=service_name,
+                        started_at=started_at,
+                        heartbeat_at=heartbeat_at,
+                        app_mode=config.app_mode.value,
+                        is_safe=safety.is_safe,
+                        metadata=service_metadata,
+                    )
+                )
+            repository.record_heartbeat(
                 WorkerHeartbeatInput(
-                    service_name="ape-worker",
+                    service_name=WORKER_SERVICE_AGGREGATE,
                     started_at=started_at,
                     heartbeat_at=heartbeat_at,
                     app_mode=config.app_mode.value,
                     is_safe=safety.is_safe,
-                    metadata={
-                        "mode": "idle",
-                        "ws": {
-                            "enabled": False,
-                            "connection_state": "disabled",
-                            "warnings": ["kalshi_ws_disabled"],
-                            "blockers": [],
-                        },
-                        "reference": {
-                            "brti": {
-                                "enabled": config.kalshi_cfbenchmarks_enabled,
-                                "source": "kalshi_cfbenchmarks_brti",
-                                "index_ids": list(config.kalshi_cfbenchmarks_index_ids),
-                                "connection_state": "disabled",
-                                "warnings": [],
-                                "blockers": [],
-                            }
-                        },
-                        "strategy": {
-                            "observer": {
-                                "enabled": config.strategy_observer_enabled,
-                                "connection_state": "disabled",
-                                "last_evaluated_at": None,
-                                "last_decision_state": None,
-                                "last_primary_reason": None,
-                                "last_decision_id": None,
-                                "warnings": ["strategy_observer_disabled"],
-                                "blockers": [],
-                            },
-                            "dry_run": {
-                                "enabled": False,
-                                "open_position_count": 0,
-                                "latest_event_type": None,
-                                "latest_position_id": None,
-                                "warnings": ["strategy_dry_run_disabled"],
-                                "blockers": [],
-                            }
-                        },
-                        "storage": {
-                            "retention": {
-                                "enabled": config.storage_retention_enabled,
-                                "connection_state": "disabled",
-                                "last_run_id": None,
-                                "last_started_at": None,
-                                "last_finished_at": None,
-                                "last_status": None,
-                                "last_deleted_rows": {},
-                                "last_raw_payload_stripped_rows": {},
-                                "warnings": ["storage_retention_disabled"],
-                                "blockers": [],
-                            }
-                        },
-                    },
+                    metadata=metadata,
                 )
             )
             session.commit()

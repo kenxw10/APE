@@ -204,3 +204,32 @@ PR 9b post-merge checkpoint:
 - Confirm this PR did not tune strategy thresholds and did not add paper/live,
   order, fill, private-channel, account, executor, or dashboard control
   behavior.
+
+PR 9c post-merge checkpoint:
+
+- Keep `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`,
+  `STRATEGY_DRY_RUN_ENABLED=true`, `TRADING_ENABLED=false`, and `EXECUTE=false`
+  on the Railway worker only.
+- Keep API and dashboard read-only; do not add dry-run controls, paper/live
+  controls, order placement, private channels, account reads, or credentials to
+  Vercel.
+- Redeploy the Railway worker.
+- Validate `/ws/status`, `/reference/brti/status`, `/strategy/status`,
+  `/strategy/decisions/latest`, `/strategy/decisions/recent`,
+  `/strategy/gates/recent`, `/storage/status`, `/health`, `/safety`,
+  `/db/status`, and `/ready`.
+- Confirm `/ws/status.liveness_source=component` from `ape-worker.market_ws`
+  and `/reference/brti/status.liveness_source=component` from
+  `ape-worker.reference_brti` after fresh worker heartbeats are written.
+- Confirm `/strategy/decisions/latest.measurements` includes
+  `market_liveness_source=component`, `reference_liveness_source=component`,
+  recent component heartbeat ages, `orderbook_stream_age_ms`,
+  `brti_reference_stream_age_ms`, and no
+  `feed_liveness_legacy_aggregate_fallback` warning.
+- Confirm stale blockers such as `kalshi_orderbook_stream_stale` and
+  `brti_reference_stream_stale` only appear when the corresponding component
+  heartbeat or stream timestamp is actually stale, not because strategy/storage
+  wrote the latest legacy aggregate heartbeat.
+- Confirm this PR did not tune strategy thresholds and did not add paper/live,
+  order, fill, private-channel, account, executor, or dashboard control
+  behavior.

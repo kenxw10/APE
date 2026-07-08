@@ -89,6 +89,15 @@ class KalshiWsStatusResponse(BaseModel):
     endpoint_path: str
     connection_state: str
     active_market_ticker: str | None
+    liveness_source: str
+    worker_heartbeat_at: datetime | None
+    worker_heartbeat_age_ms: int | None
+    worker_started_at: datetime | None
+    component_heartbeat_at: datetime | None
+    component_heartbeat_age_ms: int | None
+    latest_aggregate_heartbeat_mode: str | None
+    latest_component_heartbeat_mode: str | None
+    liveness_source_mismatch: bool
     subscribed_channels: list[str]
     subscription_ids: dict[str, int]
     last_connected_at: datetime | None
@@ -98,6 +107,8 @@ class KalshiWsStatusResponse(BaseModel):
     last_trade_at: datetime | None
     latest_orderbook_received_at: datetime | None
     latest_trade_received_at: datetime | None
+    orderbook_stream_age_ms: int | None
+    orderbook_liveness_reason: str | None
     reconnect_count: int
     last_error_type: str | None
     last_error_message: str | None

@@ -24,6 +24,8 @@ PR 8a adds worker-owned storage retention and read-only database lifecycle statu
 
 PR 9 adds the first dry-run-only BTC15 momentum decision engine. It is disabled by default, runs only on persisted market/BRTI/orderbook/trade rows when `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`, and `STRATEGY_DRY_RUN_ENABLED=true`, writes hypothetical simulated positions/events to dry-run ledger tables, and exposes read-only dry-run endpoints. It does not place orders, paper trade, live trade, read account balances, subscribe to private/user channels, or add execution controls.
 
+PR 9c makes worker feed liveness component-scoped. Market WebSocket, BRTI, strategy, and storage retention now write separate worker heartbeat service names so strategy readiness no longer depends on whichever service most recently wrote the legacy aggregate `ape-worker` row.
+
 ## Safety Defaults
 
 The default configuration is intentionally non-trading:
@@ -231,6 +233,17 @@ STRATEGY_MAX_SPREAD_CENTS=4
 After PR 8 is merged and market/BRTI WebSocket intake is healthy, enable the ledger only on the Railway worker with `STRATEGY_OBSERVER_ENABLED=true`. Keep `APP_MODE=OBSERVER`, `TRADING_ENABLED=false`, and `EXECUTE=false`. Do not add strategy observer env vars to Vercel.
 
 PR 9b separates event-driven feed liveness from value-change persistence. `STRATEGY_REFERENCE_MAX_AGE_MS` and `STRATEGY_KALSHI_BOOK_MAX_AGE_MS` remain preferred fresh-update thresholds. The stream max-age settings prove the WebSocket is still active, and the carry-forward caps bound how long unchanged BRTI/orderbook values may be reused for dry-run readiness. True stream failures, active-ticker mismatches, sequence resets, missing sides, crossed books, persistence failures, or carry-forward cap breaches still block. This does not tune strategy thresholds and does not add paper/live/order/private-channel behavior.
+
+PR 9c changes the liveness source of truth, not the thresholds. The worker writes these component heartbeat names:
+
+```text
+ape-worker.market_ws
+ape-worker.reference_brti
+ape-worker.strategy
+ape-worker.storage_retention
+```
+
+The legacy `ape-worker` aggregate row remains for backward compatibility. `/ws/status`, `/reference/brti/status`, and strategy readiness prefer the component row and fall back to the aggregate only when no component row exists; fallback responses include `feed_liveness_legacy_aggregate_fallback`. Strategy decision measurements expose `market_liveness_source`, `reference_liveness_source`, component heartbeat ages, stream ages, and liveness reasons so stale dry-run blockers can be tied to the actual feed component.
 
 The read-only endpoints are:
 

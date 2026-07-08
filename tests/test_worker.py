@@ -10,6 +10,7 @@ from ape.db.models import StorageRetentionRun, WorkerHeartbeat
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.worker.main import configure_logging, run_worker
+from ape.worker.services import WORKER_SERVICE_MARKET_WS, WORKER_SERVICE_REFERENCE_BRTI
 
 
 def test_configure_logging_reapplies_requested_level() -> None:
@@ -43,11 +44,21 @@ def test_worker_disabled_websocket_records_idle_heartbeat(tmp_path) -> None:
 
         with session_factory() as session:
             heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+            market_heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                WORKER_SERVICE_MARKET_WS
+            )
+            reference_heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                WORKER_SERVICE_REFERENCE_BRTI
+            )
 
             assert heartbeat is not None
             assert heartbeat.metadata_["mode"] == "idle"
             assert heartbeat.metadata_["ws"]["connection_state"] == "disabled"
             assert heartbeat.metadata_["strategy"]["dry_run"]["enabled"] is False
+            assert market_heartbeat is not None
+            assert market_heartbeat.metadata_["mode"] == "market_ws"
+            assert reference_heartbeat is not None
+            assert reference_heartbeat.metadata_["mode"] == "reference_brti"
     finally:
         engine.dispose()
 
@@ -75,7 +86,7 @@ def test_worker_disabled_websocket_throttles_idle_heartbeats(tmp_path) -> None:
         with session_factory() as session:
             heartbeat_count = session.scalar(select(func.count()).select_from(WorkerHeartbeat))
 
-            assert heartbeat_count == 1
+            assert heartbeat_count == 5
     finally:
         engine.dispose()
 

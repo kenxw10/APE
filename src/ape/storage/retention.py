@@ -20,6 +20,10 @@ from ape.repositories.inputs import StorageRetentionRunInput, WorkerHeartbeatInp
 from ape.repositories.storage_retention import StorageRetentionRepository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import SafetyAssessment
+from ape.worker.services import (
+    WORKER_SERVICE_AGGREGATE,
+    WORKER_SERVICE_STORAGE_RETENTION,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -230,6 +234,7 @@ class StorageRetentionWorker:
         self.status = StorageRetentionRuntimeStatus(
             enabled=config.storage_retention_enabled
         )
+        self._last_storage_heartbeat_at: datetime | None = None
 
     async def run(
         self,
@@ -276,7 +281,20 @@ class StorageRetentionWorker:
                     "mode": "storage_retention",
                     "storage": {"retention": self.status.as_metadata()},
                 }
-                latest_heartbeat = repository.get_latest_heartbeat("ape-worker")
+                heartbeat_at = self.now()
+                repository.record_heartbeat(
+                    WorkerHeartbeatInput(
+                        service_name=WORKER_SERVICE_STORAGE_RETENTION,
+                        started_at=self.started_at,
+                        heartbeat_at=heartbeat_at,
+                        app_mode=self.config.app_mode.value,
+                        is_safe=self.safety.is_safe,
+                        metadata=metadata,
+                    )
+                )
+                latest_heartbeat = repository.get_latest_heartbeat(
+                    WORKER_SERVICE_AGGREGATE
+                )
                 metadata_keys = _enabled_non_storage_metadata_keys(self.config)
                 if latest_heartbeat is not None and metadata_keys:
                     _preserve_existing_worker_metadata(
@@ -286,15 +304,16 @@ class StorageRetentionWorker:
                     )
                 repository.record_heartbeat(
                     WorkerHeartbeatInput(
-                        service_name="ape-worker",
+                        service_name=WORKER_SERVICE_AGGREGATE,
                         started_at=self.started_at,
-                        heartbeat_at=self.now(),
+                        heartbeat_at=heartbeat_at,
                         app_mode=self.config.app_mode.value,
                         is_safe=self.safety.is_safe,
                         metadata=metadata,
                     )
                 )
                 session.commit()
+                self._last_storage_heartbeat_at = heartbeat_at
         except SQLAlchemyError:
             LOGGER.warning("Storage retention heartbeat persistence failed.", exc_info=True)
 
@@ -485,12 +504,22 @@ def build_storage_status(
             session_factory = create_session_factory(engine)
             with session_factory() as session:
                 retention_repository = StorageRetentionRepository(session)
-                heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
-                    "ape-worker"
+                heartbeat_repository = WorkerHeartbeatRepository(session)
+                heartbeat = heartbeat_repository.get_latest_heartbeat(
+                    WORKER_SERVICE_STORAGE_RETENTION
                 )
                 worker_metadata = _storage_worker_metadata(
                     heartbeat.metadata_ if heartbeat else None
                 )
+                if worker_metadata is None:
+                    heartbeat = heartbeat_repository.get_latest_heartbeat(
+                        WORKER_SERVICE_AGGREGATE
+                    )
+                    worker_metadata = _storage_worker_metadata(
+                        heartbeat.metadata_ if heartbeat else None
+                    )
+                    if worker_metadata is not None:
+                        warnings.append("feed_liveness_legacy_aggregate_fallback")
                 latest_run = retention_repository.get_latest_run()
                 table_stats = [
                     _table_stats_for_policy(

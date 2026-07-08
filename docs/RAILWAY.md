@@ -115,6 +115,8 @@ When `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`, and `STRATEGY_DRY_RUN
 
 When `STORAGE_RETENTION_ENABLED=true`, the worker also runs the storage retention loop. It strips old raw payload JSON and deletes old observer rows in bounded chunks, then records each run in `storage_retention_runs` and worker heartbeat metadata. A failed retention run should not stop market WebSocket, BRTI, or strategy observer loops.
 
+Worker feed liveness is component-scoped after PR 9c. The market collector writes `ape-worker.market_ws`, the BRTI collector writes `ape-worker.reference_brti`, the strategy observer writes `ape-worker.strategy`, and storage retention writes `ape-worker.storage_retention`. The legacy `ape-worker` aggregate row is still written for compatibility, but `/ws/status`, `/reference/brti/status`, and strategy readiness prefer the component rows and show `feed_liveness_legacy_aggregate_fallback` only when falling back to the old aggregate.
+
 For `/ws/status`, `last_error_type` and `last_error_message` describe a current unresolved worker error. A successful current orderbook or trade database write clears old recovered errors so stale startup failures do not keep the status page red.
 
 If a manual migration is needed outside API startup, run:
@@ -308,7 +310,7 @@ KALSHI_CFBENCHMARKS_INDEX_IDS=BRTI
 
 The API service may keep `STRATEGY_OBSERVER_ENABLED=false`; `/strategy/status` reads latest decision rows and worker heartbeat metadata. Do not add strategy observer env vars, WebSocket settings, BRTI env vars, or Kalshi credentials to Vercel.
 
-PR 9b liveness note: orderbook and BRTI feeds are event-driven, so an unchanged value is not stale by itself. Dry-run readiness may carry forward unchanged values only when the worker heartbeat proves the relevant WebSocket stream is subscribed, fresh, active for the same market/index, initialized, and free of sequence/reset blockers. The carry-forward caps above are hard stops; true stream/feed failures still block.
+PR 9b/9c liveness note: orderbook and BRTI feeds are event-driven, so an unchanged value is not stale by itself. Dry-run readiness may carry forward unchanged values only when the component heartbeat proves the relevant WebSocket stream is subscribed, fresh, active for the same market/index, initialized, and free of sequence/reset blockers. The carry-forward caps above are hard stops; true stream/feed failures still block. A newer strategy or retention heartbeat must not make market/BRTI feed liveness stale because strategy reads `ape-worker.market_ws` and `ape-worker.reference_brti` directly.
 
 After enabling the strategy observer on the worker, redeploy the worker and validate:
 
@@ -328,6 +330,7 @@ Expected behavior:
 
 - `/strategy/status` shows `enabled=true`, `is_safe=true`, a recent latest decision, and `stale=false` when the worker is evaluating.
 - `/strategy/decisions/latest` returns a diagnostic state such as `OBSERVE_ONLY_MARKET`, `REFERENCE_STALE`, `KALSHI_STALE`, `TOO_EARLY`, or `TOO_CLOSE_TO_BOUNDARY`.
+- `/strategy/decisions/latest.measurements` shows `market_liveness_source=component`, `reference_liveness_source=component`, recent component heartbeat ages, and no `feed_liveness_legacy_aggregate_fallback` warning after the worker has written component rows.
 - No strategy endpoint returns private keys, signatures, raw Kalshi credentials, enter actions, order actions, fills, paper trades, or live-trading controls.
 - `strategy_decisions` rows are written at no more than the configured poll cadence unless the persisted context changes inside the same bucket.
 - Dashboard remains read-only and may show Strategy Observer status from the public API only.

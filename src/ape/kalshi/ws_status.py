@@ -10,11 +10,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from ape.config import AppConfig
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.kalshi.diagnostics import build_kalshi_config_diagnostic
-from ape.repositories.orderbook import OrderbookRepository
-from ape.repositories.public_trades import PublicTradesRepository
-from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
-
-WORKER_SERVICE_NAME = "ape-worker"
+from ape.worker.feed_liveness import (
+    FEED_LIVENESS_LEGACY_FALLBACK_WARNING,
+    load_market_feed_liveness,
+)
 
 
 @dataclass(frozen=True)
@@ -26,6 +25,15 @@ class KalshiWsStatusSnapshot:
     endpoint_path: str
     connection_state: str
     active_market_ticker: str | None
+    liveness_source: str
+    worker_heartbeat_at: datetime | None
+    worker_heartbeat_age_ms: int | None
+    worker_started_at: datetime | None
+    component_heartbeat_at: datetime | None
+    component_heartbeat_age_ms: int | None
+    latest_aggregate_heartbeat_mode: str | None
+    latest_component_heartbeat_mode: str | None
+    liveness_source_mismatch: bool
     subscribed_channels: list[str]
     subscription_ids: dict[str, int]
     last_connected_at: datetime | None
@@ -35,6 +43,8 @@ class KalshiWsStatusSnapshot:
     last_trade_at: datetime | None
     latest_orderbook_received_at: datetime | None
     latest_trade_received_at: datetime | None
+    orderbook_stream_age_ms: int | None
+    orderbook_liveness_reason: str | None
     reconnect_count: int
     last_error_type: str | None
     last_error_message: str | None
@@ -56,9 +66,19 @@ def build_kalshi_ws_status(
     warnings: list[str] = []
     blockers: list[str] = []
     heartbeat_metadata: dict[str, Any] = {}
+    liveness_source = "missing"
+    worker_heartbeat_at: datetime | None = None
+    worker_heartbeat_age_ms: int | None = None
+    worker_started_at: datetime | None = None
+    component_heartbeat_at: datetime | None = None
+    component_heartbeat_age_ms: int | None = None
+    latest_aggregate_heartbeat_mode: str | None = None
+    latest_component_heartbeat_mode: str | None = None
+    liveness_source_mismatch = False
     active_market_ticker: str | None = None
     latest_orderbook_at: datetime | None = None
     latest_trade_at: datetime | None = None
+    orderbook_stream_age_ms: int | None = None
 
     if not config.kalshi_ws_enabled:
         connection_state = "disabled"
@@ -74,27 +94,30 @@ def build_kalshi_ws_status(
             try:
                 session_factory = create_session_factory(engine)
                 with session_factory() as session:
-                    heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
-                        WORKER_SERVICE_NAME
+                    liveness = load_market_feed_liveness(
+                        session,
+                        config,
+                        checked_at=checked_at,
                     )
-                    if heartbeat is not None and isinstance(heartbeat.metadata_, dict):
-                        heartbeat_metadata = _dict_or_empty(heartbeat.metadata_.get("ws"))
-
-                    active_market_ticker = _str_or_none(
-                        heartbeat_metadata.get("active_market_ticker")
+                    heartbeat_metadata = liveness.metadata or {}
+                    warnings.extend(liveness.warnings)
+                    liveness_source = liveness.source
+                    worker_heartbeat_at = liveness.heartbeat_at
+                    worker_heartbeat_age_ms = liveness.heartbeat_age_ms
+                    worker_started_at = liveness.started_at
+                    component_heartbeat_at = liveness.component_heartbeat_at
+                    component_heartbeat_age_ms = liveness.component_heartbeat_age_ms
+                    latest_aggregate_heartbeat_mode = (
+                        liveness.latest_aggregate_heartbeat_mode
                     )
-                    latest_orderbook = (
-                        OrderbookRepository(session).get_latest_snapshot(active_market_ticker)
-                        if active_market_ticker
-                        else OrderbookRepository(session).get_latest_snapshot_any()
+                    latest_component_heartbeat_mode = (
+                        liveness.latest_component_heartbeat_mode
                     )
-                    latest_trade = PublicTradesRepository(session).get_latest_trade(
-                        active_market_ticker
-                    )
-                    latest_orderbook_at = (
-                        latest_orderbook.received_at if latest_orderbook else None
-                    )
-                    latest_trade_at = latest_trade.received_at if latest_trade else None
+                    liveness_source_mismatch = liveness.liveness_source_mismatch
+                    active_market_ticker = liveness.active_market_ticker
+                    latest_orderbook_at = liveness.latest_orderbook_received_at
+                    latest_trade_at = liveness.latest_trade_received_at
+                    orderbook_stream_age_ms = liveness.stream_age_ms
             finally:
                 engine.dispose()
         except SQLAlchemyError:
@@ -138,7 +161,11 @@ def build_kalshi_ws_status(
     if _healthy_stream_recovered_error(
         connection_state=connection_state,
         stale=stale,
-        warnings=final_warnings,
+        warnings=[
+            warning
+            for warning in final_warnings
+            if warning != FEED_LIVENESS_LEGACY_FALLBACK_WARNING
+        ],
         blockers=final_blockers,
         last_message_at=last_message_at,
         latest_orderbook_at=latest_orderbook_at,
@@ -155,6 +182,15 @@ def build_kalshi_ws_status(
         endpoint_path=parsed_endpoint.path,
         connection_state=connection_state,
         active_market_ticker=active_market_ticker,
+        liveness_source=liveness_source,
+        worker_heartbeat_at=worker_heartbeat_at,
+        worker_heartbeat_age_ms=worker_heartbeat_age_ms,
+        worker_started_at=worker_started_at,
+        component_heartbeat_at=component_heartbeat_at,
+        component_heartbeat_age_ms=component_heartbeat_age_ms,
+        latest_aggregate_heartbeat_mode=latest_aggregate_heartbeat_mode,
+        latest_component_heartbeat_mode=latest_component_heartbeat_mode,
+        liveness_source_mismatch=liveness_source_mismatch,
         subscribed_channels=_string_list(heartbeat_metadata.get("subscribed_channels")),
         subscription_ids=_int_dict(heartbeat_metadata.get("subscription_ids")),
         last_connected_at=_datetime_or_none(heartbeat_metadata.get("last_connected_at")),
@@ -170,6 +206,10 @@ def build_kalshi_ws_status(
         ),
         latest_orderbook_received_at=latest_orderbook_at,
         latest_trade_received_at=latest_trade_at,
+        orderbook_stream_age_ms=orderbook_stream_age_ms,
+        orderbook_liveness_reason=_str_or_none(
+            heartbeat_metadata.get("orderbook_liveness_reason")
+        ),
         reconnect_count=_int_or_zero(heartbeat_metadata.get("reconnect_count")),
         last_error_type=last_error_type,
         last_error_message=last_error_message,
