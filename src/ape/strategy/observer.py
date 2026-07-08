@@ -2798,6 +2798,17 @@ def _strategy_orderbook_stale_reason(
         market_ticker=market_ticker,
         stream_max_age_ms=config.strategy_kalshi_book_stream_max_age_ms,
     )
+    if (
+        stream_live_reason == "kalshi_orderbook_stream_stale"
+        and orderbook_stream_connection_state == "subscribed"
+        and not orderbook_stream_blockers
+        and orderbook_stream_age_ms is not None
+        and orderbook_stream_age_ms > config.strategy_kalshi_book_stream_max_age_ms
+        and orderbook_age_ms <= config.strategy_kalshi_book_max_age_ms
+    ):
+        # Collector heartbeats are throttled; a fresh persisted book is stronger
+        # evidence than the age of the latest heartbeat metadata row.
+        stream_live_reason = None
     if config.strategy_kalshi_book_require_stream_live and stream_live_reason is not None:
         if (
             stream_live_reason != "kalshi_orderbook_age_exceeds_limit"

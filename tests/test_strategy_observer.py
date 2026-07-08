@@ -518,6 +518,43 @@ def test_strategy_blocks_old_orderbook_when_stream_is_stale(session) -> None:
     assert decision.measurements["gate_results"]["book"]["status"] == "block"
 
 
+def test_strategy_uses_fresh_orderbook_when_stream_heartbeat_is_stale(
+    session,
+) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config(
+        {
+            "STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000",
+            "STRATEGY_KALSHI_BOOK_STREAM_MAX_AGE_MS": "3000",
+        }
+    )
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        latest_orderbook_received_at=now - timedelta(milliseconds=500),
+    )
+    _record_feed_heartbeat(
+        session,
+        now=now,
+        orderbook_stream_last_message_at=now - timedelta(seconds=4),
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state != STATE_KALSHI_STALE
+    assert decision.primary_reason != "kalshi_orderbook_stream_stale"
+    assert decision.measurements["orderbook_age_ms"] == 500
+    assert decision.measurements["orderbook_stream_age_ms"] == 4000
+    assert decision.measurements["orderbook_liveness_reason"] is None
+    assert decision.measurements["gate_results"]["book"]["status"] == "pass"
+
+
 def test_strategy_blocks_old_orderbook_when_active_ticker_mismatches(session) -> None:
     now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
     config = load_config({"STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000"})
