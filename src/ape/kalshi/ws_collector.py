@@ -1209,12 +1209,23 @@ class KalshiWsCollector:
             return False
 
         self._last_snapshot_resync_requested_at = checked_at
+        background_refresh = (
+            reason == "market_data_quiet"
+            and self.status.orderbook_initialized
+            and self.status.orderbook_liveness_status != "resync_pending"
+        )
         self.status.orderbook_recovery_action = "request_snapshot"
-        self.status.orderbook_liveness_status = "resync_pending"
-        self.status.orderbook_liveness_reason = "snapshot_resync_pending"
-        self.status.market_feed_snapshot_state = "resync_pending"
-        self.status.orderbook_snapshot_source = "blocked"
-        self._add_warning("snapshot_resync_pending")
+        if background_refresh:
+            self.status.orderbook_liveness_status = "live"
+            self.status.orderbook_liveness_reason = None
+            self.status.market_feed_snapshot_state = "initialized"
+            self.status.orderbook_snapshot_source = "carried_forward"
+        else:
+            self.status.orderbook_liveness_status = "resync_pending"
+            self.status.orderbook_liveness_reason = "snapshot_resync_pending"
+            self.status.market_feed_snapshot_state = "resync_pending"
+            self.status.orderbook_snapshot_source = "blocked"
+            self._add_warning("snapshot_resync_pending")
         self._force_next_heartbeat = True
         if reason == "market_roll":
             self._add_warning("market_roll_reresolve")

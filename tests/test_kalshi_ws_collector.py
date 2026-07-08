@@ -2378,6 +2378,70 @@ def test_collector_recovers_sequence_gap_with_subscription_snapshot(tmp_path) ->
         engine.dispose()
 
 
+def test_collector_keeps_initialized_book_usable_during_quiet_snapshot_refresh(
+    tmp_path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_quiet_refresh.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket([])
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=lambda *_args: websocket,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector.status.subscription_ids = {"orderbook_delta": 1}
+    collector.status.orderbook_initialized = True
+    collector.status.orderbook_liveness_status = "live"
+    collector.status.orderbook_liveness_reason = None
+    collector.status.market_feed_snapshot_state = "initialized"
+    collector.status.orderbook_snapshot_source = "fresh_update"
+
+    try:
+        requested = asyncio.run(
+            collector._request_orderbook_snapshot(
+                websocket,
+                market_ticker="KXBTC15M-TEST",
+                checked_at=NOW,
+                reason="market_data_quiet",
+            )
+        )
+
+        assert requested is True
+        assert websocket.sent == [
+            {
+                "id": 1000,
+                "cmd": "update_subscription",
+                "params": {
+                    "sids": [1],
+                    "market_tickers": ["KXBTC15M-TEST"],
+                    "action": "get_snapshot",
+                },
+            }
+        ]
+        assert collector.status.orderbook_recovery_action == "request_snapshot"
+        assert collector.status.orderbook_liveness_status == "live"
+        assert collector.status.orderbook_liveness_reason is None
+        assert collector.status.market_feed_snapshot_state == "initialized"
+        assert collector.status.orderbook_snapshot_source == "carried_forward"
+        assert "snapshot_resync_pending" not in collector.status.warnings
+    finally:
+        engine.dispose()
+
+
 def test_collector_resets_backoff_after_successful_websocket_cycle(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_backoff_reset.sqlite'}"
     config = load_config(
