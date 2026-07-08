@@ -1340,6 +1340,8 @@ def test_collector_clears_stale_brti_error_after_successful_persist(tmp_path) ->
             assert brti_metadata["last_error_type"] is None
             assert brti_metadata["last_error_message"] is None
             assert brti_metadata["warnings"] == []
+            assert brti_metadata["consecutive_fresh_tick_count"] == 1
+            assert brti_metadata["recovery_state"] == "recovering"
     finally:
         engine.dispose()
 

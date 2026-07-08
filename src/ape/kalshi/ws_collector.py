@@ -1032,7 +1032,6 @@ class KalshiWsCollector:
                 "brti_reference_duplicate_conflict",
             )
             self._clear_reference_blockers("brti_reference_duplicate_conflict")
-            self._mark_reference_fresh(row.received_at)
         return True
 
     def _duplicate_reference_message_can_carry_forward(
