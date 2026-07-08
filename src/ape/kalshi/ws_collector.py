@@ -929,6 +929,7 @@ class KalshiWsCollector:
                         )
                         self._clear_reference_warnings(
                             "brti_duplicate_or_out_of_order_source_ts",
+                            "brti_reference_duplicate_conflict",
                             "brti_reference_first_tick_timeout",
                             "brti_reference_no_valid_tick_timeout",
                             "brti_reference_reconnect_requested",

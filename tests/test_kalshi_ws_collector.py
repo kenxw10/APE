@@ -1168,6 +1168,66 @@ def test_collector_blocks_conflicting_duplicate_brti_source_timestamp(tmp_path) 
         engine.dispose()
 
 
+def test_collector_clears_brti_duplicate_conflict_after_recovered_duplicate(
+    tmp_path,
+) -> None:
+    database_url = (
+        f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_duplicate_conflict_recovered.sqlite'}"
+    )
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket(
+        [
+            _brti_payload(seq=1, value="68000.12"),
+            _brti_payload(seq=2, value="68001.00"),
+            _brti_payload(seq=3, value="68000.12"),
+        ]
+    )
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            ticks = ReferenceTicksRepository(session).get_recent_ticks(
+                BRTI_SOURCE,
+                limit=10,
+            )
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                "ape-worker"
+            )
+
+            assert len(ticks) == 1
+            assert heartbeat is not None
+            brti_metadata = heartbeat.metadata_["reference"]["brti"]
+            assert "brti_reference_duplicate_conflict" not in brti_metadata["warnings"]
+            assert "brti_reference_duplicate_conflict" not in brti_metadata["blockers"]
+            assert brti_metadata["valid_message_carried_forward"] is True
+    finally:
+        engine.dispose()
+
+
 def test_collector_clears_stale_brti_error_after_successful_persist(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_error_clear.sqlite'}"
     config = load_config(

@@ -393,6 +393,41 @@ def test_strategy_blocks_old_brti_when_valid_message_stream_is_stale(session) ->
     assert decision.measurements["gate_results"]["reference"]["status"] == "block"
 
 
+def test_strategy_recomputes_brti_valid_message_age_from_timestamp(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"STRATEGY_REFERENCE_MAX_AGE_MS": "2000"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        reference_received_lag_ms=5_000,
+    )
+    latest_tick = ReferenceTicksRepository(session).get_latest_valid_tick(
+        "kalshi_cfbenchmarks_brti"
+    )
+    assert latest_tick is not None
+    _record_feed_heartbeat(
+        session,
+        now=now,
+        brti_last_valid_message_at=now - timedelta(seconds=4),
+        brti_last_valid_message_source_ts=latest_tick.source_ts,
+        brti_last_valid_message_value=str(latest_tick.parsed_value),
+        brti_carried_forward=True,
+        brti_valid_message_age_ms=1_000,
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_REFERENCE_STALE
+    assert decision.primary_reason == "brti_reference_stream_stale"
+    assert decision.measurements["brti_reference_stream_age_ms"] == 4000
+
+
 def test_strategy_blocks_old_brti_when_carry_forward_cap_exceeded(session) -> None:
     now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
     config = load_config({"STRATEGY_REFERENCE_MAX_AGE_MS": "2000"})
@@ -1539,6 +1574,7 @@ def _record_feed_heartbeat(
     brti_last_valid_message_source_ts: datetime | None = None,
     brti_last_valid_message_value: str | None = "62110",
     brti_carried_forward: bool = False,
+    brti_valid_message_age_ms: int | None = None,
 ) -> None:
     stream_at = orderbook_stream_last_message_at or now - timedelta(seconds=1)
     brti_message_at = brti_last_valid_message_at or now - timedelta(seconds=1)
@@ -1576,8 +1612,10 @@ def _record_feed_heartbeat(
                             else None
                         ),
                         "last_valid_message_value": brti_last_valid_message_value,
-                        "valid_message_age_ms": int(
-                            (now - brti_message_at).total_seconds() * 1000
+                        "valid_message_age_ms": (
+                            brti_valid_message_age_ms
+                            if brti_valid_message_age_ms is not None
+                            else int((now - brti_message_at).total_seconds() * 1000)
                         ),
                         "valid_message_carried_forward": brti_carried_forward,
                         "reference_stream_live": (

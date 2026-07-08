@@ -893,9 +893,9 @@ def evaluate_strategy_observer(
             reference_worker_metadata,
             "valid_message_carried_forward",
         )
-        brti_reference_stream_age_ms = (
-            _metadata_int(reference_worker_metadata, "valid_message_age_ms")
-            or _age_ms(brti_reference_last_valid_message_at, evaluated_at)
+        brti_reference_stream_age_ms = _age_ms(
+            brti_reference_last_valid_message_at,
+            evaluated_at,
         )
         brti_reference_backend_transport_lag_ms = (
             _metadata_int(reference_worker_metadata, "backend_transport_lag_ms")
