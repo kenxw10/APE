@@ -177,6 +177,13 @@ def test_strategy_status_reports_latest_decision_and_worker_metadata(tmp_path) -
                         "candidate_side": "YES",
                         "seconds_left": 300,
                         "desired_side_ask": "0.62",
+                        "market_feed_transport_state": "healthy",
+                        "market_feed_subscription_state": "subscribed",
+                        "market_feed_snapshot_state": "initialized",
+                        "market_feed_active_ticker_state": "match",
+                        "market_feed_sequence_state": "clean",
+                        "market_data_quiet": False,
+                        "orderbook_recovery_action": "none",
                         "gate_results": {
                             "reference": {"status": "pass", "reason": None},
                             "book": {"status": "pass", "reason": None},
@@ -233,6 +240,13 @@ def test_strategy_status_reports_latest_decision_and_worker_metadata(tmp_path) -
         assert status["latest_primary_reason"] == "observer_decision_ledger_only"
         assert status["candidate_side"] == "YES"
         assert status["stale"] is False
+        assert status["market_feed_transport_state"] == "healthy"
+        assert status["market_feed_subscription_state"] == "subscribed"
+        assert status["market_feed_snapshot_state"] == "initialized"
+        assert status["market_feed_active_ticker_state"] == "match"
+        assert status["market_feed_sequence_state"] == "clean"
+        assert status["market_data_quiet"] is False
+        assert status["orderbook_recovery_action"] == "none"
         assert status["latest_measurements_summary"]["desired_side_ask"] == "0.62"
         assert status["gate_results_summary"]["trade_confirmation"]["status"] == "warn"
 

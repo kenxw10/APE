@@ -71,6 +71,13 @@ class StrategyStatusResponse(BaseModel):
     market_component_heartbeat_age_ms: int | None
     reference_component_heartbeat_age_ms: int | None
     liveness_source_mismatch: bool | None
+    market_feed_transport_state: str | None
+    market_feed_subscription_state: str | None
+    market_feed_snapshot_state: str | None
+    market_feed_active_ticker_state: str | None
+    market_feed_sequence_state: str | None
+    market_data_quiet: bool | None
+    orderbook_recovery_action: str | None
     gate_results_summary: JsonPayload | None
     decision_age_seconds: float | None
     stale: bool

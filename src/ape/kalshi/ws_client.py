@@ -68,6 +68,24 @@ def build_cfbenchmarks_subscribe_message(
     }
 
 
+def build_update_subscription_message(
+    *,
+    request_id: int,
+    subscription_id: int,
+    market_ticker: str,
+    get_snapshot: bool = True,
+) -> dict[str, Any]:
+    return {
+        "id": request_id,
+        "cmd": "update_subscription",
+        "sid": subscription_id,
+        "params": {
+            "market_tickers": [market_ticker],
+            "get_snapshot": get_snapshot,
+        },
+    }
+
+
 async def connect_websocket(
     *,
     endpoint: str,

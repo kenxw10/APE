@@ -270,8 +270,23 @@ def test_ws_status_reports_persisted_market_data(tmp_path) -> None:
                             "subscribed_channels": ["ticker", "orderbook_delta", "trade"],
                             "subscription_ids": {"ticker": 2, "orderbook_delta": 1, "trade": 2},
                             "last_message_at": _isoformat_z(now),
+                            "transport_alive": True,
+                            "transport_last_pong_at": _isoformat_z(now),
+                            "transport_age_ms": 0,
+                            "transport_liveness_reason": None,
+                            "last_market_data_message_at": _isoformat_z(now),
+                            "market_data_message_age_ms": 0,
                             "last_orderbook_at": _isoformat_z(now),
                             "last_trade_at": _isoformat_z(now),
+                            "market_feed_transport_state": "healthy",
+                            "market_feed_subscription_state": "subscribed",
+                            "market_feed_snapshot_state": "initialized",
+                            "market_feed_active_ticker_state": "match",
+                            "market_feed_sequence_state": "clean",
+                            "market_data_quiet": False,
+                            "market_data_quiet_age_ms": None,
+                            "orderbook_snapshot_source": "fresh_update",
+                            "orderbook_recovery_action": "none",
                             "last_error_type": "ProgrammingError",
                             "last_error_message": (
                                 "UndefinedColumn: orderbook_snapshots.yes_bid_count"
@@ -317,6 +332,14 @@ def test_ws_status_reports_persisted_market_data(tmp_path) -> None:
         assert body["connection_state"] == "subscribed"
         assert body["active_market_ticker"] == "KXBTC15M-ACTIVE"
         assert body["subscribed_channels"] == ["ticker", "orderbook_delta", "trade"]
+        assert body["market_feed_transport_state"] == "healthy"
+        assert body["market_feed_subscription_state"] == "subscribed"
+        assert body["market_feed_snapshot_state"] == "initialized"
+        assert body["market_feed_active_ticker_state"] == "match"
+        assert body["market_feed_sequence_state"] == "clean"
+        assert body["market_data_quiet"] is False
+        assert body["orderbook_snapshot_source"] == "fresh_update"
+        assert body["orderbook_recovery_action"] is None
         assert body["latest_orderbook_received_at"] is not None
         assert body["latest_trade_received_at"] is not None
         assert body["last_error_type"] is None

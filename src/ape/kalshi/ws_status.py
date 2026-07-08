@@ -45,6 +45,22 @@ class KalshiWsStatusSnapshot:
     latest_trade_received_at: datetime | None
     orderbook_stream_age_ms: int | None
     orderbook_liveness_reason: str | None
+    transport_alive: bool
+    transport_last_pong_at: datetime | None
+    transport_age_ms: int | None
+    transport_liveness_reason: str | None
+    last_market_data_message_at: datetime | None
+    market_data_message_age_ms: int | None
+    market_feed_transport_state: str
+    market_feed_subscription_state: str
+    market_feed_snapshot_state: str
+    market_feed_active_ticker_state: str
+    market_feed_sequence_state: str
+    market_data_quiet: bool
+    market_data_quiet_age_ms: int | None
+    orderbook_snapshot_age_ms: int | None
+    orderbook_snapshot_source: str | None
+    orderbook_recovery_action: str | None
     reconnect_count: int
     last_error_type: str | None
     last_error_message: str | None
@@ -79,6 +95,22 @@ def build_kalshi_ws_status(
     latest_orderbook_at: datetime | None = None
     latest_trade_at: datetime | None = None
     orderbook_stream_age_ms: int | None = None
+    transport_alive = False
+    transport_last_pong_at: datetime | None = None
+    transport_age_ms: int | None = None
+    transport_liveness_reason: str | None = None
+    last_market_data_message_at: datetime | None = None
+    market_data_message_age_ms: int | None = None
+    market_feed_transport_state = "unknown"
+    market_feed_subscription_state = "unknown"
+    market_feed_snapshot_state = "missing"
+    market_feed_active_ticker_state = "missing"
+    market_feed_sequence_state = "unknown"
+    market_data_quiet = False
+    market_data_quiet_age_ms: int | None = None
+    orderbook_snapshot_age_ms: int | None = None
+    orderbook_snapshot_source: str | None = None
+    orderbook_recovery_action: str | None = None
 
     if not config.kalshi_ws_enabled:
         connection_state = "disabled"
@@ -118,6 +150,26 @@ def build_kalshi_ws_status(
                     latest_orderbook_at = liveness.latest_orderbook_received_at
                     latest_trade_at = liveness.latest_trade_received_at
                     orderbook_stream_age_ms = liveness.stream_age_ms
+                    transport_alive = liveness.transport_alive
+                    transport_last_pong_at = liveness.transport_last_pong_at
+                    transport_age_ms = liveness.transport_age_ms
+                    transport_liveness_reason = liveness.transport_liveness_reason
+                    last_market_data_message_at = liveness.last_market_data_message_at
+                    market_data_message_age_ms = liveness.market_data_message_age_ms
+                    market_feed_transport_state = liveness.market_feed_transport_state
+                    market_feed_subscription_state = (
+                        liveness.market_feed_subscription_state
+                    )
+                    market_feed_snapshot_state = liveness.market_feed_snapshot_state
+                    market_feed_active_ticker_state = (
+                        liveness.market_feed_active_ticker_state
+                    )
+                    market_feed_sequence_state = liveness.market_feed_sequence_state
+                    market_data_quiet = liveness.market_data_quiet
+                    market_data_quiet_age_ms = liveness.market_data_quiet_age_ms
+                    orderbook_snapshot_age_ms = liveness.orderbook_snapshot_age_ms
+                    orderbook_snapshot_source = liveness.orderbook_snapshot_source
+                    orderbook_recovery_action = liveness.orderbook_recovery_action
             finally:
                 engine.dispose()
         except SQLAlchemyError:
@@ -145,14 +197,20 @@ def build_kalshi_ws_status(
     if last_message_at is None:
         last_message_at = _latest_datetime(latest_orderbook_at, latest_trade_at)
 
-    stale = _is_stale(
-        enabled=effective_enabled,
-        last_message_at=last_message_at,
-        checked_at=checked_at,
-        stale_after_seconds=config.kalshi_ws_heartbeat_timeout_seconds,
+    stale = (
+        effective_enabled
+        and market_feed_transport_state == "stale"
+        or _is_stale(
+            enabled=effective_enabled and market_feed_transport_state == "unknown",
+            last_message_at=last_message_at,
+            checked_at=checked_at,
+            stale_after_seconds=config.kalshi_ws_heartbeat_timeout_seconds,
+        )
     )
     if stale:
-        warnings.append("kalshi_ws_data_stale")
+        warnings.append("kalshi_orderbook_transport_stale")
+    if market_data_quiet and not stale:
+        warnings.append("kalshi_orderbook_data_quiet_carried_forward")
 
     final_warnings = sorted(set(warnings))
     final_blockers = sorted(set(blockers))
@@ -210,6 +268,22 @@ def build_kalshi_ws_status(
         orderbook_liveness_reason=_str_or_none(
             heartbeat_metadata.get("orderbook_liveness_reason")
         ),
+        transport_alive=transport_alive,
+        transport_last_pong_at=transport_last_pong_at,
+        transport_age_ms=transport_age_ms,
+        transport_liveness_reason=transport_liveness_reason,
+        last_market_data_message_at=last_market_data_message_at,
+        market_data_message_age_ms=market_data_message_age_ms,
+        market_feed_transport_state=market_feed_transport_state,
+        market_feed_subscription_state=market_feed_subscription_state,
+        market_feed_snapshot_state=market_feed_snapshot_state,
+        market_feed_active_ticker_state=market_feed_active_ticker_state,
+        market_feed_sequence_state=market_feed_sequence_state,
+        market_data_quiet=market_data_quiet,
+        market_data_quiet_age_ms=market_data_quiet_age_ms,
+        orderbook_snapshot_age_ms=orderbook_snapshot_age_ms,
+        orderbook_snapshot_source=orderbook_snapshot_source,
+        orderbook_recovery_action=orderbook_recovery_action,
         reconnect_count=_int_or_zero(heartbeat_metadata.get("reconnect_count")),
         last_error_type=last_error_type,
         last_error_message=last_error_message,

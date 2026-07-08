@@ -109,6 +109,22 @@ class KalshiWsStatusResponse(BaseModel):
     latest_trade_received_at: datetime | None
     orderbook_stream_age_ms: int | None
     orderbook_liveness_reason: str | None
+    transport_alive: bool
+    transport_last_pong_at: datetime | None
+    transport_age_ms: int | None
+    transport_liveness_reason: str | None
+    last_market_data_message_at: datetime | None
+    market_data_message_age_ms: int | None
+    market_feed_transport_state: str
+    market_feed_subscription_state: str
+    market_feed_snapshot_state: str
+    market_feed_active_ticker_state: str
+    market_feed_sequence_state: str
+    market_data_quiet: bool
+    market_data_quiet_age_ms: int | None
+    orderbook_snapshot_age_ms: int | None
+    orderbook_snapshot_source: str | None
+    orderbook_recovery_action: str | None
     reconnect_count: int
     last_error_type: str | None
     last_error_message: str | None

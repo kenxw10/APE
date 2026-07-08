@@ -233,3 +233,42 @@ PR 9c post-merge checkpoint:
 - Confirm this PR did not tune strategy thresholds and did not add paper/live,
   order, fill, private-channel, account, executor, or dashboard control
   behavior.
+
+PR 9d post-merge checkpoint:
+
+- Keep `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`,
+  `STRATEGY_DRY_RUN_ENABLED=true`, `TRADING_ENABLED=false`, and `EXECUTE=false`
+  on the Railway worker only.
+- Keep API and dashboard read-only; do not add dry-run controls, paper/live
+  controls, order placement, private channels, account reads, or credentials to
+  Vercel.
+- Redeploy the Railway worker.
+- Validate `/ws/status`, `/reference/brti/status`, `/strategy/status`,
+  `/strategy/decisions/latest`, `/strategy/decisions/recent`,
+  `/strategy/gates/recent`, `/storage/status`, `/health`, `/safety`,
+  `/db/status`, and `/ready`.
+- Confirm `/ws/status` and `/strategy/decisions/latest.measurements` expose
+  `market_feed_transport_state`, `market_feed_subscription_state`,
+  `market_feed_snapshot_state`, `market_feed_active_ticker_state`,
+  `market_feed_sequence_state`, `market_data_quiet`,
+  `market_data_quiet_age_ms`, `orderbook_snapshot_age_ms`,
+  `orderbook_snapshot_source`, and `orderbook_recovery_action`.
+- Confirm quiet market data with healthy transport, active subscription,
+  initialized snapshot, matching ticker, clean sequence, and in-cap book age
+  produces `kalshi_orderbook_data_quiet_carried_forward` as a warning instead
+  of `KALSHI_STALE`.
+- Confirm true market feed failures still block, including stale transport,
+  inactive subscription, active ticker mismatch, missing snapshot, sequence
+  gap/reset, invalid orderbook updates, snapshot resync failure, and
+  carry-forward cap breach.
+- Confirm market rollover records `market_roll_reresolve`, requires a fresh
+  snapshot for the new ticker before strategy uses the book, and then recovers
+  through a fresh or resynced snapshot.
+- Confirm `/reference/brti/status` exposes `brti_reference_transport_alive`,
+  `brti_reference_last_valid_message_age_ms`,
+  `brti_reference_no_valid_tick_timeout`, and
+  `brti_reference_reconnect_requested`. BRTI silence beyond the valid-tick
+  timeout should remain `REFERENCE_STALE` until recovered.
+- Confirm this PR did not tune strategy thresholds and did not add paper/live,
+  order, fill, private-channel, account, executor, or dashboard control
+  behavior.

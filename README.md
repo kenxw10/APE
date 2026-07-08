@@ -26,6 +26,8 @@ PR 9 adds the first dry-run-only BTC15 momentum decision engine. It is disabled 
 
 PR 9c makes worker feed liveness component-scoped. Market WebSocket, BRTI, strategy, and storage retention now write separate worker heartbeat service names so strategy readiness no longer depends on whichever service most recently wrote the legacy aggregate `ape-worker` row.
 
+PR 9d adds explicit market feed-state recovery. A quiet Kalshi orderbook/ticker/trade stream is now separate from WebSocket transport failure: `/ws/status` and strategy diagnostics report transport, subscription, active ticker, snapshot, sequence, quiet-data, snapshot source, and recovery-action state. Quiet market data can carry forward as a warning only while transport is alive, the subscription is active for the current BTC15 ticker, a snapshot is initialized, sequence state is clean, and the book is inside the hard carry-forward cap. BRTI remains stricter because valid BRTI ticks are expected roughly once per second.
+
 ## Safety Defaults
 
 The default configuration is intentionally non-trading:
@@ -244,6 +246,8 @@ ape-worker.storage_retention
 ```
 
 The legacy `ape-worker` aggregate row remains for backward compatibility. `/ws/status`, `/reference/brti/status`, and strategy readiness prefer the component row and fall back to the aggregate only when no component row exists; fallback responses include `feed_liveness_legacy_aggregate_fallback`. Strategy decision measurements expose `market_liveness_source`, `reference_liveness_source`, component heartbeat ages, stream ages, and liveness reasons so stale dry-run blockers can be tied to the actual feed component.
+
+PR 9d separates market transport liveness from market-data freshness. `/ws/status`, `/strategy/status`, `/strategy/decisions/latest`, `/strategy/decisions/recent`, and `/strategy/gates/recent` expose feed-state fields such as `market_feed_transport_state`, `market_feed_subscription_state`, `market_feed_snapshot_state`, `market_feed_active_ticker_state`, `market_feed_sequence_state`, `market_data_quiet`, `orderbook_snapshot_source`, and `orderbook_recovery_action`. The strategy may warn with `kalshi_orderbook_data_quiet_carried_forward` instead of blocking when quiet market data is still backed by a healthy socket, active subscription, initialized snapshot, clean sequence, and in-cap book age. True failures still block, including stale transport, inactive subscription, active ticker mismatch, missing snapshot, sequence gap/reset, invalid orderbook updates, failed snapshot recovery, or carry-forward cap breach.
 
 The read-only endpoints are:
 

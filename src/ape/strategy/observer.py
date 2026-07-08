@@ -193,6 +193,13 @@ class StrategyStatusSnapshot:
     market_component_heartbeat_age_ms: int | None
     reference_component_heartbeat_age_ms: int | None
     liveness_source_mismatch: bool | None
+    market_feed_transport_state: str | None
+    market_feed_subscription_state: str | None
+    market_feed_snapshot_state: str | None
+    market_feed_active_ticker_state: str | None
+    market_feed_sequence_state: str | None
+    market_data_quiet: bool | None
+    orderbook_recovery_action: str | None
     gate_results_summary: JsonPayload | None
     decision_age_seconds: float | None
     stale: bool
@@ -495,6 +502,15 @@ def evaluate_strategy_observer(
     orderbook_stream_active_market_ticker: str | None = None
     orderbook_stream_warnings: list[str] = []
     orderbook_stream_blockers: list[str] = []
+    market_feed_transport_state = "unknown"
+    market_feed_subscription_state = "unknown"
+    market_feed_snapshot_state = "missing"
+    market_feed_active_ticker_state = "missing"
+    market_feed_sequence_state = "unknown"
+    market_data_quiet = False
+    market_data_quiet_age_ms: int | None = None
+    orderbook_snapshot_age_ms: int | None = None
+    orderbook_recovery_action: str | None = None
     orderbook_carry_forward_allowed = False
     orderbook_carry_forward_age_ms: int | None = None
     orderbook_liveness_reason: str | None = None
@@ -622,6 +638,15 @@ def evaluate_strategy_observer(
             ),
             orderbook_stream_warnings=orderbook_stream_warnings,
             orderbook_stream_blockers=orderbook_stream_blockers,
+            market_feed_transport_state=market_feed_transport_state,
+            market_feed_subscription_state=market_feed_subscription_state,
+            market_feed_snapshot_state=market_feed_snapshot_state,
+            market_feed_active_ticker_state=market_feed_active_ticker_state,
+            market_feed_sequence_state=market_feed_sequence_state,
+            market_data_quiet=market_data_quiet,
+            market_data_quiet_age_ms=market_data_quiet_age_ms,
+            orderbook_snapshot_age_ms=orderbook_snapshot_age_ms,
+            orderbook_recovery_action=orderbook_recovery_action,
             orderbook_carry_forward_allowed=orderbook_carry_forward_allowed,
             orderbook_carry_forward_age_ms=orderbook_carry_forward_age_ms,
             orderbook_liveness_reason=orderbook_liveness_reason,
@@ -933,6 +958,15 @@ def evaluate_strategy_observer(
             "blockers",
         )
         orderbook_stream_age_ms = market_liveness.stream_age_ms
+        market_feed_transport_state = market_liveness.market_feed_transport_state
+        market_feed_subscription_state = market_liveness.market_feed_subscription_state
+        market_feed_snapshot_state = market_liveness.market_feed_snapshot_state
+        market_feed_active_ticker_state = market_liveness.market_feed_active_ticker_state
+        market_feed_sequence_state = market_liveness.market_feed_sequence_state
+        market_data_quiet = market_liveness.market_data_quiet
+        market_data_quiet_age_ms = market_liveness.market_data_quiet_age_ms
+        orderbook_snapshot_age_ms = market_liveness.orderbook_snapshot_age_ms
+        orderbook_recovery_action = market_liveness.orderbook_recovery_action
     if reference_worker_metadata is not None:
         brti_reference_status_category = _metadata_text(
             reference_worker_metadata,
@@ -1116,6 +1150,11 @@ def evaluate_strategy_observer(
         orderbook_stream_active_market_ticker=orderbook_stream_active_market_ticker,
         orderbook_stream_warnings=orderbook_stream_warnings,
         orderbook_stream_blockers=orderbook_stream_blockers,
+        market_feed_transport_state=market_feed_transport_state,
+        market_feed_subscription_state=market_feed_subscription_state,
+        market_feed_snapshot_state=market_feed_snapshot_state,
+        market_feed_active_ticker_state=market_feed_active_ticker_state,
+        market_feed_sequence_state=market_feed_sequence_state,
         market_ticker=market.market_ticker,
     )
     orderbook_carry_forward_age_ms = orderbook_age_ms
@@ -1123,18 +1162,25 @@ def evaluate_strategy_observer(
         orderbook_liveness_reason is None
         and orderbook_age_ms is not None
         and orderbook_age_ms > config.strategy_kalshi_book_max_age_ms
-        and orderbook_stream_age_ms is not None
-        and orderbook_stream_age_ms <= config.strategy_kalshi_book_stream_max_age_ms
         and orderbook_age_ms <= config.strategy_kalshi_book_carry_forward_max_age_ms
     )
     orderbook_snapshot_source = (
         "carried_forward"
         if orderbook_carry_forward_allowed
-        else "fresh_update" if orderbook_liveness_reason is None else "blocked"
+        else (
+            "fresh_update"
+            if orderbook_liveness_reason is None and not market_data_quiet
+            else "carried_forward"
+            if orderbook_liveness_reason is None and market_data_quiet
+            else "blocked"
+        )
     )
     if orderbook_carry_forward_allowed:
-        accumulated_warnings.append("kalshi_orderbook_carried_forward")
-        orderbook_liveness_reason = "kalshi_orderbook_carried_forward"
+        accumulated_warnings.append("kalshi_orderbook_data_quiet_carried_forward")
+        orderbook_liveness_reason = "kalshi_orderbook_data_quiet_carried_forward"
+    elif orderbook_liveness_reason is None and market_data_quiet:
+        accumulated_warnings.append("kalshi_orderbook_data_quiet_carried_forward")
+        orderbook_liveness_reason = "kalshi_orderbook_data_quiet_carried_forward"
 
     if (
         orderbook_snapshot_source == "blocked"
@@ -2055,6 +2101,34 @@ def _status_snapshot(
             latest_measurements_summary,
             "liveness_source_mismatch",
         ),
+        market_feed_transport_state=_summary_text(
+            latest_measurements_summary,
+            "market_feed_transport_state",
+        ),
+        market_feed_subscription_state=_summary_text(
+            latest_measurements_summary,
+            "market_feed_subscription_state",
+        ),
+        market_feed_snapshot_state=_summary_text(
+            latest_measurements_summary,
+            "market_feed_snapshot_state",
+        ),
+        market_feed_active_ticker_state=_summary_text(
+            latest_measurements_summary,
+            "market_feed_active_ticker_state",
+        ),
+        market_feed_sequence_state=_summary_text(
+            latest_measurements_summary,
+            "market_feed_sequence_state",
+        ),
+        market_data_quiet=_summary_bool(
+            latest_measurements_summary,
+            "market_data_quiet",
+        ),
+        orderbook_recovery_action=_summary_text(
+            latest_measurements_summary,
+            "orderbook_recovery_action",
+        ),
         gate_results_summary=gate_results_summary,
         decision_age_seconds=decision_age_seconds,
         stale=stale,
@@ -2121,6 +2195,15 @@ def _measurements(
     orderbook_stream_active_market_ticker: str | None,
     orderbook_stream_warnings: list[str],
     orderbook_stream_blockers: list[str],
+    market_feed_transport_state: str,
+    market_feed_subscription_state: str,
+    market_feed_snapshot_state: str,
+    market_feed_active_ticker_state: str,
+    market_feed_sequence_state: str,
+    market_data_quiet: bool,
+    market_data_quiet_age_ms: int | None,
+    orderbook_snapshot_age_ms: int | None,
+    orderbook_recovery_action: str | None,
     orderbook_carry_forward_allowed: bool,
     orderbook_carry_forward_age_ms: int | None,
     orderbook_liveness_reason: str | None,
@@ -2183,6 +2266,15 @@ def _measurements(
         brti_reference_worker_heartbeat_stale=brti_reference_worker_heartbeat_stale,
         orderbook_age_ms=orderbook_age_ms,
         orderbook_stream_age_ms=orderbook_stream_age_ms,
+        market_feed_transport_state=market_feed_transport_state,
+        market_feed_subscription_state=market_feed_subscription_state,
+        market_feed_snapshot_state=market_feed_snapshot_state,
+        market_feed_active_ticker_state=market_feed_active_ticker_state,
+        market_feed_sequence_state=market_feed_sequence_state,
+        market_data_quiet=market_data_quiet,
+        market_data_quiet_age_ms=market_data_quiet_age_ms,
+        orderbook_snapshot_age_ms=orderbook_snapshot_age_ms,
+        orderbook_recovery_action=orderbook_recovery_action,
         orderbook_carry_forward_allowed=orderbook_carry_forward_allowed,
         orderbook_carry_forward_age_ms=orderbook_carry_forward_age_ms,
         orderbook_liveness_reason=orderbook_liveness_reason,
@@ -2363,6 +2455,15 @@ def _measurements(
         "orderbook_stream_active_market_ticker": orderbook_stream_active_market_ticker,
         "orderbook_stream_warnings": orderbook_stream_warnings,
         "orderbook_stream_blockers": orderbook_stream_blockers,
+        "market_feed_transport_state": market_feed_transport_state,
+        "market_feed_subscription_state": market_feed_subscription_state,
+        "market_feed_snapshot_state": market_feed_snapshot_state,
+        "market_feed_active_ticker_state": market_feed_active_ticker_state,
+        "market_feed_sequence_state": market_feed_sequence_state,
+        "market_data_quiet": market_data_quiet,
+        "market_data_quiet_age_ms": market_data_quiet_age_ms,
+        "orderbook_snapshot_age_ms": orderbook_snapshot_age_ms,
+        "orderbook_recovery_action": orderbook_recovery_action,
         "orderbook_carry_forward_allowed": orderbook_carry_forward_allowed,
         "orderbook_carry_forward_age_ms": orderbook_carry_forward_age_ms,
         "orderbook_carry_forward_max_age_ms": (
@@ -2558,6 +2659,15 @@ def _measurement_summary(measurements: Any) -> JsonPayload | None:
         "dry_run_position_id",
         "orderbook_age_ms",
         "orderbook_stream_age_ms",
+        "market_feed_transport_state",
+        "market_feed_subscription_state",
+        "market_feed_snapshot_state",
+        "market_feed_active_ticker_state",
+        "market_feed_sequence_state",
+        "market_data_quiet",
+        "market_data_quiet_age_ms",
+        "orderbook_snapshot_age_ms",
+        "orderbook_recovery_action",
         "orderbook_carry_forward_allowed",
         "orderbook_carry_forward_age_ms",
         "orderbook_liveness_reason",
@@ -2635,6 +2745,15 @@ def _gate_results(
     brti_reference_worker_heartbeat_stale: bool,
     orderbook_age_ms: int | None,
     orderbook_stream_age_ms: int | None,
+    market_feed_transport_state: str,
+    market_feed_subscription_state: str,
+    market_feed_snapshot_state: str,
+    market_feed_active_ticker_state: str,
+    market_feed_sequence_state: str,
+    market_data_quiet: bool,
+    market_data_quiet_age_ms: int | None,
+    orderbook_snapshot_age_ms: int | None,
+    orderbook_recovery_action: str | None,
     orderbook_carry_forward_allowed: bool,
     orderbook_carry_forward_age_ms: int | None,
     orderbook_liveness_reason: str | None,
@@ -2701,9 +2820,12 @@ def _gate_results(
     } or primary_reason.startswith(book_block_prefixes):
         book_status = "block"
         book_reason = primary_reason
-    elif orderbook_carry_forward_allowed:
+    elif orderbook_carry_forward_allowed or (
+        market_data_quiet
+        and orderbook_liveness_reason == "kalshi_orderbook_data_quiet_carried_forward"
+    ):
         book_status = "warn"
-        book_reason = "kalshi_orderbook_carried_forward"
+        book_reason = "kalshi_orderbook_data_quiet_carried_forward"
 
     entry_price_status = (
         "not_evaluated" if dry_run_intended_entry_price is None else "pass"
@@ -2821,6 +2943,15 @@ def _gate_results(
             "snapshot_source": orderbook_snapshot_source,
             "stream_age_ms": orderbook_stream_age_ms,
             "book_age_ms": orderbook_age_ms,
+            "transport_state": market_feed_transport_state,
+            "subscription_state": market_feed_subscription_state,
+            "snapshot_state": market_feed_snapshot_state,
+            "active_ticker_state": market_feed_active_ticker_state,
+            "sequence_state": market_feed_sequence_state,
+            "market_data_quiet": market_data_quiet,
+            "market_data_quiet_age_ms": market_data_quiet_age_ms,
+            "snapshot_age_ms": orderbook_snapshot_age_ms,
+            "recovery_action": orderbook_recovery_action,
             "carry_forward_allowed": orderbook_carry_forward_allowed,
             "carry_forward_age_ms": orderbook_carry_forward_age_ms,
             "liveness_reason": orderbook_liveness_reason,
@@ -2953,6 +3084,11 @@ def _strategy_orderbook_stale_reason(
     orderbook_stream_active_market_ticker: str | None,
     orderbook_stream_warnings: list[str],
     orderbook_stream_blockers: list[str],
+    market_feed_transport_state: str,
+    market_feed_subscription_state: str,
+    market_feed_snapshot_state: str,
+    market_feed_active_ticker_state: str,
+    market_feed_sequence_state: str,
     market_ticker: str,
 ) -> str | None:
     if orderbook is None:
@@ -2960,7 +3096,13 @@ def _strategy_orderbook_stale_reason(
     if orderbook_age_ms is None:
         return "kalshi_orderbook_age_exceeds_limit"
 
-    metadata_present = isinstance(orderbook_worker_metadata, dict)
+    if not isinstance(orderbook_worker_metadata, dict):
+        return (
+            None
+            if orderbook_age_ms <= config.strategy_kalshi_book_max_age_ms
+            else "kalshi_orderbook_age_exceeds_limit"
+        )
+
     stream_live_reason = _orderbook_stream_unusable_reason(
         metadata=orderbook_worker_metadata,
         stream_age_ms=orderbook_stream_age_ms,
@@ -2969,32 +3111,30 @@ def _strategy_orderbook_stale_reason(
         warnings=orderbook_stream_warnings,
         blockers=orderbook_stream_blockers,
         market_ticker=market_ticker,
-        stream_max_age_ms=config.strategy_kalshi_book_stream_max_age_ms,
     )
-    if (
-        stream_live_reason == "kalshi_orderbook_stream_stale"
-        and orderbook_stream_connection_state == "subscribed"
-        and not orderbook_stream_blockers
-        and orderbook_stream_age_ms is not None
-        and orderbook_stream_age_ms > config.strategy_kalshi_book_stream_max_age_ms
-        and orderbook_age_ms <= config.strategy_kalshi_book_max_age_ms
-    ):
-        # Collector heartbeats are throttled; a fresh persisted book is stronger
-        # evidence than the age of the latest heartbeat metadata row.
-        stream_live_reason = None
-    if config.strategy_kalshi_book_require_stream_live and stream_live_reason is not None:
-        if (
-            stream_live_reason != "kalshi_orderbook_age_exceeds_limit"
-            or orderbook_age_ms > config.strategy_kalshi_book_max_age_ms
-        ):
-            return stream_live_reason
+    if stream_live_reason is not None:
+        return stream_live_reason
+    if market_feed_transport_state == "stale":
+        return "kalshi_orderbook_transport_stale"
+    if market_feed_subscription_state != "subscribed":
+        return "kalshi_orderbook_subscription_inactive"
+    if market_feed_active_ticker_state == "mismatch":
+        return "kalshi_orderbook_active_ticker_mismatch"
+    if market_feed_active_ticker_state == "missing":
+        return "kalshi_orderbook_active_ticker_missing"
+    if market_feed_snapshot_state == "missing":
+        return "kalshi_orderbook_uninitialized"
+    if market_feed_snapshot_state == "resync_pending":
+        return "kalshi_orderbook_snapshot_resync_pending"
+    if market_feed_snapshot_state == "stale_cap_exceeded":
+        return "kalshi_orderbook_carry_forward_age_exceeds_limit"
+    if market_feed_sequence_state in {"gap", "reset"}:
+        return "kalshi_orderbook_sequence_gap_or_reset"
 
     if orderbook_age_ms <= config.strategy_kalshi_book_max_age_ms:
         return None
-    if not metadata_present:
-        return "kalshi_orderbook_age_exceeds_limit"
-    if stream_live_reason is not None:
-        return stream_live_reason
+    if market_feed_transport_state != "healthy":
+        return "kalshi_orderbook_transport_stale"
     if orderbook_age_ms > config.strategy_kalshi_book_carry_forward_max_age_ms:
         return "kalshi_orderbook_carry_forward_age_exceeds_limit"
     return None
@@ -3009,12 +3149,11 @@ def _orderbook_stream_unusable_reason(
     warnings: list[str],
     blockers: list[str],
     market_ticker: str,
-    stream_max_age_ms: int,
 ) -> str | None:
     if not isinstance(metadata, dict):
         return "kalshi_orderbook_age_exceeds_limit"
     if connection_state != "subscribed":
-        return "kalshi_orderbook_stream_stale"
+        return "kalshi_orderbook_subscription_inactive"
     if active_market_ticker is not None and active_market_ticker != market_ticker:
         return "kalshi_orderbook_active_ticker_mismatch"
     if metadata.get("orderbook_initialized") is not True:
@@ -3033,11 +3172,8 @@ def _orderbook_stream_unusable_reason(
     ):
         return "kalshi_orderbook_invalid_update"
     if blockers:
-        return "kalshi_orderbook_stream_stale"
-    if stream_age_ms is None:
-        return "kalshi_orderbook_age_exceeds_limit"
-    if stream_age_ms > stream_max_age_ms:
-        return "kalshi_orderbook_stream_stale"
+        return "kalshi_orderbook_transport_stale"
+    del stream_age_ms
     return None
 
 

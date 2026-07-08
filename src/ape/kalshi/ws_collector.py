@@ -27,6 +27,7 @@ from ape.kalshi.resolver import ResolverState, resolve_active_btc15_market
 from ape.kalshi.ws_client import (
     build_cfbenchmarks_subscribe_message,
     build_subscribe_message,
+    build_update_subscription_message,
     connect_websocket,
     create_websocket_auth_headers,
 )
@@ -68,6 +69,13 @@ class KalshiWsCollectorStatus:
     subscription_ids: dict[str, int] = field(default_factory=dict)
     last_connected_at: datetime | None = None
     last_message_at: datetime | None = None
+    transport_alive: bool = False
+    transport_last_ping_at: datetime | None = None
+    transport_last_pong_at: datetime | None = None
+    transport_age_ms: int | None = None
+    transport_liveness_reason: str | None = None
+    last_market_data_message_at: datetime | None = None
+    market_data_message_age_ms: int | None = None
     last_ticker_at: datetime | None = None
     last_orderbook_at: datetime | None = None
     last_trade_at: datetime | None = None
@@ -75,6 +83,15 @@ class KalshiWsCollectorStatus:
     orderbook_sequence_number: int | None = None
     orderbook_liveness_status: str = "disabled"
     orderbook_liveness_reason: str | None = None
+    market_feed_transport_state: str = "unknown"
+    market_feed_subscription_state: str = "unknown"
+    market_feed_snapshot_state: str = "missing"
+    market_feed_active_ticker_state: str = "missing"
+    market_feed_sequence_state: str = "unknown"
+    market_data_quiet: bool = False
+    market_data_quiet_age_ms: int | None = None
+    orderbook_snapshot_source: str = "blocked"
+    orderbook_recovery_action: str = "none"
     reconnect_count: int = 0
     last_error_type: str | None = None
     last_error_message: str | None = None
@@ -93,6 +110,15 @@ class KalshiWsCollectorStatus:
             "subscription_ids": self.subscription_ids,
             "last_connected_at": _isoformat_or_none(self.last_connected_at),
             "last_message_at": _isoformat_or_none(self.last_message_at),
+            "transport_alive": self.transport_alive,
+            "transport_last_ping_at": _isoformat_or_none(self.transport_last_ping_at),
+            "transport_last_pong_at": _isoformat_or_none(self.transport_last_pong_at),
+            "transport_age_ms": self.transport_age_ms,
+            "transport_liveness_reason": self.transport_liveness_reason,
+            "last_market_data_message_at": _isoformat_or_none(
+                self.last_market_data_message_at
+            ),
+            "market_data_message_age_ms": self.market_data_message_age_ms,
             "last_ticker_at": _isoformat_or_none(self.last_ticker_at),
             "last_orderbook_at": _isoformat_or_none(self.last_orderbook_at),
             "last_trade_at": _isoformat_or_none(self.last_trade_at),
@@ -100,6 +126,15 @@ class KalshiWsCollectorStatus:
             "orderbook_sequence_number": self.orderbook_sequence_number,
             "orderbook_liveness_status": self.orderbook_liveness_status,
             "orderbook_liveness_reason": self.orderbook_liveness_reason,
+            "market_feed_transport_state": self.market_feed_transport_state,
+            "market_feed_subscription_state": self.market_feed_subscription_state,
+            "market_feed_snapshot_state": self.market_feed_snapshot_state,
+            "market_feed_active_ticker_state": self.market_feed_active_ticker_state,
+            "market_feed_sequence_state": self.market_feed_sequence_state,
+            "market_data_quiet": self.market_data_quiet,
+            "market_data_quiet_age_ms": self.market_data_quiet_age_ms,
+            "orderbook_snapshot_source": self.orderbook_snapshot_source,
+            "orderbook_recovery_action": self.orderbook_recovery_action,
             "reconnect_count": self.reconnect_count,
             "last_error_type": self.last_error_type,
             "last_error_message": self.last_error_message,
@@ -189,6 +224,18 @@ class BrtiReferenceStatus:
                 self.last_valid_message_source_ts
             ),
             "last_valid_message_value": self.last_valid_message_value,
+            "brti_reference_transport_alive": self.connection_state
+            in {"connected", "subscribed"}
+            and not self.blockers,
+            "brti_reference_last_valid_message_age_ms": self.valid_message_age_ms,
+            "brti_reference_no_valid_tick_timeout": (
+                "brti_reference_no_valid_tick_timeout" in self.warnings
+                or "brti_reference_no_valid_tick_timeout" in self.blockers
+            ),
+            "brti_reference_reconnect_requested": (
+                "brti_reference_reconnect_requested" in self.warnings
+                or "brti_reference_reconnect_requested" in self.blockers
+            ),
             "last_duplicate_valid_message_at": _isoformat_or_none(
                 self.last_duplicate_valid_message_at
             ),
@@ -258,6 +305,8 @@ class KalshiWsCollector:
         self._last_heartbeat_at: datetime | None = None
         self._last_market_heartbeat_at: datetime | None = None
         self._last_reference_heartbeat_at: datetime | None = None
+        self._last_snapshot_resync_requested_at: datetime | None = None
+        self._next_request_id = 1000
         self._force_next_heartbeat = False
         self._forced_diagnostic_signatures: set[str] = set()
 
@@ -443,12 +492,20 @@ class KalshiWsCollector:
                     market_ticker = resolver_result.market.market_ticker
                     market_close_time = resolver_result.market.close_time
                     self.status.active_market_ticker = market_ticker
+                    self.status.last_market_data_message_at = None
+                    self.status.market_data_message_age_ms = None
+                    self.status.market_data_quiet = False
+                    self.status.market_data_quiet_age_ms = None
                     self.status.orderbook_initialized = False
                     self.status.orderbook_sequence_number = None
                     self.status.orderbook_liveness_status = "waiting_for_snapshot"
                     self.status.orderbook_liveness_reason = (
                         "kalshi_orderbook_uninitialized"
                     )
+                    self.status.market_feed_snapshot_state = "missing"
+                    self.status.market_feed_sequence_state = "unknown"
+                    self.status.orderbook_snapshot_source = "blocked"
+                    self.status.orderbook_recovery_action = "none"
                     market_subscription_enabled = True
         elif include_market:
             self.status.connection_state = "disabled"
@@ -469,6 +526,9 @@ class KalshiWsCollector:
             try:
                 if market_subscription_enabled:
                     self.status.connection_state = "connected"
+                    self.status.transport_alive = True
+                    self.status.transport_last_pong_at = self.now()
+                    self.status.transport_liveness_reason = None
                 if brti_enabled:
                     self.brti_status.connection_state = "connected"
                     self.brti_status.last_connected_at = self.now()
@@ -591,6 +651,12 @@ class KalshiWsCollector:
             if _market_window_closed(self.now(), market_close_time):
                 self.status.connection_state = "market_roll_reresolve"
                 self._add_warning("active_market_window_closed")
+                self._add_warning("market_roll_reresolve")
+                self.status.orderbook_liveness_status = "resync_pending"
+                self.status.orderbook_liveness_reason = "snapshot_resync_pending"
+                self.status.market_feed_snapshot_state = "resync_pending"
+                self.status.orderbook_snapshot_source = "blocked"
+                self.status.orderbook_recovery_action = "resubscribe"
                 self.record_heartbeat(
                     include_market=market_ticker is not None,
                     include_reference=include_reference,
@@ -602,6 +668,9 @@ class KalshiWsCollector:
                     message_iterator,
                     _minimum_timeout_seconds(
                         _seconds_until_market_close(self.now(), market_close_time),
+                        self._seconds_until_market_transport_check(self.now())
+                        if market_ticker is not None
+                        else None,
                         self._seconds_until_reference_check(self.now())
                         if include_reference
                         else None,
@@ -610,14 +679,44 @@ class KalshiWsCollector:
             except StopAsyncIteration:
                 return None
             except TimeoutError:
-                if include_reference and self._reference_stale_reason(self.now()) is not None:
-                    reconnect_reason = self._handle_reference_stale_if_due(self.now())
+                checked_at = self.now()
+                if market_ticker is not None:
+                    transport_alive = await self._prove_market_transport_alive(
+                        websocket,
+                        checked_at,
+                    )
+                    if transport_alive:
+                        await self._request_orderbook_snapshot_if_due(
+                            websocket,
+                            market_ticker=market_ticker,
+                            orderbook=orderbook,
+                            checked_at=checked_at,
+                            reason="market_data_quiet",
+                        )
+                        self.record_heartbeat(
+                            include_market=True,
+                            include_reference=False,
+                        )
+                    else:
+                        self.record_heartbeat(
+                            include_market=True,
+                            include_reference=False,
+                        )
+                        return "kalshi_orderbook_transport_stale"
+
+                if (
+                    include_reference
+                    and self._reference_stale_reason(checked_at) is not None
+                ):
+                    reconnect_reason = self._handle_reference_stale_if_due(checked_at)
                     self.record_heartbeat(
                         include_market=market_ticker is not None,
                         include_reference=True,
                     )
                     if reconnect_reason is not None:
                         return reconnect_reason
+                    continue
+                if market_ticker is not None:
                     continue
                 self.status.connection_state = "market_roll_reresolve"
                 self._add_warning("active_market_window_closed")
@@ -710,7 +809,12 @@ class KalshiWsCollector:
                 received_at=received_at,
             )
             self.status.last_message_at = received_at
-            resubscribe_reason = self._handle_message(message, orderbook, received_at)
+            resubscribe_reason = await self._handle_message(
+                websocket,
+                message,
+                orderbook,
+                received_at,
+            )
             if resubscribe_reason is not None:
                 self.status.connection_state = "resubscribe_pending"
                 self._add_warning("kalshi_ws_resubscribe_requested")
@@ -751,24 +855,34 @@ class KalshiWsCollector:
             self._clear_reference_error()
             self._force_next_heartbeat = True
 
-    def _handle_message(
+    async def _handle_message(
         self,
+        websocket: Any,
         message: ParsedWsMessage,
         orderbook: OrderbookState,
         received_at: datetime,
     ) -> str | None:
         if message.kind == "control":
+            self._handle_market_control_message(message)
             return None
 
         if message.kind == "ticker":
+            self._mark_market_data_message(received_at)
             self.status.last_ticker_at = received_at
             return None
 
         if message.kind == "orderbook_snapshot":
+            self._mark_market_data_message(received_at)
             previous_liveness_status = self.status.orderbook_liveness_status
             previous_liveness_reason = self.status.orderbook_liveness_reason
             orderbook.apply_snapshot(message)
             self._sync_orderbook_status(orderbook, status="live", reason=None)
+            self.status.orderbook_snapshot_source = (
+                "resynced_snapshot"
+                if previous_liveness_status == "resync_pending"
+                else "fresh_update"
+            )
+            self.status.orderbook_recovery_action = "none"
             snapshot = orderbook.snapshot_input(
                 received_at=received_at,
                 sequence_number=message.seq,
@@ -792,6 +906,8 @@ class KalshiWsCollector:
                     "orderbook_reset_after_buffer_overflow",
                     "kalshi_websocket_buffer_overflow",
                     "kalshi_ws_resubscribe_requested",
+                    "snapshot_resync_pending",
+                    "market_roll_reresolve",
                 )
                 or warnings_cleared
             )
@@ -800,6 +916,7 @@ class KalshiWsCollector:
             return None
 
         if message.kind == "orderbook_delta":
+            self._mark_market_data_message(received_at)
             if not orderbook.initialized:
                 self._sync_orderbook_status(
                     orderbook,
@@ -812,13 +929,21 @@ class KalshiWsCollector:
                 orderbook.reset()
                 self._sync_orderbook_status(
                     orderbook,
-                    status="blocked",
+                    status="resync_pending",
                     reason="kalshi_orderbook_sequence_gap_or_reset",
                 )
                 self._add_warning("orderbook_sequence_gap_reset")
-                return "orderbook_sequence_gap_reset"
+                requested = await self._request_orderbook_snapshot(
+                    websocket,
+                    market_ticker=message.market_ticker or orderbook.market_ticker,
+                    checked_at=received_at,
+                    reason="sequence_gap",
+                )
+                return None if requested else "kalshi_orderbook_sequence_gap_or_reset"
             orderbook.apply_delta(message)
             self._sync_orderbook_status(orderbook, status="live", reason=None)
+            self.status.orderbook_snapshot_source = "fresh_update"
+            self.status.orderbook_recovery_action = "none"
             snapshot = orderbook.snapshot_input(
                 received_at=received_at,
                 sequence_number=message.seq,
@@ -837,6 +962,7 @@ class KalshiWsCollector:
             return None
 
         if message.kind == "trade" and message.trade is not None:
+            self._mark_market_data_message(received_at)
             if not self._persist_trade(message.trade):
                 return None
             self.status.last_trade_at = received_at
@@ -855,12 +981,18 @@ class KalshiWsCollector:
                 orderbook.reset()
                 self._sync_orderbook_status(
                     orderbook,
-                    status="blocked",
+                    status="resync_pending",
                     reason="kalshi_orderbook_sequence_gap_or_reset",
                 )
                 self._add_warning("orderbook_reset_after_buffer_overflow")
                 self._add_warning(message.reason)
-                return "orderbook_reset_after_buffer_overflow"
+                requested = await self._request_orderbook_snapshot(
+                    websocket,
+                    market_ticker=orderbook.market_ticker,
+                    checked_at=received_at,
+                    reason="buffer_overflow",
+                )
+                return None if requested else "orderbook_reset_after_buffer_overflow"
             if message.reason == "kalshi_websocket_error":
                 self._force_next_heartbeat = True
             if self._record_parse_diagnostic(message):
@@ -933,6 +1065,245 @@ class KalshiWsCollector:
         self.status.orderbook_sequence_number = orderbook.last_sequence_number
         self.status.orderbook_liveness_status = status
         self.status.orderbook_liveness_reason = reason
+        self._refresh_market_feed_state(self.now())
+
+    def _handle_market_control_message(self, message: ParsedWsMessage) -> None:
+        payload = message.raw_payload if isinstance(message.raw_payload, dict) else {}
+        request_id = _int_or_none(payload.get("id"))
+        subscription_id = message.sid or _message_sid(payload)
+        if request_id is None or subscription_id is None:
+            return
+
+        for channel, existing_id in list(self.status.subscription_ids.items()):
+            if existing_id == request_id:
+                self.status.subscription_ids[channel] = subscription_id
+
+    def _mark_market_data_message(self, received_at: datetime) -> None:
+        self.status.last_market_data_message_at = received_at
+        self.status.market_data_message_age_ms = 0
+        self.status.market_data_quiet = False
+        self.status.market_data_quiet_age_ms = 0
+        self._mark_market_transport_alive(received_at)
+
+    def _mark_market_transport_alive(self, checked_at: datetime) -> None:
+        self.status.transport_alive = True
+        self.status.transport_last_pong_at = checked_at
+        self.status.transport_age_ms = 0
+        self.status.transport_liveness_reason = None
+        self._clear_warnings("kalshi_orderbook_transport_stale")
+        self._refresh_market_feed_state(checked_at)
+
+    async def _prove_market_transport_alive(
+        self,
+        websocket: Any,
+        checked_at: datetime,
+    ) -> bool:
+        ping = getattr(websocket, "ping", None)
+        if not callable(ping):
+            self.status.transport_alive = False
+            self.status.transport_liveness_reason = "websocket_ping_unavailable"
+            self.status.market_feed_transport_state = "unknown"
+            return False
+
+        self.status.transport_last_ping_at = checked_at
+        try:
+            pong_waiter = ping()
+            if isawaitable(pong_waiter):
+                pong_waiter = await asyncio.wait_for(
+                    pong_waiter,
+                    timeout=self.config.kalshi_ws_heartbeat_timeout_seconds,
+                )
+            if isawaitable(pong_waiter):
+                await asyncio.wait_for(
+                    pong_waiter,
+                    timeout=self.config.kalshi_ws_heartbeat_timeout_seconds,
+                )
+        except Exception as exc:
+            self.status.transport_alive = False
+            self.status.transport_liveness_reason = "kalshi_orderbook_transport_stale"
+            self._add_warning("kalshi_orderbook_transport_stale")
+            self._set_error("market_ws_ping_failed", exc)
+            self._refresh_market_feed_state(checked_at)
+            return False
+
+        self._mark_market_transport_alive(self.now())
+        return True
+
+    async def _request_orderbook_snapshot_if_due(
+        self,
+        websocket: Any,
+        *,
+        market_ticker: str,
+        orderbook: OrderbookState,
+        checked_at: datetime,
+        reason: str,
+    ) -> bool:
+        self._refresh_market_feed_state(checked_at)
+        quiet = self.status.market_data_quiet
+        book_age_ms = _age_ms(self.status.last_orderbook_at, checked_at)
+        approaching_cap = (
+            book_age_ms is not None
+            and book_age_ms
+            >= int(self.config.strategy_kalshi_book_carry_forward_max_age_ms * 0.8)
+        )
+        needs_snapshot = (
+            quiet
+            or approaching_cap
+            or not orderbook.initialized
+            or self.status.orderbook_liveness_status == "resync_pending"
+        )
+        if not needs_snapshot:
+            self.status.orderbook_recovery_action = "none"
+            return False
+        if not self._snapshot_resync_due(checked_at):
+            return False
+        return await self._request_orderbook_snapshot(
+            websocket,
+            market_ticker=market_ticker,
+            checked_at=checked_at,
+            reason=reason,
+        )
+
+    async def _request_orderbook_snapshot(
+        self,
+        websocket: Any,
+        *,
+        market_ticker: str,
+        checked_at: datetime,
+        reason: str,
+    ) -> bool:
+        subscription_id = self.status.subscription_ids.get("orderbook_delta")
+        if subscription_id is None:
+            self.status.orderbook_recovery_action = "resubscribe"
+            self.status.orderbook_liveness_status = "blocked"
+            self.status.orderbook_liveness_reason = "kalshi_orderbook_subscription_inactive"
+            self._add_warning("orderbook_snapshot_resync_unavailable")
+            return False
+
+        request_id = self._next_request_id
+        self._next_request_id += 1
+        message = build_update_subscription_message(
+            request_id=request_id,
+            subscription_id=subscription_id,
+            market_ticker=market_ticker,
+            get_snapshot=True,
+        )
+        try:
+            await websocket.send(json.dumps(message))
+        except Exception as exc:
+            self.status.orderbook_recovery_action = "reconnect"
+            self.status.orderbook_liveness_status = "blocked"
+            self.status.orderbook_liveness_reason = (
+                "kalshi_orderbook_snapshot_resync_failed"
+            )
+            self._add_warning("kalshi_orderbook_snapshot_resync_failed")
+            self._set_error("orderbook_snapshot_resync_failed", exc)
+            return False
+
+        self._last_snapshot_resync_requested_at = checked_at
+        self.status.orderbook_recovery_action = "request_snapshot"
+        self.status.orderbook_liveness_status = "resync_pending"
+        self.status.orderbook_liveness_reason = "snapshot_resync_pending"
+        self.status.market_feed_snapshot_state = "resync_pending"
+        self.status.orderbook_snapshot_source = "blocked"
+        self._add_warning("snapshot_resync_pending")
+        self._force_next_heartbeat = True
+        if reason == "market_roll":
+            self._add_warning("market_roll_reresolve")
+        return True
+
+    def _snapshot_resync_due(self, checked_at: datetime) -> bool:
+        if self._last_snapshot_resync_requested_at is None:
+            return True
+        elapsed = (
+            checked_at.astimezone(UTC)
+            - self._last_snapshot_resync_requested_at.astimezone(UTC)
+        ).total_seconds()
+        return elapsed >= max(
+            1.0,
+            self.config.strategy_kalshi_book_stream_max_age_ms / 1000,
+        )
+
+    def _refresh_market_feed_state(self, checked_at: datetime) -> None:
+        transport_age_ms = _age_ms(self.status.transport_last_pong_at, checked_at)
+        self.status.transport_age_ms = transport_age_ms
+        if self.status.transport_last_pong_at is None:
+            self.status.market_feed_transport_state = "unknown"
+        elif (
+            self.status.transport_alive
+            and transport_age_ms is not None
+            and transport_age_ms
+            <= int(self.config.kalshi_ws_heartbeat_timeout_seconds * 1000)
+        ):
+            self.status.market_feed_transport_state = "healthy"
+            self.status.transport_liveness_reason = None
+        else:
+            self.status.market_feed_transport_state = "stale"
+            self.status.transport_alive = False
+            self.status.transport_liveness_reason = "kalshi_orderbook_transport_stale"
+
+        if self.status.connection_state == "subscribed":
+            self.status.market_feed_subscription_state = "subscribed"
+        elif self.status.connection_state == "error":
+            self.status.market_feed_subscription_state = "error"
+        elif self.status.connection_state in {"disabled", "not_configured"}:
+            self.status.market_feed_subscription_state = "unsubscribed"
+        else:
+            self.status.market_feed_subscription_state = "unknown"
+
+        if not self.status.active_market_ticker:
+            self.status.market_feed_active_ticker_state = "missing"
+        else:
+            self.status.market_feed_active_ticker_state = "match"
+
+        if self.status.orderbook_liveness_status == "resync_pending":
+            self.status.market_feed_snapshot_state = "resync_pending"
+        elif not self.status.orderbook_initialized:
+            self.status.market_feed_snapshot_state = "missing"
+        else:
+            book_age_ms = _age_ms(self.status.last_orderbook_at, checked_at)
+            self.status.market_feed_snapshot_state = (
+                "stale_cap_exceeded"
+                if book_age_ms is not None
+                and book_age_ms > self.config.strategy_kalshi_book_carry_forward_max_age_ms
+                else "initialized"
+            )
+
+        reasons = self.status.warnings + self.status.blockers
+        if any(
+            reason
+            in {
+                "orderbook_sequence_gap_reset",
+                "orderbook_reset_after_buffer_overflow",
+                "kalshi_websocket_buffer_overflow",
+            }
+            for reason in reasons
+        ):
+            self.status.market_feed_sequence_state = "gap"
+        elif (
+            self.status.orderbook_initialized
+            and self.status.orderbook_sequence_number is not None
+        ):
+            self.status.market_feed_sequence_state = "clean"
+        else:
+            self.status.market_feed_sequence_state = "unknown"
+
+        last_market_data = _latest_datetime(
+            self.status.last_market_data_message_at,
+            self.status.last_ticker_at,
+            self.status.last_orderbook_at,
+            self.status.last_trade_at,
+        )
+        self.status.last_market_data_message_at = last_market_data
+        market_data_age_ms = _age_ms(last_market_data, checked_at)
+        self.status.market_data_message_age_ms = market_data_age_ms
+        self.status.market_data_quiet = (
+            market_data_age_ms is not None
+            and market_data_age_ms > self.config.strategy_kalshi_book_stream_max_age_ms
+        )
+        self.status.market_data_quiet_age_ms = (
+            market_data_age_ms if self.status.market_data_quiet else None
+        )
 
     def _persist_orderbook(self, snapshot) -> bool:
         if self.session_factory is None:
@@ -1201,6 +1572,19 @@ class KalshiWsCollector:
 
         return max(0.0, (deadline - _as_utc(checked_at)).total_seconds())
 
+    def _seconds_until_market_transport_check(self, checked_at: datetime) -> float | None:
+        if not self.config.kalshi_ws_enabled:
+            return None
+        base = self.status.transport_last_pong_at or self.status.last_connected_at
+        if base is None:
+            return 0.0
+        interval_seconds = min(
+            MIN_HEARTBEAT_INTERVAL_SECONDS,
+            max(0.001, self.config.strategy_kalshi_book_stream_max_age_ms / 2000),
+        )
+        elapsed = (_as_utc(checked_at) - _as_utc(base)).total_seconds()
+        return max(0.0, interval_seconds - elapsed)
+
     def _reference_stale_reason(self, checked_at: datetime) -> str | None:
         if not self._reference_collection_enabled():
             return None
@@ -1379,6 +1763,7 @@ class KalshiWsCollector:
     ) -> None:
         if not force and not self._market_liveness_heartbeat_due(heartbeat_at):
             return
+        self._refresh_market_feed_state(heartbeat_at)
         if self._record_component_heartbeat(
             service_name=WORKER_SERVICE_MARKET_WS,
             heartbeat_at=heartbeat_at,
@@ -1731,6 +2116,15 @@ def _as_utc(value: datetime) -> datetime:
 def _latest_datetime(*values: datetime | None) -> datetime | None:
     present = [_as_utc(value) for value in values if value is not None]
     return max(present) if present else None
+
+
+def _age_ms(value_at: datetime | None, checked_at: datetime) -> int | None:
+    if value_at is None:
+        return None
+    return max(
+        0,
+        int((_as_utc(checked_at) - _as_utc(value_at)).total_seconds() * 1000),
+    )
 
 
 def _reference_reconnect_result(value: str | None) -> bool:

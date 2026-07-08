@@ -80,6 +80,10 @@ class BrtiReferenceStatusSnapshot:
     time_since_last_message_ms: int | None
     time_since_last_persisted_ms: int | None
     time_since_last_valid_tick_ms: int | None
+    brti_reference_transport_alive: bool
+    brti_reference_last_valid_message_age_ms: int | None
+    brti_reference_no_valid_tick_timeout: bool
+    brti_reference_reconnect_requested: bool
     last_error_type: str | None
     last_error_message: str | None
     reconnect_count: int
@@ -455,6 +459,21 @@ def build_brti_reference_status(
         time_since_last_message_ms=time_since_last_message_ms,
         time_since_last_persisted_ms=time_since_last_persisted_ms,
         time_since_last_valid_tick_ms=time_since_last_valid_tick_ms,
+        brti_reference_transport_alive=_bool_or_none(
+            heartbeat_metadata.get("brti_reference_transport_alive")
+        )
+        or False,
+        brti_reference_last_valid_message_age_ms=_int_or_none(
+            heartbeat_metadata.get("brti_reference_last_valid_message_age_ms")
+        ),
+        brti_reference_no_valid_tick_timeout=_bool_or_none(
+            heartbeat_metadata.get("brti_reference_no_valid_tick_timeout")
+        )
+        or "brti_reference_no_valid_tick_timeout" in warnings,
+        brti_reference_reconnect_requested=_bool_or_none(
+            heartbeat_metadata.get("brti_reference_reconnect_requested")
+        )
+        or "brti_reference_reconnect_requested" in warnings,
         last_error_type=_str_or_none(heartbeat_metadata.get("last_error_type")),
         last_error_message=_str_or_none(heartbeat_metadata.get("last_error_message")),
         reconnect_count=_int_or_zero(heartbeat_metadata.get("reconnect_count")),

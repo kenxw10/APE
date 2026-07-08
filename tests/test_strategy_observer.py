@@ -476,7 +476,11 @@ def test_strategy_carries_forward_old_orderbook_when_stream_is_live(session) -> 
         now=now,
         latest_orderbook_received_at=now - timedelta(seconds=5),
     )
-    _record_feed_heartbeat(session, now=now)
+    _record_feed_heartbeat(
+        session,
+        now=now,
+        orderbook_stream_last_message_at=now - timedelta(seconds=5),
+    )
 
     decision = evaluate_strategy_observer(
         config=config,
@@ -486,13 +490,19 @@ def test_strategy_carries_forward_old_orderbook_when_stream_is_live(session) -> 
     )
 
     assert decision.decision_state != STATE_KALSHI_STALE
-    assert "kalshi_orderbook_carried_forward" in decision.warnings
+    assert "kalshi_orderbook_data_quiet_carried_forward" in decision.warnings
     assert decision.measurements["orderbook_carry_forward_allowed"] is True
     assert decision.measurements["orderbook_snapshot_source"] == "carried_forward"
+    assert decision.measurements["market_feed_transport_state"] == "healthy"
+    assert decision.measurements["market_feed_subscription_state"] == "subscribed"
+    assert decision.measurements["market_feed_snapshot_state"] == "initialized"
+    assert decision.measurements["market_feed_sequence_state"] == "clean"
+    assert decision.measurements["market_data_quiet"] is True
+    assert decision.measurements["orderbook_recovery_action"] == "request_snapshot"
     assert decision.measurements["gate_results"]["book"]["status"] == "warn"
     assert (
         decision.measurements["gate_results"]["book"]["reason"]
-        == "kalshi_orderbook_carried_forward"
+        == "kalshi_orderbook_data_quiet_carried_forward"
     )
 
 
@@ -509,6 +519,9 @@ def test_strategy_blocks_old_orderbook_when_stream_is_stale(session) -> None:
         session,
         now=now,
         orderbook_stream_last_message_at=now - timedelta(seconds=4),
+        orderbook_transport_alive=False,
+        orderbook_transport_state="stale",
+        orderbook_transport_last_pong_at=now - timedelta(seconds=40),
     )
 
     decision = evaluate_strategy_observer(
@@ -519,8 +532,9 @@ def test_strategy_blocks_old_orderbook_when_stream_is_stale(session) -> None:
     )
 
     assert decision.decision_state == STATE_KALSHI_STALE
-    assert decision.primary_reason == "kalshi_orderbook_stream_stale"
+    assert decision.primary_reason == "kalshi_orderbook_transport_stale"
     assert decision.measurements["gate_results"]["book"]["status"] == "block"
+    assert decision.measurements["gate_results"]["book"]["transport_state"] == "stale"
 
 
 def test_strategy_uses_fresh_orderbook_when_stream_heartbeat_is_stale(
@@ -556,8 +570,11 @@ def test_strategy_uses_fresh_orderbook_when_stream_heartbeat_is_stale(
     assert decision.primary_reason != "kalshi_orderbook_stream_stale"
     assert decision.measurements["orderbook_age_ms"] == 500
     assert decision.measurements["orderbook_stream_age_ms"] == 4000
-    assert decision.measurements["orderbook_liveness_reason"] is None
-    assert decision.measurements["gate_results"]["book"]["status"] == "pass"
+    assert (
+        decision.measurements["orderbook_liveness_reason"]
+        == "kalshi_orderbook_data_quiet_carried_forward"
+    )
+    assert decision.measurements["gate_results"]["book"]["status"] == "warn"
 
 
 def test_strategy_prefers_component_liveness_over_stale_aggregate(session) -> None:
@@ -761,6 +778,7 @@ def test_strategy_blocks_old_orderbook_when_carry_forward_cap_exceeded(session) 
 
     assert decision.decision_state == STATE_KALSHI_STALE
     assert decision.primary_reason == "kalshi_orderbook_carry_forward_age_exceeds_limit"
+    assert decision.measurements["orderbook_recovery_action"] == "request_snapshot"
 
 
 def test_strategy_gate_summary_blocks_contract_ask_pullback(session) -> None:
@@ -1747,6 +1765,9 @@ def _record_feed_heartbeat(
     orderbook_active_market_ticker: str = "KXBTC15M-ACTIVE",
     orderbook_warnings: list[str] | None = None,
     orderbook_initialized: bool | None = True,
+    orderbook_transport_alive: bool = True,
+    orderbook_transport_last_pong_at: datetime | None = None,
+    orderbook_transport_state: str = "healthy",
     brti_last_valid_message_at: datetime | None = None,
     brti_last_valid_message_source_ts: datetime | None = None,
     brti_last_valid_message_value: str | None = "62110",
@@ -1754,12 +1775,51 @@ def _record_feed_heartbeat(
     brti_valid_message_age_ms: int | None = None,
 ) -> None:
     stream_at = orderbook_stream_last_message_at or now - timedelta(seconds=1)
+    transport_at = orderbook_transport_last_pong_at or now - timedelta(milliseconds=500)
     brti_message_at = brti_last_valid_message_at or now - timedelta(seconds=1)
     ws_metadata: dict[str, object] = {
         "enabled": True,
         "connection_state": "subscribed",
         "active_market_ticker": orderbook_active_market_ticker,
         "last_message_at": stream_at.isoformat(),
+        "transport_alive": orderbook_transport_alive,
+        "transport_last_pong_at": transport_at.isoformat(),
+        "transport_age_ms": int((now - transport_at).total_seconds() * 1000),
+        "transport_liveness_reason": (
+            None
+            if orderbook_transport_state == "healthy"
+            else "kalshi_orderbook_transport_stale"
+        ),
+        "last_market_data_message_at": stream_at.isoformat(),
+        "market_data_message_age_ms": int((now - stream_at).total_seconds() * 1000),
+        "market_feed_transport_state": orderbook_transport_state,
+        "market_feed_subscription_state": "subscribed",
+        "market_feed_snapshot_state": (
+            "initialized" if orderbook_initialized else "missing"
+        ),
+        "market_feed_active_ticker_state": (
+            "match"
+            if orderbook_active_market_ticker == "KXBTC15M-ACTIVE"
+            else "mismatch"
+        ),
+        "market_feed_sequence_state": (
+            "gap"
+            if orderbook_warnings
+            and any("sequence_gap" in warning for warning in orderbook_warnings)
+            else "clean"
+            if orderbook_initialized
+            else "unknown"
+        ),
+        "market_data_quiet": (
+            int((now - stream_at).total_seconds() * 1000) > 3000
+        ),
+        "market_data_quiet_age_ms": (
+            int((now - stream_at).total_seconds() * 1000)
+            if int((now - stream_at).total_seconds() * 1000) > 3000
+            else None
+        ),
+        "orderbook_snapshot_source": "fresh_update",
+        "orderbook_recovery_action": "none",
         "last_ticker_at": stream_at.isoformat(),
         "last_trade_at": stream_at.isoformat(),
         "last_orderbook_at": (now - timedelta(seconds=5)).isoformat(),
