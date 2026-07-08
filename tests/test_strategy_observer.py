@@ -537,6 +537,37 @@ def test_strategy_blocks_old_orderbook_when_stream_is_stale(session) -> None:
     assert decision.measurements["gate_results"]["book"]["transport_state"] == "stale"
 
 
+def test_strategy_recomputes_stale_transport_from_old_pong(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        latest_orderbook_received_at=now - timedelta(seconds=5),
+    )
+    _record_feed_heartbeat(
+        session,
+        now=now,
+        orderbook_stream_last_message_at=now - timedelta(seconds=4),
+        orderbook_transport_alive=True,
+        orderbook_transport_state="healthy",
+        orderbook_transport_last_pong_at=now - timedelta(seconds=40),
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_KALSHI_STALE
+    assert decision.primary_reason == "kalshi_orderbook_transport_stale"
+    assert decision.measurements["market_feed_transport_state"] == "stale"
+    assert decision.measurements["gate_results"]["book"]["transport_state"] == "stale"
+
+
 def test_strategy_uses_fresh_orderbook_when_stream_heartbeat_is_stale(
     session,
 ) -> None:

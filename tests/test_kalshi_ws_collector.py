@@ -2357,7 +2357,10 @@ def test_collector_recovers_sequence_gap_with_subscription_snapshot(tmp_path) ->
             assert latest_book.yes_ask == Decimal("0.67000000")
             assert any(
                 message.get("cmd") == "update_subscription"
-                and message.get("params", {}).get("get_snapshot") is True
+                and message.get("params", {}).get("sids") == [1]
+                and message.get("params", {}).get("action") == "get_snapshot"
+                and message.get("params", {}).get("market_tickers")
+                == ["KXBTC15M-TEST"]
                 for message in websocket.sent
             )
             assert heartbeat is not None

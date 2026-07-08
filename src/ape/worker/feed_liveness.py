@@ -129,6 +129,16 @@ def load_market_feed_liveness(
         (metadata or {}).get("transport_last_pong_at")
     )
     transport_age_ms = _age_ms(transport_last_pong_at, checked_at)
+    transport_state = _transport_state(
+        alive=_bool_or_false((metadata or {}).get("transport_alive")),
+        transport_age_ms=transport_age_ms,
+        timeout_ms=int(config.kalshi_ws_heartbeat_timeout_seconds * 1000),
+    )
+    stored_transport_state = _str_or_none(
+        (metadata or {}).get("market_feed_transport_state")
+    )
+    if transport_state == "unknown" and stored_transport_state == "stale":
+        transport_state = "stale"
     orderbook_snapshot_age_ms = _age_ms(
         _as_utc(latest_orderbook.received_at) if latest_orderbook else None,
         checked_at,
@@ -194,15 +204,7 @@ def load_market_feed_liveness(
         ),
         last_market_data_message_at=last_market_data_message_at,
         market_data_message_age_ms=market_data_age_ms,
-        market_feed_transport_state=_metadata_state(
-            metadata,
-            "market_feed_transport_state",
-            _transport_state(
-                alive=_bool_or_false((metadata or {}).get("transport_alive")),
-                transport_age_ms=transport_age_ms,
-                timeout_ms=int(config.kalshi_ws_heartbeat_timeout_seconds * 1000),
-            ),
-        ),
+        market_feed_transport_state=transport_state,
         market_feed_subscription_state=_metadata_state(
             metadata,
             "market_feed_subscription_state",

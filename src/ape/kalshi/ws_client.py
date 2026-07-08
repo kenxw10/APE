@@ -73,15 +73,15 @@ def build_update_subscription_message(
     request_id: int,
     subscription_id: int,
     market_ticker: str,
-    get_snapshot: bool = True,
+    action: str = "get_snapshot",
 ) -> dict[str, Any]:
     return {
         "id": request_id,
         "cmd": "update_subscription",
-        "sid": subscription_id,
         "params": {
+            "sids": [subscription_id],
             "market_tickers": [market_ticker],
-            "get_snapshot": get_snapshot,
+            "action": action,
         },
     }
 

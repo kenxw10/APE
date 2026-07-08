@@ -1186,7 +1186,7 @@ class KalshiWsCollector:
             request_id=request_id,
             subscription_id=subscription_id,
             market_ticker=market_ticker,
-            get_snapshot=True,
+            action="get_snapshot",
         )
         try:
             await websocket.send(json.dumps(message))
