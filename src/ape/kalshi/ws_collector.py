@@ -690,6 +690,8 @@ class KalshiWsCollector:
             return None
 
         if message.kind == "orderbook_snapshot":
+            previous_liveness_status = self.status.orderbook_liveness_status
+            previous_liveness_reason = self.status.orderbook_liveness_reason
             orderbook.apply_snapshot(message)
             self._sync_orderbook_status(orderbook, status="live", reason=None)
             snapshot = orderbook.snapshot_input(
@@ -701,13 +703,24 @@ class KalshiWsCollector:
             if not self._persist_orderbook(snapshot):
                 return None
             self.status.last_orderbook_at = received_at
+            liveness_recovered = (
+                previous_liveness_status != "live"
+                or previous_liveness_reason is not None
+            )
             warnings_cleared = self._clear_warning_prefixes(
                 "invalid_orderbook_snapshot_"
             )
             warnings_cleared = (
-                self._clear_warnings("orderbook_delta_before_snapshot") or warnings_cleared
+                self._clear_warnings(
+                    "orderbook_delta_before_snapshot",
+                    "orderbook_sequence_gap_reset",
+                    "orderbook_reset_after_buffer_overflow",
+                    "kalshi_websocket_buffer_overflow",
+                    "kalshi_ws_resubscribe_requested",
+                )
+                or warnings_cleared
             )
-            if warnings_cleared:
+            if warnings_cleared or liveness_recovered:
                 self.record_heartbeat()
             return None
 
@@ -1014,6 +1027,11 @@ class KalshiWsCollector:
                 duplicate=False,
                 carried_forward=False,
             )
+            self._clear_reference_warnings(
+                "brti_duplicate_or_out_of_order_source_ts",
+                "brti_reference_duplicate_conflict",
+            )
+            self._clear_reference_blockers("brti_reference_duplicate_conflict")
             self._mark_reference_fresh(row.received_at)
         return True
 

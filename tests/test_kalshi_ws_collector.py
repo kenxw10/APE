@@ -1228,6 +1228,71 @@ def test_collector_clears_brti_duplicate_conflict_after_recovered_duplicate(
         engine.dispose()
 
 
+def test_collector_clears_brti_duplicate_conflict_after_newer_valid_tick(
+    tmp_path,
+) -> None:
+    database_url = (
+        "sqlite+pysqlite:///"
+        f"{tmp_path / 'ape_ws_brti_duplicate_conflict_newer_tick.sqlite'}"
+    )
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket(
+        [
+            _brti_payload(seq=1, value="68000.12"),
+            _brti_payload(seq=2, value="68001.00"),
+            _brti_payload(
+                seq=3,
+                value="68002.00",
+                source_ts_offset_seconds=1,
+            ),
+        ]
+    )
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            ticks = ReferenceTicksRepository(session).get_recent_ticks(
+                BRTI_SOURCE,
+                limit=10,
+            )
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                "ape-worker"
+            )
+
+            assert {tick.sequence_number for tick in ticks} == {1, 3}
+            assert heartbeat is not None
+            brti_metadata = heartbeat.metadata_["reference"]["brti"]
+            assert "brti_reference_duplicate_conflict" not in brti_metadata["warnings"]
+            assert "brti_reference_duplicate_conflict" not in brti_metadata["blockers"]
+            assert brti_metadata["valid_message_carried_forward"] is False
+    finally:
+        engine.dispose()
+
+
 def test_collector_clears_stale_brti_error_after_successful_persist(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_error_clear.sqlite'}"
     config = load_config(
@@ -2143,7 +2208,11 @@ def test_collector_resubscribes_after_sequence_gap(tmp_path) -> None:
             assert latest_book.yes_bid == Decimal("0.62000000")
             assert latest_book.yes_ask == Decimal("0.67000000")
             assert heartbeat is not None
-            assert heartbeat.metadata_["ws"]["connection_state"] == "subscribed"
+            ws_metadata = heartbeat.metadata_["ws"]
+            assert ws_metadata["connection_state"] == "subscribed"
+            assert ws_metadata["orderbook_liveness_status"] == "live"
+            assert ws_metadata["orderbook_liveness_reason"] is None
+            assert "orderbook_sequence_gap_reset" not in ws_metadata["warnings"]
             assert first_websocket.closed is True
             assert second_websocket.sent[0]["params"]["market_ticker"] == "KXBTC15M-TEST"
     finally:
@@ -2283,6 +2352,97 @@ def test_collector_resets_orderbook_on_buffer_overflow(tmp_path) -> None:
         engine.dispose()
 
 
+def test_collector_clears_buffer_overflow_warnings_after_recovered_snapshot(
+    tmp_path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_buffer_recovered.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "0.01",
+            "KALSHI_WS_MAX_RECONNECT_SECONDS": "0.01",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    first_websocket = FakeWebSocket(
+        [
+            {
+                "type": "orderbook_snapshot",
+                "sid": 1,
+                "seq": 1,
+                "msg": {
+                    "market_ticker": "KXBTC15M-TEST",
+                    "yes_dollars_fp": [["0.60", "10"]],
+                    "no_dollars_fp": [["0.65", "8"]],
+                },
+            },
+            {
+                "type": "error",
+                "sid": 1,
+                "seq": 2,
+                "msg": {"code": 25, "msg": "Subscription buffer overflow"},
+            },
+        ]
+    )
+    second_websocket = FakeWebSocket(
+        [
+            {
+                "type": "orderbook_snapshot",
+                "sid": 1,
+                "seq": 1,
+                "msg": {
+                    "market_ticker": "KXBTC15M-TEST",
+                    "yes_dollars_fp": [["0.62", "12"]],
+                    "no_dollars_fp": [["0.67", "7"]],
+                },
+            },
+        ]
+    )
+    websocket_sequence = [first_websocket, second_websocket]
+
+    async def websocket_factory(*_args):
+        return websocket_sequence.pop(0)
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=2))
+
+        with session_factory() as session:
+            latest_book = OrderbookRepository(session).get_latest_snapshot("KXBTC15M-TEST")
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                "ape-worker"
+            )
+
+            assert latest_book is not None
+            assert latest_book.sequence_number == 1
+            assert latest_book.yes_bid == Decimal("0.62000000")
+            assert latest_book.yes_ask == Decimal("0.67000000")
+            assert heartbeat is not None
+            ws_metadata = heartbeat.metadata_["ws"]
+            assert ws_metadata["connection_state"] == "subscribed"
+            assert ws_metadata["orderbook_liveness_status"] == "live"
+            assert ws_metadata["orderbook_liveness_reason"] is None
+            assert "orderbook_reset_after_buffer_overflow" not in ws_metadata["warnings"]
+            assert "kalshi_websocket_buffer_overflow" not in ws_metadata["warnings"]
+            assert first_websocket.closed is True
+    finally:
+        engine.dispose()
+
+
 def test_collector_re_resolves_when_market_window_closes(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_market_roll.sqlite'}"
     config = load_config(
@@ -2392,8 +2552,9 @@ def _brti_payload(
     sid: int = 3,
     value: str = "68000.12",
     include_source_ts: bool = True,
+    source_ts_offset_seconds: int = 0,
 ) -> dict[str, Any]:
-    source_ts = NOW.replace(second=0)
+    source_ts = NOW.replace(second=0) + timedelta(seconds=source_ts_offset_seconds)
     source_ts_ms = int(source_ts.timestamp() * 1000)
     data = {
         "type": "value",
