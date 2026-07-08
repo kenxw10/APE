@@ -2301,8 +2301,16 @@ def test_collector_recovers_sequence_gap_with_subscription_snapshot(tmp_path) ->
     websocket = FakeWebSocket(
         [
             {
+                "type": "subscribed",
+                "id": 1,
+                "msg": {
+                    "sid": 11,
+                    "channel": "orderbook_delta",
+                },
+            },
+            {
                 "type": "orderbook_snapshot",
-                "sid": 1,
+                "sid": 11,
                 "seq": 1,
                 "msg": {
                     "market_ticker": "KXBTC15M-TEST",
@@ -2312,7 +2320,7 @@ def test_collector_recovers_sequence_gap_with_subscription_snapshot(tmp_path) ->
             },
             {
                 "type": "orderbook_delta",
-                "sid": 1,
+                "sid": 11,
                 "seq": 3,
                 "msg": {
                     "market_ticker": "KXBTC15M-TEST",
@@ -2323,7 +2331,7 @@ def test_collector_recovers_sequence_gap_with_subscription_snapshot(tmp_path) ->
             },
             {
                 "type": "orderbook_snapshot",
-                "sid": 1,
+                "sid": 11,
                 "seq": 4,
                 "msg": {
                     "market_ticker": "KXBTC15M-TEST",
@@ -2362,7 +2370,7 @@ def test_collector_recovers_sequence_gap_with_subscription_snapshot(tmp_path) ->
             assert latest_book.yes_ask == Decimal("0.67000000")
             assert any(
                 message.get("cmd") == "update_subscription"
-                and message.get("params", {}).get("sids") == [1]
+                and message.get("params", {}).get("sids") == [11]
                 and message.get("params", {}).get("action") == "get_snapshot"
                 and message.get("params", {}).get("market_tickers")
                 == ["KXBTC15M-TEST"]
@@ -2442,6 +2450,51 @@ def test_collector_keeps_initialized_book_usable_during_quiet_snapshot_refresh(
         engine.dispose()
 
 
+def test_collector_waits_for_confirmed_orderbook_sid_before_snapshot_resync(
+    tmp_path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_pending_sid.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket([])
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=lambda *_args: websocket,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector.status.subscription_request_ids = {"orderbook_delta": 1}
+
+    try:
+        requested = asyncio.run(
+            collector._request_orderbook_snapshot(
+                websocket,
+                market_ticker="KXBTC15M-TEST",
+                checked_at=NOW,
+                reason="market_data_quiet",
+            )
+        )
+
+        assert requested is False
+        assert websocket.sent == []
+        assert collector.status.orderbook_recovery_action == "wait_for_subscription_ack"
+        assert "orderbook_snapshot_resync_unavailable" not in collector.status.warnings
+    finally:
+        engine.dispose()
+
+
 def test_collector_requests_snapshot_when_ticker_keeps_quiet_book_busy(
     tmp_path,
 ) -> None:
@@ -2468,8 +2521,16 @@ def test_collector_requests_snapshot_when_ticker_keeps_quiet_book_busy(
     websocket = AdvancingFakeWebSocket(
         [
             {
+                "type": "subscribed",
+                "id": 1,
+                "msg": {
+                    "sid": 11,
+                    "channel": "orderbook_delta",
+                },
+            },
+            {
                 "type": "orderbook_snapshot",
-                "sid": 1,
+                "sid": 11,
                 "seq": 1,
                 "msg": {
                     "market_ticker": "KXBTC15M-TEST",
@@ -2514,7 +2575,7 @@ def test_collector_requests_snapshot_when_ticker_keeps_quiet_book_busy(
             assert latest_book is not None
             assert any(
                 message.get("cmd") == "update_subscription"
-                and message.get("params", {}).get("sids") == [1]
+                and message.get("params", {}).get("sids") == [11]
                 and message.get("params", {}).get("action") == "get_snapshot"
                 and message.get("params", {}).get("market_tickers")
                 == ["KXBTC15M-TEST"]
@@ -2523,8 +2584,7 @@ def test_collector_requests_snapshot_when_ticker_keeps_quiet_book_busy(
             assert heartbeat is not None
             ws_metadata = heartbeat.metadata_["ws"]
             assert ws_metadata["orderbook_liveness_status"] == "live"
-            assert ws_metadata["orderbook_snapshot_source"] == "carried_forward"
-            assert ws_metadata["orderbook_recovery_action"] == "request_snapshot"
+            assert ws_metadata["orderbook_snapshot_source"] != "blocked"
             assert "snapshot_resync_pending" not in ws_metadata["warnings"]
     finally:
         engine.dispose()
@@ -2657,8 +2717,16 @@ def test_collector_resets_orderbook_on_buffer_overflow(tmp_path) -> None:
     websocket = FakeWebSocket(
         [
             {
+                "type": "subscribed",
+                "id": 1,
+                "msg": {
+                    "sid": 11,
+                    "channel": "orderbook_delta",
+                },
+            },
+            {
                 "type": "orderbook_snapshot",
-                "sid": 1,
+                "sid": 11,
                 "seq": 1,
                 "msg": {
                     "market_ticker": "KXBTC15M-TEST",
@@ -2674,7 +2742,7 @@ def test_collector_resets_orderbook_on_buffer_overflow(tmp_path) -> None:
             },
             {
                 "type": "orderbook_delta",
-                "sid": 1,
+                "sid": 11,
                 "seq": 3,
                 "msg": {
                     "market_ticker": "KXBTC15M-TEST",

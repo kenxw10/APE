@@ -67,6 +67,7 @@ class KalshiWsCollectorStatus:
     active_market_ticker: str | None = None
     subscribed_channels: list[str] = field(default_factory=list)
     subscription_ids: dict[str, int] = field(default_factory=dict)
+    subscription_request_ids: dict[str, int] = field(default_factory=dict)
     last_connected_at: datetime | None = None
     last_message_at: datetime | None = None
     transport_alive: bool = False
@@ -108,6 +109,7 @@ class KalshiWsCollectorStatus:
             "active_market_ticker": self.active_market_ticker,
             "subscribed_channels": self.subscribed_channels,
             "subscription_ids": self.subscription_ids,
+            "subscription_request_ids": self.subscription_request_ids,
             "last_connected_at": _isoformat_or_none(self.last_connected_at),
             "last_message_at": _isoformat_or_none(self.last_message_at),
             "transport_alive": self.transport_alive,
@@ -599,7 +601,7 @@ class KalshiWsCollector:
     ) -> None:
         request_id = 1
         subscribed_channels: list[str] = []
-        subscription_ids: dict[str, int] = {}
+        subscription_request_ids: dict[str, int] = {}
 
         if market_ticker is not None and self.config.kalshi_ws_subscribe_orderbook:
             message = build_subscribe_message(
@@ -610,7 +612,7 @@ class KalshiWsCollector:
             )
             await websocket.send(json.dumps(message))
             subscribed_channels.append("orderbook_delta")
-            subscription_ids["orderbook_delta"] = request_id
+            subscription_request_ids["orderbook_delta"] = request_id
             request_id += 1
 
         secondary_channels: list[str] = []
@@ -628,7 +630,7 @@ class KalshiWsCollector:
             await websocket.send(json.dumps(message))
             subscribed_channels.extend(secondary_channels)
             for channel in secondary_channels:
-                subscription_ids[channel] = request_id
+                subscription_request_ids[channel] = request_id
             request_id += 1
 
         if include_reference:
@@ -642,7 +644,8 @@ class KalshiWsCollector:
 
         if market_ticker is not None:
             self.status.subscribed_channels = subscribed_channels
-            self.status.subscription_ids = subscription_ids
+            self.status.subscription_ids = {}
+            self.status.subscription_request_ids = subscription_request_ids
 
     async def _read_messages(
         self,
@@ -1090,7 +1093,7 @@ class KalshiWsCollector:
         if request_id is None or subscription_id is None:
             return
 
-        for channel, existing_id in list(self.status.subscription_ids.items()):
+        for channel, existing_id in list(self.status.subscription_request_ids.items()):
             if existing_id == request_id:
                 self.status.subscription_ids[channel] = subscription_id
 
@@ -1190,6 +1193,9 @@ class KalshiWsCollector:
     ) -> bool:
         subscription_id = self.status.subscription_ids.get("orderbook_delta")
         if subscription_id is None:
+            if self.status.subscription_request_ids.get("orderbook_delta") is not None:
+                self.status.orderbook_recovery_action = "wait_for_subscription_ack"
+                return False
             self.status.orderbook_recovery_action = "resubscribe"
             self.status.orderbook_liveness_status = "blocked"
             self.status.orderbook_liveness_reason = "kalshi_orderbook_subscription_inactive"
