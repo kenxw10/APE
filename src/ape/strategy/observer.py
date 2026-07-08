@@ -3112,24 +3112,29 @@ def _strategy_orderbook_stale_reason(
         blockers=orderbook_stream_blockers,
         market_ticker=market_ticker,
     )
-    if stream_live_reason is not None:
-        return stream_live_reason
-    if market_feed_transport_state == "stale":
-        return "kalshi_orderbook_transport_stale"
-    if market_feed_subscription_state != "subscribed":
-        return "kalshi_orderbook_subscription_inactive"
-    if market_feed_active_ticker_state == "mismatch":
-        return "kalshi_orderbook_active_ticker_mismatch"
-    if market_feed_active_ticker_state == "missing":
-        return "kalshi_orderbook_active_ticker_missing"
-    if market_feed_snapshot_state == "missing":
-        return "kalshi_orderbook_uninitialized"
-    if market_feed_snapshot_state == "resync_pending":
-        return "kalshi_orderbook_snapshot_resync_pending"
-    if market_feed_snapshot_state == "stale_cap_exceeded":
-        return "kalshi_orderbook_carry_forward_age_exceeds_limit"
-    if market_feed_sequence_state in {"gap", "reset"}:
-        return "kalshi_orderbook_sequence_gap_or_reset"
+    enforce_stream_live = (
+        config.strategy_kalshi_book_require_stream_live
+        or orderbook_age_ms > config.strategy_kalshi_book_max_age_ms
+    )
+    if enforce_stream_live:
+        if stream_live_reason is not None:
+            return stream_live_reason
+        if market_feed_transport_state == "stale":
+            return "kalshi_orderbook_transport_stale"
+        if market_feed_subscription_state != "subscribed":
+            return "kalshi_orderbook_subscription_inactive"
+        if market_feed_active_ticker_state == "mismatch":
+            return "kalshi_orderbook_active_ticker_mismatch"
+        if market_feed_active_ticker_state == "missing":
+            return "kalshi_orderbook_active_ticker_missing"
+        if market_feed_snapshot_state == "missing":
+            return "kalshi_orderbook_uninitialized"
+        if market_feed_snapshot_state == "resync_pending":
+            return "kalshi_orderbook_snapshot_resync_pending"
+        if market_feed_snapshot_state == "stale_cap_exceeded":
+            return "kalshi_orderbook_carry_forward_age_exceeds_limit"
+        if market_feed_sequence_state in {"gap", "reset"}:
+            return "kalshi_orderbook_sequence_gap_or_reset"
 
     if orderbook_age_ms <= config.strategy_kalshi_book_max_age_ms:
         return None

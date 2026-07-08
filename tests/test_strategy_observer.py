@@ -537,6 +537,45 @@ def test_strategy_blocks_old_orderbook_when_stream_is_stale(session) -> None:
     assert decision.measurements["gate_results"]["book"]["transport_state"] == "stale"
 
 
+def test_strategy_allows_fresh_orderbook_when_stream_live_requirement_disabled(
+    session,
+) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config(
+        {
+            "STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000",
+            "STRATEGY_KALSHI_BOOK_REQUIRE_STREAM_LIVE": "false",
+        }
+    )
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        latest_orderbook_received_at=now - timedelta(milliseconds=500),
+    )
+    _record_feed_heartbeat(
+        session,
+        now=now,
+        orderbook_connection_state="connecting",
+        orderbook_initialized=None,
+        orderbook_transport_alive=False,
+        orderbook_transport_state="stale",
+        orderbook_transport_last_pong_at=now - timedelta(seconds=40),
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state != STATE_KALSHI_STALE
+    assert decision.primary_reason != "kalshi_orderbook_subscription_inactive"
+    assert decision.primary_reason != "kalshi_orderbook_uninitialized"
+    assert decision.measurements["orderbook_age_ms"] == 500
+
+
 def test_strategy_recomputes_stale_transport_from_old_pong(session) -> None:
     now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
     config = load_config({"STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000"})
@@ -1792,6 +1831,7 @@ def _record_feed_heartbeat(
     session,
     *,
     now: datetime,
+    orderbook_connection_state: str = "subscribed",
     orderbook_stream_last_message_at: datetime | None = None,
     orderbook_active_market_ticker: str = "KXBTC15M-ACTIVE",
     orderbook_warnings: list[str] | None = None,
@@ -1810,7 +1850,7 @@ def _record_feed_heartbeat(
     brti_message_at = brti_last_valid_message_at or now - timedelta(seconds=1)
     ws_metadata: dict[str, object] = {
         "enabled": True,
-        "connection_state": "subscribed",
+        "connection_state": orderbook_connection_state,
         "active_market_ticker": orderbook_active_market_ticker,
         "last_message_at": stream_at.isoformat(),
         "transport_alive": orderbook_transport_alive,
