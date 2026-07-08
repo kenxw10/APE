@@ -2069,7 +2069,9 @@ def test_collector_catches_database_error_while_resolving_market(tmp_path) -> No
         engine.dispose()
 
 
-def test_collector_throttles_heartbeats_for_live_websocket_traffic(tmp_path) -> None:
+def test_collector_persists_market_liveness_heartbeats_before_stream_gate(
+    tmp_path,
+) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_throttled_heartbeats.sqlite'}"
     config = load_config(
         {
@@ -2122,7 +2124,7 @@ def test_collector_throttles_heartbeats_for_live_websocket_traffic(tmp_path) -> 
             heartbeat_count = session.scalar(select(func.count()).select_from(WorkerHeartbeat))
             heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
 
-            assert heartbeat_count == 7
+            assert heartbeat_count == 27
             assert heartbeat is not None
             assert heartbeat.metadata_["ws"]["last_message_at"] == "2026-07-05T14:35:50Z"
     finally:

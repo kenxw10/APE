@@ -648,7 +648,12 @@ class KalshiWsCollector:
                 self._add_warning("kalshi_ws_resubscribe_requested")
                 self.record_heartbeat()
                 return resubscribe_reason
-            self.record_heartbeat(force=self._consume_force_next_heartbeat())
+            self.record_heartbeat(
+                force=(
+                    self._consume_force_next_heartbeat()
+                    or self._market_liveness_heartbeat_due(received_at)
+                )
+            )
             if include_reference:
                 reconnect_reason = self._handle_reference_stale_if_due(received_at)
                 if reconnect_reason is not None:
@@ -1313,6 +1318,24 @@ class KalshiWsCollector:
             heartbeat_at.astimezone(UTC) - self._last_heartbeat_at.astimezone(UTC)
         ).total_seconds()
         return elapsed >= heartbeat_interval_seconds(self.config)
+
+    def _market_liveness_heartbeat_due(self, heartbeat_at: datetime) -> bool:
+        if not (
+            self.config.kalshi_ws_enabled
+            and self.config.strategy_kalshi_book_require_stream_live
+        ):
+            return False
+        if self._last_heartbeat_at is None:
+            return True
+        stream_max_seconds = max(
+            MIN_HEARTBEAT_INTERVAL_SECONDS,
+            self.config.strategy_kalshi_book_stream_max_age_ms / 1000,
+        )
+        interval_seconds = max(MIN_HEARTBEAT_INTERVAL_SECONDS, stream_max_seconds / 2)
+        elapsed = (
+            heartbeat_at.astimezone(UTC) - self._last_heartbeat_at.astimezone(UTC)
+        ).total_seconds()
+        return elapsed >= interval_seconds
 
     def _set_error(self, error_type: str, exc: Exception) -> None:
         self.status.connection_state = "error"
