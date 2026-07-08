@@ -3138,7 +3138,16 @@ def _strategy_orderbook_stale_reason(
 
     if orderbook_age_ms <= config.strategy_kalshi_book_max_age_ms:
         return None
-    if market_feed_transport_state != "healthy":
+    if market_feed_transport_state == "stale":
+        return "kalshi_orderbook_transport_stale"
+    if (
+        market_feed_transport_state == "unknown"
+        and not _legacy_orderbook_stream_live(
+            stream_age_ms=orderbook_stream_age_ms,
+            stream_max_age_ms=config.strategy_kalshi_book_stream_max_age_ms,
+            connection_state=orderbook_stream_connection_state,
+        )
+    ):
         return "kalshi_orderbook_transport_stale"
     if orderbook_age_ms > config.strategy_kalshi_book_carry_forward_max_age_ms:
         return "kalshi_orderbook_carry_forward_age_exceeds_limit"
@@ -3180,6 +3189,19 @@ def _orderbook_stream_unusable_reason(
         return "kalshi_orderbook_transport_stale"
     del stream_age_ms
     return None
+
+
+def _legacy_orderbook_stream_live(
+    *,
+    stream_age_ms: int | None,
+    stream_max_age_ms: int,
+    connection_state: str | None,
+) -> bool:
+    return (
+        connection_state == "subscribed"
+        and stream_age_ms is not None
+        and stream_age_ms <= stream_max_age_ms
+    )
 
 
 def _metadata_stale_reason(metadata: dict[str, Any] | None) -> str | None:

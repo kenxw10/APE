@@ -506,6 +506,35 @@ def test_strategy_carries_forward_old_orderbook_when_stream_is_live(session) -> 
     )
 
 
+def test_strategy_carries_forward_with_legacy_fresh_stream_heartbeat(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        latest_orderbook_received_at=now - timedelta(seconds=5),
+    )
+    _record_feed_heartbeat(
+        session,
+        now=now,
+        include_orderbook_transport_fields=False,
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state != STATE_KALSHI_STALE
+    assert decision.measurements["market_feed_transport_state"] == "unknown"
+    assert decision.measurements["orderbook_carry_forward_allowed"] is True
+    assert decision.measurements["orderbook_snapshot_source"] == "carried_forward"
+    assert "kalshi_orderbook_data_quiet_carried_forward" in decision.warnings
+
+
 def test_strategy_blocks_old_orderbook_when_stream_is_stale(session) -> None:
     now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
     config = load_config({"STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000"})
@@ -1836,6 +1865,7 @@ def _record_feed_heartbeat(
     orderbook_active_market_ticker: str = "KXBTC15M-ACTIVE",
     orderbook_warnings: list[str] | None = None,
     orderbook_initialized: bool | None = True,
+    include_orderbook_transport_fields: bool = True,
     orderbook_transport_alive: bool = True,
     orderbook_transport_last_pong_at: datetime | None = None,
     orderbook_transport_state: str = "healthy",
@@ -1853,17 +1883,8 @@ def _record_feed_heartbeat(
         "connection_state": orderbook_connection_state,
         "active_market_ticker": orderbook_active_market_ticker,
         "last_message_at": stream_at.isoformat(),
-        "transport_alive": orderbook_transport_alive,
-        "transport_last_pong_at": transport_at.isoformat(),
-        "transport_age_ms": int((now - transport_at).total_seconds() * 1000),
-        "transport_liveness_reason": (
-            None
-            if orderbook_transport_state == "healthy"
-            else "kalshi_orderbook_transport_stale"
-        ),
         "last_market_data_message_at": stream_at.isoformat(),
         "market_data_message_age_ms": int((now - stream_at).total_seconds() * 1000),
-        "market_feed_transport_state": orderbook_transport_state,
         "market_feed_subscription_state": "subscribed",
         "market_feed_snapshot_state": (
             "initialized" if orderbook_initialized else "missing"
@@ -1898,6 +1919,20 @@ def _record_feed_heartbeat(
         "warnings": orderbook_warnings or [],
         "blockers": [],
     }
+    if include_orderbook_transport_fields:
+        ws_metadata.update(
+            {
+                "transport_alive": orderbook_transport_alive,
+                "transport_last_pong_at": transport_at.isoformat(),
+                "transport_age_ms": int((now - transport_at).total_seconds() * 1000),
+                "transport_liveness_reason": (
+                    None
+                    if orderbook_transport_state == "healthy"
+                    else "kalshi_orderbook_transport_stale"
+                ),
+                "market_feed_transport_state": orderbook_transport_state,
+            }
+        )
     if orderbook_initialized is not None:
         ws_metadata["orderbook_initialized"] = orderbook_initialized
     reference_metadata = {
