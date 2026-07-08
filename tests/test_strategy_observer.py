@@ -30,6 +30,7 @@ from ape.strategy.observer import (
     STATE_EXIT_SIGNAL,
     STATE_FORCE_EXIT,
     STATE_IMPULSE_TOO_WEAK,
+    STATE_KALSHI_STALE,
     STATE_LIVE_GUARD_BLOCKED,
     STATE_MANAGE_POSITION,
     STATE_NO_ACTIVE_MARKET,
@@ -314,6 +315,248 @@ def test_strategy_keeps_hard_brti_age_block_when_trade_ready_fresh_relaxed(
     assert decision.decision_state == STATE_REFERENCE_STALE
     assert decision.primary_reason == "brti_reference_backend_age_exceeds_limit"
     assert decision.measurements["gate_results"]["reference"]["status"] == "block"
+
+
+def test_strategy_carries_forward_old_brti_when_valid_messages_are_fresh(
+    session,
+) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"STRATEGY_REFERENCE_MAX_AGE_MS": "2000"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        reference_received_lag_ms=5_000,
+    )
+    latest_tick = ReferenceTicksRepository(session).get_latest_valid_tick(
+        "kalshi_cfbenchmarks_brti"
+    )
+    assert latest_tick is not None
+    _record_feed_heartbeat(
+        session,
+        now=now,
+        brti_last_valid_message_at=now - timedelta(seconds=1),
+        brti_last_valid_message_source_ts=latest_tick.source_ts,
+        brti_last_valid_message_value=str(latest_tick.parsed_value),
+        brti_carried_forward=True,
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state != STATE_REFERENCE_STALE
+    assert "brti_reference_carried_forward" in decision.warnings
+    assert decision.measurements["brti_reference_carry_forward_allowed"] is True
+    assert decision.measurements["brti_strategy_fresh_age_ms"] == 1000
+    assert decision.measurements["gate_results"]["reference"]["status"] == "warn"
+    assert (
+        decision.measurements["gate_results"]["reference"]["reason"]
+        == "brti_reference_carried_forward"
+    )
+
+
+def test_strategy_blocks_old_brti_when_valid_message_stream_is_stale(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"STRATEGY_REFERENCE_MAX_AGE_MS": "2000"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        reference_received_lag_ms=5_000,
+    )
+    latest_tick = ReferenceTicksRepository(session).get_latest_valid_tick(
+        "kalshi_cfbenchmarks_brti"
+    )
+    assert latest_tick is not None
+    _record_feed_heartbeat(
+        session,
+        now=now,
+        brti_last_valid_message_at=now - timedelta(seconds=4),
+        brti_last_valid_message_source_ts=latest_tick.source_ts,
+        brti_last_valid_message_value=str(latest_tick.parsed_value),
+        brti_carried_forward=True,
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_REFERENCE_STALE
+    assert decision.primary_reason == "brti_reference_stream_stale"
+    assert decision.measurements["gate_results"]["reference"]["status"] == "block"
+
+
+def test_strategy_blocks_old_brti_when_carry_forward_cap_exceeded(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"STRATEGY_REFERENCE_MAX_AGE_MS": "2000"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        reference_received_lag_ms=16_000,
+    )
+    latest_tick = ReferenceTicksRepository(session).get_latest_valid_tick(
+        "kalshi_cfbenchmarks_brti"
+    )
+    assert latest_tick is not None
+    _record_feed_heartbeat(
+        session,
+        now=now,
+        brti_last_valid_message_at=now - timedelta(seconds=1),
+        brti_last_valid_message_source_ts=latest_tick.source_ts,
+        brti_last_valid_message_value=str(latest_tick.parsed_value),
+        brti_carried_forward=True,
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_REFERENCE_STALE
+    assert decision.primary_reason == "brti_reference_carry_forward_age_exceeds_limit"
+    assert decision.measurements["gate_results"]["reference"]["status"] == "block"
+
+
+def test_strategy_carries_forward_old_orderbook_when_stream_is_live(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        latest_orderbook_received_at=now - timedelta(seconds=5),
+    )
+    _record_feed_heartbeat(session, now=now)
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state != STATE_KALSHI_STALE
+    assert "kalshi_orderbook_carried_forward" in decision.warnings
+    assert decision.measurements["orderbook_carry_forward_allowed"] is True
+    assert decision.measurements["orderbook_snapshot_source"] == "carried_forward"
+    assert decision.measurements["gate_results"]["book"]["status"] == "warn"
+    assert (
+        decision.measurements["gate_results"]["book"]["reason"]
+        == "kalshi_orderbook_carried_forward"
+    )
+
+
+def test_strategy_blocks_old_orderbook_when_stream_is_stale(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        latest_orderbook_received_at=now - timedelta(seconds=5),
+    )
+    _record_feed_heartbeat(
+        session,
+        now=now,
+        orderbook_stream_last_message_at=now - timedelta(seconds=4),
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_KALSHI_STALE
+    assert decision.primary_reason == "kalshi_orderbook_stream_stale"
+    assert decision.measurements["gate_results"]["book"]["status"] == "block"
+
+
+def test_strategy_blocks_old_orderbook_when_active_ticker_mismatches(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        latest_orderbook_received_at=now - timedelta(seconds=5),
+    )
+    _record_feed_heartbeat(
+        session,
+        now=now,
+        orderbook_active_market_ticker="KXBTC15M-OTHER",
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_KALSHI_STALE
+    assert decision.primary_reason == "kalshi_orderbook_active_ticker_mismatch"
+
+
+def test_strategy_blocks_old_orderbook_when_sequence_reset_warning_active(
+    session,
+) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        latest_orderbook_received_at=now - timedelta(seconds=5),
+    )
+    _record_feed_heartbeat(
+        session,
+        now=now,
+        orderbook_warnings=["orderbook_sequence_gap_reset"],
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_KALSHI_STALE
+    assert decision.primary_reason == "kalshi_orderbook_sequence_gap_or_reset"
+
+
+def test_strategy_blocks_old_orderbook_when_carry_forward_cap_exceeded(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        latest_orderbook_received_at=now - timedelta(seconds=31),
+    )
+    _record_feed_heartbeat(session, now=now)
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_KALSHI_STALE
+    assert decision.primary_reason == "kalshi_orderbook_carry_forward_age_exceeds_limit"
 
 
 def test_strategy_gate_summary_blocks_contract_ask_pullback(session) -> None:
@@ -1280,6 +1523,71 @@ def _seed_observable_context(
             price=Decimal("0.62"),
             trade_count=Decimal("1"),
             side_inferred="YES",
+        )
+    )
+    session.commit()
+
+
+def _record_feed_heartbeat(
+    session,
+    *,
+    now: datetime,
+    orderbook_stream_last_message_at: datetime | None = None,
+    orderbook_active_market_ticker: str = "KXBTC15M-ACTIVE",
+    orderbook_warnings: list[str] | None = None,
+    brti_last_valid_message_at: datetime | None = None,
+    brti_last_valid_message_source_ts: datetime | None = None,
+    brti_last_valid_message_value: str | None = "62110",
+    brti_carried_forward: bool = False,
+) -> None:
+    stream_at = orderbook_stream_last_message_at or now - timedelta(seconds=1)
+    brti_message_at = brti_last_valid_message_at or now - timedelta(seconds=1)
+    WorkerHeartbeatRepository(session).record_heartbeat(
+        WorkerHeartbeatInput(
+            service_name="ape-worker",
+            started_at=now - timedelta(minutes=1),
+            heartbeat_at=now - timedelta(milliseconds=250),
+            app_mode="OBSERVER",
+            is_safe=True,
+            metadata={
+                "mode": "kalshi_ws",
+                "ws": {
+                    "enabled": True,
+                    "connection_state": "subscribed",
+                    "active_market_ticker": orderbook_active_market_ticker,
+                    "last_message_at": stream_at.isoformat(),
+                    "last_ticker_at": stream_at.isoformat(),
+                    "last_trade_at": stream_at.isoformat(),
+                    "last_orderbook_at": (now - timedelta(seconds=5)).isoformat(),
+                    "orderbook_initialized": True,
+                    "orderbook_sequence_number": 123,
+                    "warnings": orderbook_warnings or [],
+                    "blockers": [],
+                },
+                "reference": {
+                    "brti": {
+                        "enabled": True,
+                        "connection_state": "subscribed",
+                        "last_message_at": brti_message_at.isoformat(),
+                        "last_valid_message_at": brti_message_at.isoformat(),
+                        "last_valid_message_source_ts": (
+                            brti_last_valid_message_source_ts.isoformat()
+                            if brti_last_valid_message_source_ts is not None
+                            else None
+                        ),
+                        "last_valid_message_value": brti_last_valid_message_value,
+                        "valid_message_age_ms": int(
+                            (now - brti_message_at).total_seconds() * 1000
+                        ),
+                        "valid_message_carried_forward": brti_carried_forward,
+                        "reference_stream_live": (
+                            (now - brti_message_at).total_seconds() <= 3
+                        ),
+                        "warnings": [],
+                        "blockers": [],
+                    }
+                },
+            },
         )
     )
     session.commit()

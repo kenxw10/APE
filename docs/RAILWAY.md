@@ -281,7 +281,13 @@ STRATEGY_OBSERVER_POLL_SECONDS=1.0
 STRATEGY_OBSERVER_DECISION_TTL_SECONDS=5
 STRATEGY_MIN_BOUNDARY_DISTANCE_BPS=3.5
 STRATEGY_REFERENCE_MAX_AGE_MS=2000
+STRATEGY_REFERENCE_STREAM_MAX_AGE_MS=3000
+STRATEGY_REFERENCE_CARRY_FORWARD_MAX_AGE_MS=15000
+STRATEGY_REFERENCE_ALLOW_DUPLICATE_SOURCE_TS_CARRY_FORWARD=true
 STRATEGY_KALSHI_BOOK_MAX_AGE_MS=2000
+STRATEGY_KALSHI_BOOK_STREAM_MAX_AGE_MS=3000
+STRATEGY_KALSHI_BOOK_CARRY_FORWARD_MAX_AGE_MS=30000
+STRATEGY_KALSHI_BOOK_REQUIRE_STREAM_LIVE=true
 STRATEGY_NO_ENTRY_FIRST_SECONDS=300
 STRATEGY_NO_ENTRY_LAST_SECONDS=60
 STRATEGY_MIN_ENTRY_ASK=0.56
@@ -301,6 +307,8 @@ KALSHI_CFBENCHMARKS_INDEX_IDS=BRTI
 ```
 
 The API service may keep `STRATEGY_OBSERVER_ENABLED=false`; `/strategy/status` reads latest decision rows and worker heartbeat metadata. Do not add strategy observer env vars, WebSocket settings, BRTI env vars, or Kalshi credentials to Vercel.
+
+PR 9b liveness note: orderbook and BRTI feeds are event-driven, so an unchanged value is not stale by itself. Dry-run readiness may carry forward unchanged values only when the worker heartbeat proves the relevant WebSocket stream is subscribed, fresh, active for the same market/index, initialized, and free of sequence/reset blockers. The carry-forward caps above are hard stops; true stream/feed failures still block.
 
 After enabling the strategy observer on the worker, redeploy the worker and validate:
 
@@ -425,7 +433,13 @@ STRATEGY_REFERENCE_MAX_AGE_MS=2000
 STRATEGY_REFERENCE_SOURCE_WARN_MS=10000
 STRATEGY_REFERENCE_SOURCE_MAX_AGE_MS=45000
 STRATEGY_REFERENCE_REQUIRE_TRADE_READY_FRESH=true
+STRATEGY_REFERENCE_STREAM_MAX_AGE_MS=3000
+STRATEGY_REFERENCE_CARRY_FORWARD_MAX_AGE_MS=15000
+STRATEGY_REFERENCE_ALLOW_DUPLICATE_SOURCE_TS_CARRY_FORWARD=true
 STRATEGY_KALSHI_BOOK_MAX_AGE_MS=2000
+STRATEGY_KALSHI_BOOK_STREAM_MAX_AGE_MS=3000
+STRATEGY_KALSHI_BOOK_CARRY_FORWARD_MAX_AGE_MS=30000
+STRATEGY_KALSHI_BOOK_REQUIRE_STREAM_LIVE=true
 ```
 
 To disable dry-run, set:

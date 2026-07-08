@@ -214,7 +214,13 @@ STRATEGY_OBSERVER_POLL_SECONDS=1.0
 STRATEGY_OBSERVER_DECISION_TTL_SECONDS=5
 STRATEGY_MIN_BOUNDARY_DISTANCE_BPS=3.5
 STRATEGY_REFERENCE_MAX_AGE_MS=2000
+STRATEGY_REFERENCE_STREAM_MAX_AGE_MS=3000
+STRATEGY_REFERENCE_CARRY_FORWARD_MAX_AGE_MS=15000
+STRATEGY_REFERENCE_ALLOW_DUPLICATE_SOURCE_TS_CARRY_FORWARD=true
 STRATEGY_KALSHI_BOOK_MAX_AGE_MS=2000
+STRATEGY_KALSHI_BOOK_STREAM_MAX_AGE_MS=3000
+STRATEGY_KALSHI_BOOK_CARRY_FORWARD_MAX_AGE_MS=30000
+STRATEGY_KALSHI_BOOK_REQUIRE_STREAM_LIVE=true
 STRATEGY_NO_ENTRY_FIRST_SECONDS=300
 STRATEGY_NO_ENTRY_LAST_SECONDS=60
 STRATEGY_MIN_ENTRY_ASK=0.56
@@ -223,6 +229,8 @@ STRATEGY_MAX_SPREAD_CENTS=4
 ```
 
 After PR 8 is merged and market/BRTI WebSocket intake is healthy, enable the ledger only on the Railway worker with `STRATEGY_OBSERVER_ENABLED=true`. Keep `APP_MODE=OBSERVER`, `TRADING_ENABLED=false`, and `EXECUTE=false`. Do not add strategy observer env vars to Vercel.
+
+PR 9b separates event-driven feed liveness from value-change persistence. `STRATEGY_REFERENCE_MAX_AGE_MS` and `STRATEGY_KALSHI_BOOK_MAX_AGE_MS` remain preferred fresh-update thresholds. The stream max-age settings prove the WebSocket is still active, and the carry-forward caps bound how long unchanged BRTI/orderbook values may be reused for dry-run readiness. True stream failures, active-ticker mismatches, sequence resets, missing sides, crossed books, persistence failures, or carry-forward cap breaches still block. This does not tune strategy thresholds and does not add paper/live/order/private-channel behavior.
 
 The read-only endpoints are:
 

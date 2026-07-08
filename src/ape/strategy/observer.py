@@ -424,6 +424,7 @@ def evaluate_strategy_observer(
     orderbook: OrderbookSnapshot | None = None
     latest_trade: PublicTrade | None = None
     reference_worker_metadata: dict[str, Any] | None = None
+    orderbook_worker_metadata: dict[str, Any] | None = None
     reference_worker_heartbeat_at: datetime | None = None
     reference_worker_heartbeat_age_ms: int | None = None
     boundary: Decimal | None = None
@@ -443,7 +444,25 @@ def evaluate_strategy_observer(
     brti_reference_backend_transport_lag_ms: int | None = None
     brti_reference_time_since_last_valid_tick_ms: int | None = None
     brti_reference_stale_reason: str | None = None
+    brti_reference_stream_age_ms: int | None = None
+    brti_reference_last_valid_message_at: datetime | None = None
+    brti_reference_last_valid_message_source_ts: datetime | None = None
+    brti_reference_last_valid_message_value: str | None = None
+    brti_reference_last_duplicate_valid_message_at: datetime | None = None
+    brti_reference_valid_message_carried_forward = False
+    brti_reference_carry_forward_allowed = False
+    brti_reference_carry_forward_age_ms: int | None = None
+    brti_reference_liveness_reason: str | None = None
     orderbook_age_ms: int | None = None
+    orderbook_stream_age_ms: int | None = None
+    orderbook_stream_connection_state: str | None = None
+    orderbook_stream_active_market_ticker: str | None = None
+    orderbook_stream_warnings: list[str] = []
+    orderbook_stream_blockers: list[str] = []
+    orderbook_carry_forward_allowed = False
+    orderbook_carry_forward_age_ms: int | None = None
+    orderbook_liveness_reason: str | None = None
+    orderbook_snapshot_source: str | None = None
     latest_trade_age_ms: int | None = None
     seconds_since_open: int | None = None
     seconds_left: int | None = None
@@ -504,6 +523,7 @@ def evaluate_strategy_observer(
             boundary_source=boundary_source,
             reference_tick=reference_tick,
             reference_worker_metadata=reference_worker_metadata,
+            orderbook_worker_metadata=orderbook_worker_metadata,
             reference_worker_heartbeat_at=reference_worker_heartbeat_at,
             reference_worker_heartbeat_age_ms=reference_worker_heartbeat_age_ms,
             brti_value=brti_value,
@@ -525,8 +545,42 @@ def evaluate_strategy_observer(
                 brti_reference_time_since_last_valid_tick_ms
             ),
             brti_reference_stale_reason=brti_reference_stale_reason,
+            brti_reference_stream_age_ms=brti_reference_stream_age_ms,
+            brti_reference_last_valid_message_at=(
+                brti_reference_last_valid_message_at
+            ),
+            brti_reference_last_valid_message_source_ts=(
+                brti_reference_last_valid_message_source_ts
+            ),
+            brti_reference_last_valid_message_value=(
+                brti_reference_last_valid_message_value
+            ),
+            brti_reference_last_duplicate_valid_message_at=(
+                brti_reference_last_duplicate_valid_message_at
+            ),
+            brti_reference_valid_message_carried_forward=(
+                brti_reference_valid_message_carried_forward
+            ),
+            brti_reference_carry_forward_allowed=(
+                brti_reference_carry_forward_allowed
+            ),
+            brti_reference_carry_forward_age_ms=(
+                brti_reference_carry_forward_age_ms
+            ),
+            brti_reference_liveness_reason=brti_reference_liveness_reason,
             orderbook=orderbook,
             orderbook_age_ms=orderbook_age_ms,
+            orderbook_stream_age_ms=orderbook_stream_age_ms,
+            orderbook_stream_connection_state=orderbook_stream_connection_state,
+            orderbook_stream_active_market_ticker=(
+                orderbook_stream_active_market_ticker
+            ),
+            orderbook_stream_warnings=orderbook_stream_warnings,
+            orderbook_stream_blockers=orderbook_stream_blockers,
+            orderbook_carry_forward_allowed=orderbook_carry_forward_allowed,
+            orderbook_carry_forward_age_ms=orderbook_carry_forward_age_ms,
+            orderbook_liveness_reason=orderbook_liveness_reason,
+            orderbook_snapshot_source=orderbook_snapshot_source,
             latest_trade=latest_trade,
             latest_trade_age_ms=latest_trade_age_ms,
             seconds_since_open=seconds_since_open,
@@ -784,14 +838,64 @@ def evaluate_strategy_observer(
     heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
     if heartbeat is not None:
         reference_worker_metadata = _reference_worker_metadata(heartbeat.metadata_)
+        orderbook_worker_metadata = _ws_worker_metadata(heartbeat.metadata_)
         reference_worker_heartbeat_at = _as_utc(heartbeat.heartbeat_at)
         reference_worker_heartbeat_age_ms = _age_ms(
             reference_worker_heartbeat_at,
             evaluated_at,
         )
+        orderbook_stream_connection_state = _metadata_text(
+            orderbook_worker_metadata,
+            "connection_state",
+        )
+        orderbook_stream_active_market_ticker = _metadata_text(
+            orderbook_worker_metadata,
+            "active_market_ticker",
+        )
+        orderbook_stream_warnings = _metadata_string_list(
+            orderbook_worker_metadata,
+            "warnings",
+        )
+        orderbook_stream_blockers = _metadata_string_list(
+            orderbook_worker_metadata,
+            "blockers",
+        )
+        orderbook_stream_age_ms = _age_ms(
+            _latest_datetime(
+                _metadata_datetime(orderbook_worker_metadata, "last_message_at"),
+                _metadata_datetime(orderbook_worker_metadata, "last_ticker_at"),
+                _metadata_datetime(orderbook_worker_metadata, "last_trade_at"),
+                _metadata_datetime(orderbook_worker_metadata, "last_orderbook_at"),
+            ),
+            evaluated_at,
+        )
         brti_reference_status_category = _metadata_text(
             reference_worker_metadata,
             "status_category",
+        )
+        brti_reference_last_valid_message_at = _metadata_datetime(
+            reference_worker_metadata,
+            "last_valid_message_at",
+        )
+        brti_reference_last_valid_message_source_ts = _metadata_datetime(
+            reference_worker_metadata,
+            "last_valid_message_source_ts",
+        )
+        brti_reference_last_valid_message_value = _metadata_text(
+            reference_worker_metadata,
+            "last_valid_message_value",
+        )
+        brti_reference_last_duplicate_valid_message_at = _metadata_datetime(
+            reference_worker_metadata,
+            "last_duplicate_valid_message_at",
+        )
+        brti_reference_valid_message_carried_forward = _metadata_bool(
+            reference_worker_metadata,
+            "valid_message_carried_forward",
+        )
+        brti_reference_stream_age_ms = (
+            _metadata_int(reference_worker_metadata, "valid_message_age_ms")
+            or _age_ms(brti_reference_last_valid_message_at, evaluated_at)
         )
         brti_reference_backend_transport_lag_ms = (
             _metadata_int(reference_worker_metadata, "backend_transport_lag_ms")
@@ -879,15 +983,38 @@ def evaluate_strategy_observer(
         reference_tick=reference_tick,
         brti_backend_age_ms=brti_backend_age_ms,
         brti_source_age_ms=brti_source_age_ms,
+        brti_reference_stream_age_ms=brti_reference_stream_age_ms,
         reference_worker_metadata=reference_worker_metadata,
         worker_heartbeat_stale=brti_reference_worker_heartbeat_stale,
         transport_stale=brti_reference_transport_stale,
         persistence_stale=brti_reference_persistence_stale,
     )
+    brti_reference_carry_forward_age_ms = brti_backend_age_ms
+    brti_reference_carry_forward_allowed = (
+        brti_reference_stale_reason is None
+        and brti_backend_age_ms is not None
+        and brti_backend_age_ms > config.strategy_reference_max_age_ms
+        and brti_reference_stream_age_ms is not None
+        and brti_reference_stream_age_ms <= config.strategy_reference_stream_max_age_ms
+        and brti_backend_age_ms <= config.strategy_reference_carry_forward_max_age_ms
+    )
+    brti_reference_liveness_reason = (
+        "brti_reference_carried_forward"
+        if brti_reference_carry_forward_allowed
+        else brti_reference_stale_reason
+    )
+    if brti_reference_carry_forward_allowed:
+        brti_strategy_fresh_age_ms = brti_reference_stream_age_ms
+        brti_reference_valid_message_carried_forward = True
+        accumulated_warnings.append("brti_reference_carried_forward")
     brti_reference_trade_ready_fresh = (
         brti_reference_stale_reason is None
         and brti_backend_age_ms is not None
-        and brti_backend_age_ms <= config.strategy_reference_max_age_ms
+        and (
+            brti_backend_age_ms <= config.strategy_reference_max_age_ms
+            or brti_reference_carry_forward_allowed
+            or not config.strategy_reference_require_trade_ready_fresh
+        )
     )
     if (
         brti_reference_stale_reason is None
@@ -917,14 +1044,47 @@ def evaluate_strategy_observer(
         return decision(STATE_KALSHI_STALE, "kalshi_orderbook_missing")
 
     orderbook_age_ms = _age_ms(orderbook.received_at, evaluated_at)
-    if orderbook_age_ms is None or orderbook_age_ms > config.strategy_kalshi_book_max_age_ms:
+    orderbook_liveness_reason = _strategy_orderbook_stale_reason(
+        config=config,
+        orderbook=orderbook,
+        orderbook_age_ms=orderbook_age_ms,
+        orderbook_worker_metadata=orderbook_worker_metadata,
+        orderbook_stream_age_ms=orderbook_stream_age_ms,
+        orderbook_stream_connection_state=orderbook_stream_connection_state,
+        orderbook_stream_active_market_ticker=orderbook_stream_active_market_ticker,
+        orderbook_stream_warnings=orderbook_stream_warnings,
+        orderbook_stream_blockers=orderbook_stream_blockers,
+        market_ticker=market.market_ticker,
+    )
+    orderbook_carry_forward_age_ms = orderbook_age_ms
+    orderbook_carry_forward_allowed = (
+        orderbook_liveness_reason is None
+        and orderbook_age_ms is not None
+        and orderbook_age_ms > config.strategy_kalshi_book_max_age_ms
+        and orderbook_stream_age_ms is not None
+        and orderbook_stream_age_ms <= config.strategy_kalshi_book_stream_max_age_ms
+        and orderbook_age_ms <= config.strategy_kalshi_book_carry_forward_max_age_ms
+    )
+    orderbook_snapshot_source = (
+        "carried_forward"
+        if orderbook_carry_forward_allowed
+        else "fresh_update" if orderbook_liveness_reason is None else "blocked"
+    )
+    if orderbook_carry_forward_allowed:
+        accumulated_warnings.append("kalshi_orderbook_carried_forward")
+        orderbook_liveness_reason = "kalshi_orderbook_carried_forward"
+
+    if (
+        orderbook_snapshot_source == "blocked"
+        and orderbook_liveness_reason is not None
+    ):
         if manage_feed_failure_position():
             return decision(
                 STATE_FORCE_EXIT,
                 "dry_run_position_orderbook_stale",
                 blockers=["dry_run_force_exit_required"],
             )
-        return decision(STATE_KALSHI_STALE, "kalshi_orderbook_age_exceeds_limit")
+        return decision(STATE_KALSHI_STALE, orderbook_liveness_reason)
 
     latest_trade = PublicTradesRepository(session).get_latest_trade(market.market_ticker)
     if latest_trade is not None:
@@ -1031,7 +1191,7 @@ def evaluate_strategy_observer(
                 "dry_run_position_book_unusable",
                 blockers=["dry_run_force_exit_required"],
             )
-        return decision(STATE_BOOK_UNUSABLE, "desired_side_book_unusable")
+        return decision(STATE_BOOK_UNUSABLE, "kalshi_orderbook_side_missing")
 
     if (
         desired_spread_cents is None
@@ -1803,6 +1963,7 @@ def _measurements(
     boundary_source: str | None,
     reference_tick: ReferenceTick | None,
     reference_worker_metadata: dict[str, Any] | None,
+    orderbook_worker_metadata: dict[str, Any] | None,
     reference_worker_heartbeat_at: datetime | None,
     reference_worker_heartbeat_age_ms: int | None,
     brti_value: Decimal | None,
@@ -1820,8 +1981,26 @@ def _measurements(
     brti_reference_backend_transport_lag_ms: int | None,
     brti_reference_time_since_last_valid_tick_ms: int | None,
     brti_reference_stale_reason: str | None,
+    brti_reference_stream_age_ms: int | None,
+    brti_reference_last_valid_message_at: datetime | None,
+    brti_reference_last_valid_message_source_ts: datetime | None,
+    brti_reference_last_valid_message_value: str | None,
+    brti_reference_last_duplicate_valid_message_at: datetime | None,
+    brti_reference_valid_message_carried_forward: bool,
+    brti_reference_carry_forward_allowed: bool,
+    brti_reference_carry_forward_age_ms: int | None,
+    brti_reference_liveness_reason: str | None,
     orderbook: OrderbookSnapshot | None,
     orderbook_age_ms: int | None,
+    orderbook_stream_age_ms: int | None,
+    orderbook_stream_connection_state: str | None,
+    orderbook_stream_active_market_ticker: str | None,
+    orderbook_stream_warnings: list[str],
+    orderbook_stream_blockers: list[str],
+    orderbook_carry_forward_allowed: bool,
+    orderbook_carry_forward_age_ms: int | None,
+    orderbook_liveness_reason: str | None,
+    orderbook_snapshot_source: str | None,
     latest_trade: PublicTrade | None,
     latest_trade_age_ms: int | None,
     seconds_since_open: int | None,
@@ -1869,9 +2048,21 @@ def _measurements(
         brti_source_age_ms=brti_source_age_ms,
         brti_strategy_fresh_age_ms=brti_strategy_fresh_age_ms,
         brti_reference_stale_reason=brti_reference_stale_reason,
+        brti_reference_stream_age_ms=brti_reference_stream_age_ms,
+        brti_reference_carry_forward_allowed=brti_reference_carry_forward_allowed,
+        brti_reference_carry_forward_age_ms=brti_reference_carry_forward_age_ms,
+        brti_reference_valid_message_carried_forward=(
+            brti_reference_valid_message_carried_forward
+        ),
         brti_reference_transport_stale=brti_reference_transport_stale,
         brti_reference_persistence_stale=brti_reference_persistence_stale,
         brti_reference_worker_heartbeat_stale=brti_reference_worker_heartbeat_stale,
+        orderbook_age_ms=orderbook_age_ms,
+        orderbook_stream_age_ms=orderbook_stream_age_ms,
+        orderbook_carry_forward_allowed=orderbook_carry_forward_allowed,
+        orderbook_carry_forward_age_ms=orderbook_carry_forward_age_ms,
+        orderbook_liveness_reason=orderbook_liveness_reason,
+        orderbook_snapshot_source=orderbook_snapshot_source,
         seconds_left=seconds_left,
         distance_bps=distance_bps,
         desired_bid=desired_bid,
@@ -1925,6 +2116,30 @@ def _measurements(
         "brti_reference_time_since_last_valid_tick_ms": (
             brti_reference_time_since_last_valid_tick_ms
         ),
+        "brti_reference_stream_age_ms": brti_reference_stream_age_ms,
+        "brti_reference_last_valid_message_at": _isoformat_or_none(
+            brti_reference_last_valid_message_at
+        ),
+        "brti_reference_last_valid_message_source_ts": _isoformat_or_none(
+            brti_reference_last_valid_message_source_ts
+        ),
+        "brti_reference_last_valid_message_value": (
+            brti_reference_last_valid_message_value
+        ),
+        "brti_reference_last_duplicate_valid_message_at": _isoformat_or_none(
+            brti_reference_last_duplicate_valid_message_at
+        ),
+        "brti_reference_valid_message_carried_forward": (
+            brti_reference_valid_message_carried_forward
+        ),
+        "brti_reference_carry_forward_allowed": (
+            brti_reference_carry_forward_allowed
+        ),
+        "brti_reference_carry_forward_age_ms": brti_reference_carry_forward_age_ms,
+        "brti_reference_carry_forward_max_age_ms": (
+            config.strategy_reference_carry_forward_max_age_ms
+        ),
+        "brti_reference_liveness_reason": brti_reference_liveness_reason,
         "brti_reference_connection_state": _metadata_text(
             reference_worker_metadata,
             "connection_state",
@@ -1990,6 +2205,34 @@ def _measurements(
         "orderbook_received_at": _isoformat_or_none(getattr(orderbook, "received_at", None)),
         "orderbook_age_ms": orderbook_age_ms,
         "orderbook_sequence_number": getattr(orderbook, "sequence_number", None),
+        "orderbook_stream_last_message_at": _metadata_text(
+            orderbook_worker_metadata,
+            "last_message_at",
+        ),
+        "orderbook_stream_last_ticker_at": _metadata_text(
+            orderbook_worker_metadata,
+            "last_ticker_at",
+        ),
+        "orderbook_stream_last_trade_at": _metadata_text(
+            orderbook_worker_metadata,
+            "last_trade_at",
+        ),
+        "orderbook_stream_last_orderbook_at": _metadata_text(
+            orderbook_worker_metadata,
+            "last_orderbook_at",
+        ),
+        "orderbook_stream_age_ms": orderbook_stream_age_ms,
+        "orderbook_stream_connection_state": orderbook_stream_connection_state,
+        "orderbook_stream_active_market_ticker": orderbook_stream_active_market_ticker,
+        "orderbook_stream_warnings": orderbook_stream_warnings,
+        "orderbook_stream_blockers": orderbook_stream_blockers,
+        "orderbook_carry_forward_allowed": orderbook_carry_forward_allowed,
+        "orderbook_carry_forward_age_ms": orderbook_carry_forward_age_ms,
+        "orderbook_carry_forward_max_age_ms": (
+            config.strategy_kalshi_book_carry_forward_max_age_ms
+        ),
+        "orderbook_liveness_reason": orderbook_liveness_reason,
+        "orderbook_snapshot_source": orderbook_snapshot_source,
         "latest_trade_received_at": _isoformat_or_none(
             getattr(latest_trade, "received_at", None)
         ),
@@ -2100,7 +2343,25 @@ def _thresholds(config: AppConfig) -> dict[str, Any]:
         "strategy_reference_require_trade_ready_fresh": (
             config.strategy_reference_require_trade_ready_fresh
         ),
+        "strategy_reference_stream_max_age_ms": (
+            config.strategy_reference_stream_max_age_ms
+        ),
+        "strategy_reference_carry_forward_max_age_ms": (
+            config.strategy_reference_carry_forward_max_age_ms
+        ),
+        "strategy_reference_allow_duplicate_source_ts_carry_forward": (
+            config.strategy_reference_allow_duplicate_source_ts_carry_forward
+        ),
         "strategy_kalshi_book_max_age_ms": config.strategy_kalshi_book_max_age_ms,
+        "strategy_kalshi_book_stream_max_age_ms": (
+            config.strategy_kalshi_book_stream_max_age_ms
+        ),
+        "strategy_kalshi_book_carry_forward_max_age_ms": (
+            config.strategy_kalshi_book_carry_forward_max_age_ms
+        ),
+        "strategy_kalshi_book_require_stream_live": (
+            config.strategy_kalshi_book_require_stream_live
+        ),
         "strategy_no_entry_first_seconds": config.strategy_no_entry_first_seconds,
         "strategy_no_entry_last_seconds": config.strategy_no_entry_last_seconds,
         "strategy_min_entry_ask": config.strategy_min_entry_ask,
@@ -2124,6 +2385,10 @@ def _measurement_summary(measurements: Any) -> JsonPayload | None:
         "brti_reference_persistence_stale",
         "brti_reference_worker_heartbeat_stale",
         "brti_reference_trade_ready_fresh",
+        "brti_reference_stream_age_ms",
+        "brti_reference_carry_forward_allowed",
+        "brti_reference_carry_forward_age_ms",
+        "brti_reference_liveness_reason",
         "distance_bps",
         "candidate_side",
         "seconds_left",
@@ -2146,6 +2411,11 @@ def _measurement_summary(measurements: Any) -> JsonPayload | None:
         "dry_run_intended_entry_price",
         "dry_run_position_id",
         "orderbook_age_ms",
+        "orderbook_stream_age_ms",
+        "orderbook_carry_forward_allowed",
+        "orderbook_carry_forward_age_ms",
+        "orderbook_liveness_reason",
+        "orderbook_snapshot_source",
         "latest_trade_age_ms",
         "brti_reference_stale_reason",
         "brti_reference_connection_state",
@@ -2183,9 +2453,19 @@ def _gate_results(
     brti_source_age_ms: int | None,
     brti_strategy_fresh_age_ms: int | None,
     brti_reference_stale_reason: str | None,
+    brti_reference_stream_age_ms: int | None,
+    brti_reference_carry_forward_allowed: bool,
+    brti_reference_carry_forward_age_ms: int | None,
+    brti_reference_valid_message_carried_forward: bool,
     brti_reference_transport_stale: bool,
     brti_reference_persistence_stale: bool,
     brti_reference_worker_heartbeat_stale: bool,
+    orderbook_age_ms: int | None,
+    orderbook_stream_age_ms: int | None,
+    orderbook_carry_forward_allowed: bool,
+    orderbook_carry_forward_age_ms: int | None,
+    orderbook_liveness_reason: str | None,
+    orderbook_snapshot_source: str | None,
     seconds_left: int | None,
     distance_bps: Decimal | None,
     desired_bid: Decimal | None,
@@ -2216,6 +2496,9 @@ def _gate_results(
     elif "brti_reference_source_age_warning" in decision_warnings:
         reference_status = "warn"
         reference_reason = "brti_reference_source_age_warning"
+    elif brti_reference_carry_forward_allowed:
+        reference_status = "warn"
+        reference_reason = "brti_reference_carried_forward"
 
     timing_status = "not_evaluated" if seconds_left is None else "pass"
     timing_reason = None
@@ -2245,6 +2528,9 @@ def _gate_results(
     } or primary_reason.startswith(book_block_prefixes):
         book_status = "block"
         book_reason = primary_reason
+    elif orderbook_carry_forward_allowed:
+        book_status = "warn"
+        book_reason = "kalshi_orderbook_carried_forward"
 
     entry_price_status = (
         "not_evaluated" if dry_run_intended_entry_price is None else "pass"
@@ -2335,9 +2621,13 @@ def _gate_results(
         "reference": {
             "status": reference_status,
             "reason": reference_reason,
+            "stream_age_ms": brti_reference_stream_age_ms,
             "backend_age_ms": brti_backend_age_ms,
             "source_age_ms": brti_source_age_ms,
             "strategy_fresh_age_ms": brti_strategy_fresh_age_ms,
+            "carried_forward": brti_reference_valid_message_carried_forward,
+            "carry_forward_allowed": brti_reference_carry_forward_allowed,
+            "carry_forward_age_ms": brti_reference_carry_forward_age_ms,
             "transport_stale": brti_reference_transport_stale,
             "persistence_stale": brti_reference_persistence_stale,
             "worker_heartbeat_stale": brti_reference_worker_heartbeat_stale,
@@ -2355,6 +2645,12 @@ def _gate_results(
         "book": {
             "status": book_status,
             "reason": book_reason,
+            "snapshot_source": orderbook_snapshot_source,
+            "stream_age_ms": orderbook_stream_age_ms,
+            "book_age_ms": orderbook_age_ms,
+            "carry_forward_allowed": orderbook_carry_forward_allowed,
+            "carry_forward_age_ms": orderbook_carry_forward_age_ms,
+            "liveness_reason": orderbook_liveness_reason,
             "desired_bid": _decimal_text(desired_bid),
             "desired_ask": _decimal_text(desired_ask),
             "desired_mid": _decimal_text(desired_mid),
@@ -2436,6 +2732,7 @@ def _strategy_reference_stale_reason(
     reference_tick: ReferenceTick | None,
     brti_backend_age_ms: int | None,
     brti_source_age_ms: int | None,
+    brti_reference_stream_age_ms: int | None,
     reference_worker_metadata: dict[str, Any] | None,
     worker_heartbeat_stale: bool,
     transport_stale: bool,
@@ -2451,18 +2748,108 @@ def _strategy_reference_stale_reason(
     if persistence_stale:
         return "brti_reference_persistence_stale"
     if (
-        brti_backend_age_ms is None
-        or brti_backend_age_ms > config.strategy_reference_max_age_ms
-    ):
-        return "brti_reference_backend_age_exceeds_limit"
-    if (
         brti_source_age_ms is not None
         and brti_source_age_ms > config.strategy_reference_source_max_age_ms
     ):
         return "brti_reference_source_age_exceeds_hard_limit"
+    if brti_backend_age_ms is None:
+        return "brti_reference_backend_age_exceeds_limit"
+    if brti_backend_age_ms <= config.strategy_reference_max_age_ms:
+        return metadata_reason
+    if not config.strategy_reference_allow_duplicate_source_ts_carry_forward:
+        return "brti_reference_backend_age_exceeds_limit"
+    if brti_reference_stream_age_ms is None:
+        return "brti_reference_backend_age_exceeds_limit"
+    if brti_reference_stream_age_ms > config.strategy_reference_stream_max_age_ms:
+        return "brti_reference_stream_stale"
+    if brti_backend_age_ms > config.strategy_reference_carry_forward_max_age_ms:
+        return "brti_reference_carry_forward_age_exceeds_limit"
     if not config.strategy_reference_require_trade_ready_fresh:
         return None
     return metadata_reason
+
+
+def _strategy_orderbook_stale_reason(
+    *,
+    config: AppConfig,
+    orderbook: OrderbookSnapshot | None,
+    orderbook_age_ms: int | None,
+    orderbook_worker_metadata: dict[str, Any] | None,
+    orderbook_stream_age_ms: int | None,
+    orderbook_stream_connection_state: str | None,
+    orderbook_stream_active_market_ticker: str | None,
+    orderbook_stream_warnings: list[str],
+    orderbook_stream_blockers: list[str],
+    market_ticker: str,
+) -> str | None:
+    if orderbook is None:
+        return "kalshi_orderbook_missing"
+    if orderbook_age_ms is None:
+        return "kalshi_orderbook_age_exceeds_limit"
+
+    metadata_present = isinstance(orderbook_worker_metadata, dict)
+    stream_live_reason = _orderbook_stream_unusable_reason(
+        metadata=orderbook_worker_metadata,
+        stream_age_ms=orderbook_stream_age_ms,
+        connection_state=orderbook_stream_connection_state,
+        active_market_ticker=orderbook_stream_active_market_ticker,
+        warnings=orderbook_stream_warnings,
+        blockers=orderbook_stream_blockers,
+        market_ticker=market_ticker,
+        stream_max_age_ms=config.strategy_kalshi_book_stream_max_age_ms,
+    )
+    if config.strategy_kalshi_book_require_stream_live and stream_live_reason is not None:
+        if (
+            stream_live_reason != "kalshi_orderbook_age_exceeds_limit"
+            or orderbook_age_ms > config.strategy_kalshi_book_max_age_ms
+        ):
+            return stream_live_reason
+
+    if orderbook_age_ms <= config.strategy_kalshi_book_max_age_ms:
+        return None
+    if not metadata_present:
+        return "kalshi_orderbook_age_exceeds_limit"
+    if stream_live_reason is not None:
+        return stream_live_reason
+    if orderbook_age_ms > config.strategy_kalshi_book_carry_forward_max_age_ms:
+        return "kalshi_orderbook_carry_forward_age_exceeds_limit"
+    return None
+
+
+def _orderbook_stream_unusable_reason(
+    *,
+    metadata: dict[str, Any] | None,
+    stream_age_ms: int | None,
+    connection_state: str | None,
+    active_market_ticker: str | None,
+    warnings: list[str],
+    blockers: list[str],
+    market_ticker: str,
+    stream_max_age_ms: int,
+) -> str | None:
+    if not isinstance(metadata, dict):
+        return "kalshi_orderbook_age_exceeds_limit"
+    if connection_state != "subscribed":
+        return "kalshi_orderbook_stream_stale"
+    if active_market_ticker is not None and active_market_ticker != market_ticker:
+        return "kalshi_orderbook_active_ticker_mismatch"
+    if metadata.get("orderbook_initialized") is False:
+        return "kalshi_orderbook_uninitialized"
+    sequence_reset_reasons = {
+        "orderbook_sequence_gap_reset",
+        "orderbook_reset_after_buffer_overflow",
+        "kalshi_websocket_buffer_overflow",
+        "kalshi_orderbook_sequence_gap_or_reset",
+    }
+    if any(reason in sequence_reset_reasons for reason in warnings + blockers):
+        return "kalshi_orderbook_sequence_gap_or_reset"
+    if blockers:
+        return "kalshi_orderbook_stream_stale"
+    if stream_age_ms is None:
+        return "kalshi_orderbook_age_exceeds_limit"
+    if stream_age_ms > stream_max_age_ms:
+        return "kalshi_orderbook_stream_stale"
+    return None
 
 
 def _metadata_stale_reason(metadata: dict[str, Any] | None) -> str | None:
@@ -2474,6 +2861,7 @@ def _metadata_stale_reason(metadata: dict[str, Any] | None) -> str | None:
         "brti_reference_transport_stale",
         "brti_reference_persistence_stale",
         "brti_reference_worker_heartbeat_stale",
+        "brti_reference_duplicate_conflict",
         "brti_persistence_failed",
     ):
         if warning in warnings:
@@ -3210,6 +3598,11 @@ def _age_ms(value: datetime | None, now: datetime) -> int | None:
     return max(0, int((_as_utc(now) - _as_utc(value)).total_seconds() * 1000))
 
 
+def _latest_datetime(*values: datetime | None) -> datetime | None:
+    present = [_as_utc(value) for value in values if value is not None]
+    return max(present) if present else None
+
+
 def _seconds_between(start: datetime | None, end: datetime | None) -> int | None:
     if start is None or end is None:
         return None
@@ -3285,6 +3678,13 @@ def _reference_worker_metadata(metadata: Any) -> dict[str, Any] | None:
         return None
     brti_metadata = reference_metadata.get("brti")
     return brti_metadata if isinstance(brti_metadata, dict) else None
+
+
+def _ws_worker_metadata(metadata: Any) -> dict[str, Any] | None:
+    if not isinstance(metadata, dict):
+        return None
+    ws_metadata = metadata.get("ws")
+    return ws_metadata if isinstance(ws_metadata, dict) else None
 
 
 def _preserve_existing_worker_metadata(

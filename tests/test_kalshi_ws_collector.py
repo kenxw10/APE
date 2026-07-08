@@ -1013,7 +1013,7 @@ def test_collector_malformed_brti_ticks_do_not_reset_valid_tick_timer(tmp_path) 
         engine.dispose()
 
 
-def test_collector_skips_duplicate_or_out_of_order_brti_source_timestamp(tmp_path) -> None:
+def test_collector_carries_forward_duplicate_valid_brti_source_timestamp(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_duplicate.sqlite'}"
     config = load_config(
         {
@@ -1051,10 +1051,12 @@ def test_collector_skips_duplicate_or_out_of_order_brti_source_timestamp(tmp_pat
             assert len(ticks) == 1
             assert ticks[0].sequence_number == 1
             assert heartbeat is not None
-            assert (
-                "brti_duplicate_or_out_of_order_source_ts"
-                in heartbeat.metadata_["reference"]["brti"]["warnings"]
-            )
+            brti_metadata = heartbeat.metadata_["reference"]["brti"]
+            assert "brti_duplicate_or_out_of_order_source_ts" not in brti_metadata["warnings"]
+            assert brti_metadata["last_valid_message_at"] is not None
+            assert brti_metadata["last_duplicate_valid_message_at"] is not None
+            assert brti_metadata["valid_message_carried_forward"] is True
+            assert brti_metadata["reference_stream_live"] is True
     finally:
         engine.dispose()
 
@@ -1107,10 +1109,61 @@ def test_collector_skips_duplicate_brti_after_malformed_tick_without_source_ts(
             assert all(tick.sequence_number != 3 for tick in ticks)
             assert any(tick.source_ts is None for tick in ticks)
             assert heartbeat is not None
-            assert (
-                "brti_duplicate_or_out_of_order_source_ts"
-                in heartbeat.metadata_["reference"]["brti"]["warnings"]
-            )
+            brti_metadata = heartbeat.metadata_["reference"]["brti"]
+            assert "brti_duplicate_or_out_of_order_source_ts" not in brti_metadata["warnings"]
+            assert brti_metadata["valid_message_carried_forward"] is True
+            assert brti_metadata["last_duplicate_valid_message_at"] is not None
+    finally:
+        engine.dispose()
+
+
+def test_collector_blocks_conflicting_duplicate_brti_source_timestamp(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_duplicate_conflict.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket(
+        [
+            _brti_payload(seq=1, value="68000.12"),
+            _brti_payload(seq=2, value="68001.00"),
+        ]
+    )
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            ticks = ReferenceTicksRepository(session).get_recent_ticks(BRTI_SOURCE, limit=10)
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
+
+            assert len(ticks) == 1
+            assert ticks[0].sequence_number == 1
+            assert heartbeat is not None
+            brti_metadata = heartbeat.metadata_["reference"]["brti"]
+            assert "brti_reference_duplicate_conflict" in brti_metadata["warnings"]
+            assert "brti_reference_duplicate_conflict" in brti_metadata["blockers"]
+            assert brti_metadata["valid_message_carried_forward"] is False
     finally:
         engine.dispose()
 
