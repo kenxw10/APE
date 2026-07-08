@@ -831,6 +831,33 @@ def test_strategy_blocks_old_orderbook_when_invalid_update_warning_active(
     assert decision.primary_reason == "kalshi_orderbook_invalid_update"
 
 
+def test_strategy_blocks_old_orderbook_when_snapshot_resync_failed(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        latest_orderbook_received_at=now - timedelta(seconds=5),
+    )
+    _record_feed_heartbeat(
+        session,
+        now=now,
+        orderbook_warnings=["kalshi_orderbook_snapshot_resync_failed"],
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_KALSHI_STALE
+    assert decision.primary_reason == "kalshi_orderbook_snapshot_resync_failed"
+    assert decision.measurements["gate_results"]["book"]["status"] == "block"
+
+
 def test_strategy_blocks_old_orderbook_without_initialized_proof(session) -> None:
     now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
     config = load_config({"STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000"})

@@ -3178,11 +3178,21 @@ def _orderbook_stream_unusable_reason(
         "kalshi_websocket_buffer_overflow",
         "kalshi_orderbook_sequence_gap_or_reset",
     }
-    if any(reason in sequence_reset_reasons for reason in warnings + blockers):
+    reported_reasons = warnings + blockers
+    liveness_reason = _metadata_text(metadata, "orderbook_liveness_reason")
+    if liveness_reason is not None:
+        reported_reasons.append(liveness_reason)
+    if any(reason in sequence_reset_reasons for reason in reported_reasons):
         return "kalshi_orderbook_sequence_gap_or_reset"
+    snapshot_resync_failure_reasons = {
+        "kalshi_orderbook_snapshot_resync_failed",
+        "orderbook_snapshot_resync_unavailable",
+    }
+    if any(reason in snapshot_resync_failure_reasons for reason in reported_reasons):
+        return "kalshi_orderbook_snapshot_resync_failed"
     if any(
         reason.startswith(("invalid_orderbook_delta_", "invalid_orderbook_snapshot_"))
-        for reason in warnings + blockers
+        for reason in reported_reasons
     ):
         return "kalshi_orderbook_invalid_update"
     if blockers:
