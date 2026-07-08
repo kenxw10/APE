@@ -2442,6 +2442,94 @@ def test_collector_keeps_initialized_book_usable_during_quiet_snapshot_refresh(
         engine.dispose()
 
 
+def test_collector_requests_snapshot_when_ticker_keeps_quiet_book_busy(
+    tmp_path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_ticker_refresh.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "STRATEGY_KALSHI_BOOK_STREAM_MAX_AGE_MS": "10000",
+            "STRATEGY_KALSHI_BOOK_CARRY_FORWARD_MAX_AGE_MS": "1000",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    current_time = NOW
+
+    def advance_time() -> None:
+        nonlocal current_time
+        current_time = current_time + timedelta(seconds=1)
+
+    websocket = AdvancingFakeWebSocket(
+        [
+            {
+                "type": "orderbook_snapshot",
+                "sid": 1,
+                "seq": 1,
+                "msg": {
+                    "market_ticker": "KXBTC15M-TEST",
+                    "yes_dollars_fp": [["0.6000", "10.00"]],
+                    "no_dollars_fp": [["0.6500", "8.00"]],
+                },
+            },
+            {
+                "type": "ticker",
+                "sid": 2,
+                "seq": 2,
+                "msg": {"market_ticker": "KXBTC15M-TEST"},
+            },
+        ],
+        advance_time,
+    )
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: current_time,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            latest_book = OrderbookRepository(session).get_latest_snapshot(
+                "KXBTC15M-TEST"
+            )
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                "ape-worker"
+            )
+
+            assert latest_book is not None
+            assert any(
+                message.get("cmd") == "update_subscription"
+                and message.get("params", {}).get("sids") == [1]
+                and message.get("params", {}).get("action") == "get_snapshot"
+                and message.get("params", {}).get("market_tickers")
+                == ["KXBTC15M-TEST"]
+                for message in websocket.sent
+            )
+            assert heartbeat is not None
+            ws_metadata = heartbeat.metadata_["ws"]
+            assert ws_metadata["orderbook_liveness_status"] == "live"
+            assert ws_metadata["orderbook_snapshot_source"] == "carried_forward"
+            assert ws_metadata["orderbook_recovery_action"] == "request_snapshot"
+            assert "snapshot_resync_pending" not in ws_metadata["warnings"]
+    finally:
+        engine.dispose()
+
+
 def test_collector_resets_backoff_after_successful_websocket_cycle(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_backoff_reset.sqlite'}"
     config = load_config(

@@ -828,6 +828,14 @@ class KalshiWsCollector:
                 self._add_warning("kalshi_ws_resubscribe_requested")
                 self.record_heartbeat(include_market=True, include_reference=False)
                 return resubscribe_reason
+            if message.kind in {"ticker", "trade"} and orderbook.initialized:
+                await self._request_orderbook_snapshot_if_due(
+                    websocket,
+                    market_ticker=market_ticker,
+                    orderbook=orderbook,
+                    checked_at=received_at,
+                    reason="market_data_quiet",
+                )
             self.record_heartbeat(
                 force=(
                     self._consume_force_next_heartbeat()
