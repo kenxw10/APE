@@ -3605,6 +3605,88 @@ def test_collector_counts_inflight_critical_write_until_writer_commit(tmp_path) 
         engine.dispose()
 
 
+def test_collector_keeps_latest_state_metrics_monotonic_after_retry(
+    tmp_path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_retry_monotonic.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+
+    async def websocket_factory(*_args):
+        raise AssertionError("websocket factory should not be used")
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW + timedelta(seconds=2),
+    )
+    collector._db_writer_queue = asyncio.Queue(maxsize=10)
+    older_received_at = NOW
+    newer_received_at = NOW + timedelta(milliseconds=500)
+
+    try:
+        collector._persist_orderbook(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC15M-TEST",
+                received_at=older_received_at,
+                sequence_number=1,
+                yes_bid=Decimal("0.61"),
+            )
+        )
+        failed_batch = collector._next_market_db_batch()
+        assert len(failed_batch) == 1
+        queue_name, raw_item, failed_item = failed_batch[0]
+
+        collector._persist_orderbook(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC15M-TEST",
+                received_at=newer_received_at,
+                sequence_number=2,
+                yes_bid=Decimal("0.63"),
+            )
+        )
+        assert collector._requeue_failed_critical_item(
+            failed_item,
+            NOW + timedelta(seconds=1),
+        )
+        collector._market_db_queue_task_done(queue_name, raw_item)
+
+        resolved_items = _flush_queued_market_db_writes(collector)
+
+        assert [item.payload.received_at for item in resolved_items] == [
+            newer_received_at,
+            older_received_at,
+        ]
+        assert collector.status.last_orderbook_at == newer_received_at
+        assert collector.status.latest_state_persisted_at == newer_received_at
+        assert collector.status.latest_state_persistence_lag_ms == 1500
+        with session_factory() as session:
+            rows = list(
+                session.scalars(
+                    select(OrderbookSnapshot).order_by(
+                        OrderbookSnapshot.received_at,
+                        OrderbookSnapshot.id,
+                    )
+                )
+            )
+            assert [row.sequence_number for row in rows] == [1, 2]
+    finally:
+        engine.dispose()
+
+
 def test_collector_coalesces_orderbook_writes_to_latest_state(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_orderbook_coalesce.sqlite'}"
     config = load_config(

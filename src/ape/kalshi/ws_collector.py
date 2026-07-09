@@ -2462,12 +2462,20 @@ class KalshiWsCollector:
                     "market_critical_persistence_backpressure",
                 ),
             )
-            self.status.last_orderbook_at = item.payload.received_at
-            self.status.latest_state_persisted_at = item.payload.received_at
-            self.status.latest_state_persistence_lag_ms = _age_ms(
+            if _datetime_at_least(
                 item.payload.received_at,
-                self.now(),
-            )
+                self.status.last_orderbook_at,
+            ):
+                self.status.last_orderbook_at = item.payload.received_at
+            if _datetime_at_least(
+                item.payload.received_at,
+                self.status.latest_state_persisted_at,
+            ):
+                self.status.latest_state_persisted_at = item.payload.received_at
+                self.status.latest_state_persistence_lag_ms = _age_ms(
+                    item.payload.received_at,
+                    self.now(),
+                )
             matches_active_market = _orderbook_commit_matches_active_market(
                 item.payload,
                 self.status.active_market_ticker,
@@ -3876,6 +3884,10 @@ def _as_utc(value: datetime) -> datetime:
 def _latest_datetime(*values: datetime | None) -> datetime | None:
     present = [_as_utc(value) for value in values if value is not None]
     return max(present) if present else None
+
+
+def _datetime_at_least(value: datetime, minimum: datetime | None) -> bool:
+    return minimum is None or _as_utc(value) >= _as_utc(minimum)
 
 
 def _age_ms(value_at: datetime | None, checked_at: datetime) -> int | None:
