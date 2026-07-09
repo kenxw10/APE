@@ -642,6 +642,109 @@ def test_collector_reconciles_subscriptions_from_list_response(tmp_path) -> None
         engine.dispose()
 
 
+def test_collector_does_not_count_recovered_already_subscribed_as_protocol_error(
+    tmp_path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_already_subscribed.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket(
+        [
+            {
+                "type": "error",
+                "id": 1,
+                "msg": {"code": 6, "msg": "Already subscribed"},
+            },
+            {
+                "type": "ok",
+                "id": 1001,
+                "msg": [
+                    {
+                        "channel": "orderbook_delta",
+                        "sid": 11,
+                        "market_tickers": ["KXBTC15M-TEST"],
+                    },
+                    {
+                        "channels": ["ticker", "trade"],
+                        "sid": 12,
+                        "market_tickers": ["KXBTC15M-TEST"],
+                    },
+                ],
+            },
+            {
+                "type": "orderbook_snapshot",
+                "sid": 11,
+                "seq": 1,
+                "msg": {
+                    "market_ticker": "KXBTC15M-TEST",
+                    "yes_dollars_fp": [["0.6000", "10.00"]],
+                    "no_dollars_fp": [["0.6500", "8.00"]],
+                },
+            },
+        ]
+    )
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                WORKER_SERVICE_MARKET_WS
+            )
+            protocol_events = list(
+                session.scalars(select(KalshiWsProtocolEvent.event_type))
+            )
+
+            assert heartbeat is not None
+            ws_metadata = heartbeat.metadata_["ws"]
+            assert ws_metadata["subscription_reconciled"] is True
+            assert ws_metadata["orderbook_sid_confirmed"] is True
+            assert ws_metadata["ticker_sid_confirmed"] is True
+            assert ws_metadata["trade_sid_confirmed"] is True
+            assert ws_metadata["protocol_event_recent_error_count"] == 0
+            assert (
+                "kalshi_ws_already_subscribed_pending_reconcile"
+                not in ws_metadata["warnings"]
+            )
+            assert "already_subscribed_received" in protocol_events
+            assert "websocket_error" not in protocol_events
+
+        list_subscription_requests = [
+            message
+            for message in websocket.sent
+            if message.get("cmd") == "list_subscriptions"
+        ]
+        assert list_subscription_requests == [
+            {"id": 1000, "cmd": "list_subscriptions"},
+            {"id": 1001, "cmd": "list_subscriptions"},
+        ]
+    finally:
+        engine.dispose()
+
+
 def test_collector_dedicated_brti_failure_does_not_stop_market_ws(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_brti_failure_market_ok.sqlite'}"
     config = load_config(

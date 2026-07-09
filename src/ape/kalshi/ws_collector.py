@@ -1393,6 +1393,25 @@ class KalshiWsCollector:
                 )
                 request_id = _int_or_none(raw_payload.get("id"))
                 error_message = _websocket_error_message(raw_payload)
+                if _already_subscribed_error(error_message):
+                    self._record_protocol_event(
+                        "already_subscribed_received",
+                        command_id=request_id,
+                        sid=message.sid,
+                        seq=message.seq,
+                        raw_code=_websocket_error_code(raw_payload),
+                        raw_message=error_message,
+                        raw_payload_hash=message.raw_payload_hash,
+                        payload_summary_json=_payload_summary(raw_payload),
+                    )
+                    self._add_warning("kalshi_ws_already_subscribed_pending_reconcile")
+                    try:
+                        await self._request_list_subscriptions(websocket)
+                    except Exception as exc:
+                        self._set_error("list_subscriptions_failed", exc)
+                        self._add_warning("kalshi_ws_already_subscribed_unconfirmed")
+                    self._force_next_heartbeat = True
+                    return None
                 self._record_protocol_event(
                     "websocket_error",
                     command_id=request_id,
@@ -1403,15 +1422,6 @@ class KalshiWsCollector:
                     raw_payload_hash=message.raw_payload_hash,
                     payload_summary_json=_payload_summary(raw_payload),
                 )
-                if _already_subscribed_error(error_message):
-                    self._add_warning("kalshi_ws_already_subscribed_pending_reconcile")
-                    try:
-                        await self._request_list_subscriptions(websocket)
-                    except Exception as exc:
-                        self._set_error("list_subscriptions_failed", exc)
-                        self._add_warning("kalshi_ws_already_subscribed_unconfirmed")
-                    self._force_next_heartbeat = True
-                    return None
                 if (
                     request_id is not None
                     and request_id in self.status.subscription_request_ids.values()
@@ -1597,6 +1607,11 @@ class KalshiWsCollector:
             self.status.list_subscriptions_request_id = None
             self._reconcile_list_subscriptions(payload)
             self.status.subscription_reconciled = self._subscriptions_confirmed()
+            if self.status.subscription_reconciled:
+                self._clear_warnings(
+                    "kalshi_ws_already_subscribed_pending_reconcile",
+                    "kalshi_ws_already_subscribed_unconfirmed",
+                )
             self._record_protocol_event(
                 "list_subscriptions_ok",
                 command_id=request_id,
