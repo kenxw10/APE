@@ -455,6 +455,7 @@ class KalshiWsCollector:
         self._force_next_heartbeat = False
         self._forced_diagnostic_signatures: set[str] = set()
         self._connection_sequence = 0
+        self._market_reconnect_completion_pending_reason: str | None = None
         self._db_writer_queue: asyncio.Queue[_DbWriterItem] | None = None
         self._db_writer_enqueued_at: deque[datetime] = deque()
         self._db_writer_task: asyncio.Task[None] | None = None
@@ -724,6 +725,9 @@ class KalshiWsCollector:
             market_subscription_enabled
             and (self.status.reconnect_count > 0 or self.status.reconnect_reason)
         )
+        self._market_reconnect_completion_pending_reason = (
+            self.status.reconnect_reason if market_reconnect_attempt_active else None
+        )
 
         try:
             headers = create_websocket_auth_headers(
@@ -791,6 +795,7 @@ class KalshiWsCollector:
                 )
                 if include_market:
                     if _market_reconnect_result(read_result):
+                        self._market_reconnect_completion_pending_reason = None
                         self.status.connection_state = "reconnect_pending"
                         self.status.reconnect_reason = read_result
                         self.status.reconnect_count += 1
@@ -805,12 +810,7 @@ class KalshiWsCollector:
                             include_reference=False,
                         )
                     else:
-                        if market_reconnect_attempt_active:
-                            self._record_protocol_event(
-                                "reconnect_completed",
-                                event_subtype=self.status.reconnect_reason,
-                                recovery_result="completed",
-                            )
+                        self._complete_market_reconnect_if_pending()
                         self.status.reconnect_count = 0
                         self.status.reconnect_reason = None
                 if include_reference and not _reference_reconnect_result(read_result):
@@ -829,6 +829,7 @@ class KalshiWsCollector:
                 if market_subscription_enabled:
                     await self._stop_market_db_writer()
         except Exception as exc:
+            self._market_reconnect_completion_pending_reason = None
             if include_market:
                 self.status.reconnect_count += 1
                 self.status.reconnect_reason = exc.__class__.__name__
@@ -1152,6 +1153,8 @@ class KalshiWsCollector:
                 self._add_warning("kalshi_ws_resubscribe_requested")
                 self.record_heartbeat(include_market=True, include_reference=False)
                 return resubscribe_reason
+            if _market_reconnect_confirmation_message(message):
+                self._complete_market_reconnect_if_pending()
             if message.kind in {"ticker", "trade"} and orderbook.initialized:
                 await self._request_orderbook_snapshot_if_due(
                     websocket,
@@ -1181,6 +1184,21 @@ class KalshiWsCollector:
                     return reconnect_reason
 
         return None
+
+    def _complete_market_reconnect_if_pending(self) -> bool:
+        reason = self._market_reconnect_completion_pending_reason
+        if reason is None:
+            return False
+        self._record_protocol_event(
+            "reconnect_completed",
+            event_subtype=reason,
+            recovery_result="completed",
+        )
+        self.status.reconnect_count = 0
+        self.status.reconnect_reason = None
+        self._market_reconnect_completion_pending_reason = None
+        self._force_next_heartbeat = True
+        return True
 
     def _handle_reference_message(self, message: ParsedReferenceMessage) -> None:
         if message.kind == "ignored":
@@ -2197,6 +2215,7 @@ class KalshiWsCollector:
             )
         except TimeoutError:
             self._add_warning("market_db_writer_drain_timeout")
+            self._clear_orderbook_persistence_pending(self.now())
         self._refresh_db_writer_metrics(self.now())
         self.record_market_heartbeat()
         task.cancel()
@@ -2309,6 +2328,14 @@ class KalshiWsCollector:
                 self.status.orderbook_persistence_pending_since,
                 checked_at,
             )
+        self._refresh_market_feed_state(checked_at)
+        self._force_next_heartbeat = True
+
+    def _clear_orderbook_persistence_pending(self, checked_at: datetime) -> None:
+        self.status.orderbook_persistence_pending_count = 0
+        self.status.orderbook_persistence_pending_since = None
+        self.status.orderbook_persistence_pending_age_ms = None
+        self._clear_blockers("orderbook_persistence_pending")
         self._refresh_market_feed_state(checked_at)
         self._force_next_heartbeat = True
 
@@ -3356,6 +3383,16 @@ def _market_reconnect_result(value: str | None) -> bool:
         "kalshi_orderbook_sequence_gap_or_reset",
         "orderbook_reset_after_buffer_overflow",
         "orderbook_sequence_gap_reset",
+    }
+
+
+def _market_reconnect_confirmation_message(message: ParsedWsMessage) -> bool:
+    return message.kind in {
+        "control",
+        "ticker",
+        "trade",
+        "orderbook_snapshot",
+        "orderbook_delta",
     }
 
 
