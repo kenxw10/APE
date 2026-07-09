@@ -196,6 +196,7 @@ def test_collector_subscribes_and_persists_mock_messages(tmp_path) -> None:
             assert "orderbook_snapshot_received" in protocol_events
             assert "orderbook_delta_received" in protocol_events
             assert "trade_received" in protocol_events
+            assert "reconnect_completed" not in protocol_events
             assert (
                 market_heartbeat.metadata_["ws"]["active_market_ticker"]
                 == "KXBTC15M-TEST"

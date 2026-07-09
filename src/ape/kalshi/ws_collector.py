@@ -703,6 +703,11 @@ class KalshiWsCollector:
             self.status.connection_state = "disabled"
             self.status.warnings = ["kalshi_ws_disabled"]
 
+        market_reconnect_attempt_active = bool(
+            market_subscription_enabled
+            and (self.status.reconnect_count > 0 or self.status.reconnect_reason)
+        )
+
         try:
             headers = create_websocket_auth_headers(
                 endpoint=self.config.kalshi_ws_base_url,
@@ -711,7 +716,7 @@ class KalshiWsCollector:
             )
             if market_subscription_enabled:
                 self._start_market_connection()
-                if self.status.reconnect_count > 0 or self.status.reconnect_reason:
+                if market_reconnect_attempt_active:
                     self._record_protocol_event(
                         "reconnect_started",
                         event_subtype=self.status.reconnect_reason,
@@ -783,12 +788,14 @@ class KalshiWsCollector:
                             include_reference=False,
                         )
                     else:
+                        if market_reconnect_attempt_active:
+                            self._record_protocol_event(
+                                "reconnect_completed",
+                                event_subtype=self.status.reconnect_reason,
+                                recovery_result="completed",
+                            )
                         self.status.reconnect_count = 0
                         self.status.reconnect_reason = None
-                        self._record_protocol_event(
-                            "reconnect_completed",
-                            recovery_result="completed",
-                        )
                 if include_reference and not _reference_reconnect_result(read_result):
                     self.brti_status.reconnect_count = 0
             finally:
