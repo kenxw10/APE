@@ -3250,6 +3250,7 @@ def _market_reconnect_result(value: str | None) -> bool:
     return value in {
         "kalshi_orderbook_transport_stale",
         "kalshi_orderbook_snapshot_resync_failed",
+        "kalshi_orderbook_snapshot_resync_timeout",
         "kalshi_orderbook_subscription_ack_timeout",
         "kalshi_orderbook_subscription_recovery_failed",
         "kalshi_orderbook_sequence_gap_or_reset",

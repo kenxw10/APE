@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import threading
 from datetime import UTC, datetime
 
@@ -367,7 +368,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     try:
         args = _parse_args(argv)
-        config = load_config()
+        config_env = None
+        if args.role is not None:
+            config_env = dict(os.environ)
+            config_env["APE_WORKER_ROLE"] = args.role
+        config = load_config(config_env)
         configure_logging(config.log_level)
         run_worker(config, worker_role=args.role)
     except ConfigError as exc:

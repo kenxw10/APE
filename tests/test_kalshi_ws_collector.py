@@ -18,7 +18,7 @@ from ape.db.models import KalshiWsProtocolEvent, OrderbookSnapshot, WorkerHeartb
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.kalshi.reference_messages import BRTI_SOURCE
 from ape.kalshi.resolver import ResolverResult, ResolverState
-from ape.kalshi.ws_collector import KalshiWsCollector
+from ape.kalshi.ws_collector import KalshiWsCollector, _market_reconnect_result
 from ape.kalshi.ws_status import build_kalshi_ws_status
 from ape.repositories.inputs import MarketInput, OrderbookSnapshotInput, WorkerHeartbeatInput
 from ape.repositories.orderbook import OrderbookRepository
@@ -33,6 +33,10 @@ from ape.worker.services import (
 )
 
 NOW = datetime(2026, 7, 5, 14, 35, tzinfo=UTC)
+
+
+def test_market_reconnect_result_includes_snapshot_timeout() -> None:
+    assert _market_reconnect_result("kalshi_orderbook_snapshot_resync_timeout") is True
 
 
 class FakeWebSocket:

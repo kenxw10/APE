@@ -33,6 +33,23 @@ def test_configure_logging_reapplies_requested_level() -> None:
         root_logger.setLevel(previous_level)
 
 
+def test_worker_main_cli_role_overrides_invalid_env_role(monkeypatch) -> None:
+    captured: dict[str, str | None] = {}
+
+    def fake_run_worker(config, *, worker_role=None) -> None:
+        captured["config_role"] = config.ape_worker_role
+        captured["worker_role"] = worker_role
+
+    monkeypatch.setenv("APE_WORKER_ROLE", "stale-invalid-role")
+    monkeypatch.setattr(worker_main, "run_worker", fake_run_worker)
+
+    assert worker_main.main(["--role", "market-data"]) == 0
+    assert captured == {
+        "config_role": "market-data",
+        "worker_role": "market-data",
+    }
+
+
 def test_worker_disabled_websocket_records_idle_heartbeat(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_worker.sqlite'}"
     config = load_config({"DATABASE_URL": database_url})
