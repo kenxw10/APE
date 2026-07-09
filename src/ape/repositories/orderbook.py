@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, insert, select
 from sqlalchemy.orm import Session
 
 from ape.db.models import OrderbookSnapshot
@@ -18,6 +18,14 @@ class OrderbookRepository:
         self.session.add(row)
         self.session.flush()
         return row
+
+    def insert_snapshots(self, snapshots: list[OrderbookSnapshotInput]) -> None:
+        if not snapshots:
+            return
+        self.session.execute(
+            insert(OrderbookSnapshot),
+            [snapshot.__dict__ for snapshot in snapshots],
+        )
 
     def get_latest_snapshot(self, market_ticker: str) -> OrderbookSnapshot | None:
         return self.session.scalar(

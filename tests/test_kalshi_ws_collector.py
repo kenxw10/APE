@@ -2243,10 +2243,11 @@ def test_collector_records_orderbook_persistence_failure(monkeypatch, tmp_path) 
         ]
     )
 
-    def fail_insert(self, snapshot) -> None:
+    def fail_insert(self, snapshots) -> None:
+        assert snapshots
         raise SQLAlchemyError("orderbook insert failed")
 
-    monkeypatch.setattr(OrderbookRepository, "insert_snapshot", fail_insert)
+    monkeypatch.setattr(OrderbookRepository, "insert_snapshots", fail_insert)
 
     async def websocket_factory(*_args):
         return websocket
@@ -2274,7 +2275,7 @@ def test_collector_records_orderbook_persistence_failure(monkeypatch, tmp_path) 
             assert ws_metadata["connection_state"] == "error"
             assert ws_metadata["last_error_type"] == "SQLAlchemyError"
             assert "orderbook_persistence_failed" in ws_metadata["warnings"]
-            assert "orderbook_persistence_failed" in ws_metadata["blockers"]
+            assert "market_critical_persistence_failed" in ws_metadata["blockers"]
             assert ws_metadata["last_orderbook_at"] is None
     finally:
         engine.dispose()
@@ -2321,17 +2322,17 @@ def test_collector_clears_orderbook_persistence_failure_after_success(
             },
         ]
     )
-    original_insert = OrderbookRepository.insert_snapshot
+    original_insert_many = OrderbookRepository.insert_snapshots
     attempts = 0
 
-    def flaky_insert(self, snapshot):
+    def flaky_insert(self, snapshots):
         nonlocal attempts
         attempts += 1
         if attempts == 1:
             raise SQLAlchemyError("temporary orderbook insert failure")
-        return original_insert(self, snapshot)
+        return original_insert_many(self, snapshots)
 
-    monkeypatch.setattr(OrderbookRepository, "insert_snapshot", flaky_insert)
+    monkeypatch.setattr(OrderbookRepository, "insert_snapshots", flaky_insert)
 
     async def websocket_factory(*_args):
         return websocket
@@ -2474,8 +2475,8 @@ def test_collector_persists_market_liveness_heartbeats_before_stream_gate(
             )
             heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
 
-            assert heartbeat_count == 106
-            assert market_heartbeat_count == 53
+            assert heartbeat_count == 107
+            assert market_heartbeat_count == 54
             assert aggregate_heartbeat_count == 53
             assert heartbeat is not None
             assert heartbeat.metadata_["ws"]["last_message_at"] == "2026-07-05T14:35:50Z"
@@ -3303,6 +3304,16 @@ def test_collector_protocol_error_count_expires_after_recent_window(tmp_path) ->
         engine.dispose()
 
 
+def _flush_queued_market_db_writes(collector: KalshiWsCollector) -> list[Any]:
+    batch = collector._next_market_db_batch()
+    assert batch
+    resolved_items = [item for _, _, item in batch]
+    collector._write_market_db_batch(resolved_items)
+    for queue_name, raw_item, _ in batch:
+        collector._market_db_queue_task_done(queue_name, raw_item)
+    return resolved_items
+
+
 def test_collector_does_not_sync_insert_when_market_db_queue_is_full(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_queue_full.sqlite'}"
     config = load_config(
@@ -3311,7 +3322,7 @@ def test_collector_does_not_sync_insert_when_market_db_queue_is_full(tmp_path) -
             "KALSHI_API_KEY_ID": "key-id",
             "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
             "KALSHI_WS_ENABLED": "true",
-            "KALSHI_WS_DB_WRITER_QUEUE_MAX_SIZE": "1",
+            "MARKET_DB_WRITER_CRITICAL_QUEUE_MAX_SIZE": "1",
         }
     )
     engine = create_engine_from_config(config)
@@ -3330,8 +3341,11 @@ def test_collector_does_not_sync_insert_when_market_db_queue_is_full(tmp_path) -
         resolver=_resolved_market,
         now=lambda: NOW,
     )
-    collector._db_writer_queue = asyncio.Queue(maxsize=1)
-    collector._db_writer_queue.put_nowait(object())
+    collector._db_critical_queue = asyncio.Queue(maxsize=1)
+    collector._db_writer_queue = collector._db_critical_queue
+    collector._db_diagnostic_queue = asyncio.Queue(maxsize=1)
+    collector._db_critical_queue.put_nowait(object())
+    collector._db_diagnostic_queue.put_nowait(object())
 
     try:
         persisted = collector._persist_orderbook(
@@ -3343,14 +3357,66 @@ def test_collector_does_not_sync_insert_when_market_db_queue_is_full(tmp_path) -
         )
 
         assert persisted is False
-        assert "market_db_writer_queue_backpressure" in collector.status.warnings
-        assert "market_db_writer_queue_backpressure" in collector.status.blockers
-        assert collector.status.protocol_event_recent_error_count == 1
+        assert "market_critical_persistence_backpressure" in collector.status.warnings
+        assert "market_critical_persistence_backpressure" in collector.status.blockers
+        assert collector.status.protocol_event_recent_error_count == 0
         with session_factory() as session:
             assert (
                 session.scalar(select(func.count()).select_from(OrderbookSnapshot))
                 == 0
             )
+            assert (
+                session.scalar(select(func.count()).select_from(KalshiWsProtocolEvent))
+                == 0
+            )
+    finally:
+        engine.dispose()
+
+
+def test_collector_diagnostic_queue_backpressure_does_not_block_market(
+    tmp_path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_diag_queue_full.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "MARKET_DB_WRITER_DIAGNOSTIC_QUEUE_MAX_SIZE": "1",
+            "MARKET_PROTOCOL_EVENT_SAMPLE_RATE": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+
+    async def websocket_factory(*_args):
+        raise AssertionError("websocket factory should not be used")
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector._db_critical_queue = asyncio.Queue(maxsize=10)
+    collector._db_writer_queue = collector._db_critical_queue
+    collector._db_diagnostic_queue = asyncio.Queue(maxsize=1)
+    collector._db_diagnostic_queue.put_nowait(object())
+
+    try:
+        collector._record_protocol_event("ticker_received")
+
+        assert collector.status.db_writer_dropped_diagnostic_count == 1
+        assert collector.status.protocol_events_dropped_backpressure == 1
+        assert "market_diagnostic_persistence_backpressure" in collector.status.warnings
+        assert "market_critical_persistence_backpressure" not in collector.status.blockers
+        assert collector.status.protocol_event_recent_error_count == 0
+        with session_factory() as session:
             assert (
                 session.scalar(select(func.count()).select_from(KalshiWsProtocolEvent))
                 == 0
@@ -3399,15 +3465,14 @@ def test_collector_marks_queued_orderbook_pending_until_writer_commit(tmp_path) 
         assert persisted is False
         assert collector.status.orderbook_persistence_pending_count == 1
         assert collector.status.orderbook_persistence_pending_age_ms == 0
-        assert "orderbook_persistence_pending" in collector.status.blockers
+        assert "orderbook_persistence_pending" not in collector.status.blockers
         with session_factory() as session:
             assert (
                 session.scalar(select(func.count()).select_from(OrderbookSnapshot))
                 == 0
             )
 
-        item = collector._db_writer_queue.get_nowait()
-        collector._write_market_db_item(item)
+        _flush_queued_market_db_writes(collector)
 
         assert collector.status.orderbook_persistence_pending_count == 0
         assert collector.status.orderbook_persistence_pending_since is None
@@ -3419,6 +3484,71 @@ def test_collector_marks_queued_orderbook_pending_until_writer_commit(tmp_path) 
                 session.scalar(select(func.count()).select_from(OrderbookSnapshot))
                 == 1
             )
+    finally:
+        engine.dispose()
+
+
+def test_collector_coalesces_orderbook_writes_to_latest_state(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_orderbook_coalesce.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+
+    async def websocket_factory(*_args):
+        raise AssertionError("websocket factory should not be used")
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW + timedelta(milliseconds=500),
+    )
+    collector._db_writer_queue = asyncio.Queue(maxsize=10)
+
+    try:
+        collector._persist_orderbook(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC15M-TEST",
+                received_at=NOW,
+                sequence_number=1,
+                yes_bid=Decimal("0.61"),
+            )
+        )
+        collector._persist_orderbook(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC15M-TEST",
+                received_at=NOW + timedelta(milliseconds=250),
+                sequence_number=2,
+                yes_bid=Decimal("0.63"),
+            )
+        )
+
+        assert collector._db_writer_queue.qsize() == 1
+        assert collector.status.orderbook_persistence_pending_count == 1
+        assert collector.status.db_writer_coalesced_orderbook_count == 1
+        assert collector.status.db_writer_dropped_superseded_count == 1
+
+        _flush_queued_market_db_writes(collector)
+
+        with session_factory() as session:
+            rows = list(session.scalars(select(OrderbookSnapshot)))
+            assert len(rows) == 1
+            assert rows[0].sequence_number == 2
+            assert rows[0].yes_bid == Decimal("0.63")
+        assert collector.status.latest_state_persisted_at == (
+            NOW + timedelta(milliseconds=250)
+        )
     finally:
         engine.dispose()
 
@@ -3498,13 +3628,8 @@ def test_collector_clears_delta_warnings_after_queued_valid_delta_commit(
         assert "invalid_orderbook_delta_delta_fp" in collector.status.warnings
         assert "orderbook_delta_before_snapshot" in collector.status.warnings
 
-        queued_items = []
-        while not collector._db_writer_queue.empty():
-            queued_items.append(collector._db_writer_queue.get_nowait())
-        assert any(item.kind == "orderbook" for item in queued_items)
-
-        for item in queued_items:
-            collector._write_market_db_item(item)
+        resolved_items = _flush_queued_market_db_writes(collector)
+        assert any(item.kind == "orderbook" for item in resolved_items)
 
         assert "invalid_orderbook_delta_delta_fp" not in collector.status.warnings
         assert "orderbook_delta_before_snapshot" not in collector.status.warnings
@@ -3570,9 +3695,8 @@ def test_collector_finishes_queued_snapshot_recovery_after_sequence_advances(
         )
 
         assert persisted is False
-        item = collector._db_writer_queue.get_nowait()
         collector.status.orderbook_sequence_number = 2
-        collector._write_market_db_item(item)
+        _flush_queued_market_db_writes(collector)
 
         assert collector.status.market_recovery_attempt_in_progress is False
         assert collector.status.market_snapshot_resync_last_result == (

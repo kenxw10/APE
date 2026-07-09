@@ -395,3 +395,73 @@ Invoke-RestMethod https://ape-api-production.up.railway.app/ready
 - Confirm this PR did not tune strategy thresholds and did not add paper/live,
   order, fill, private-channel, account, executor, credential, or dashboard
   control behavior.
+
+PR 9g post-merge checkpoint:
+
+- Keep only `ape-market-worker` enabled until market-worker persistence is
+  validated. Do not proceed to reference, strategy, maintenance, replay, paper
+  ledger, dashboard polish, or strategy tuning until this checkpoint passes.
+- Use the market worker command:
+
+```text
+python -m ape.worker --role market-data
+```
+
+- Keep the market worker environment market-only:
+  `APE_WORKER_ROLE=market-data`, `APP_MODE=OBSERVER`,
+  `TRADING_ENABLED=false`, `EXECUTE=false`, database vars, Kalshi REST vars,
+  and Kalshi public market WebSocket vars. Do not add BRTI, strategy, storage
+  retention, private-channel, account, order, or execution variables.
+- No env changes are required before PR 9g unless optional tuning is needed.
+  Defaults are:
+  `MARKET_DB_WRITER_CRITICAL_QUEUE_MAX_SIZE=2000`,
+  `MARKET_DB_WRITER_DIAGNOSTIC_QUEUE_MAX_SIZE=5000`,
+  `MARKET_DB_WRITER_FLUSH_INTERVAL_MS=250`,
+  `MARKET_DB_WRITER_MAX_BATCH_SIZE=500`,
+  `MARKET_DB_WRITER_MAX_FLUSH_MS=1000`,
+  `MARKET_ORDERBOOK_SNAPSHOT_MIN_INTERVAL_MS=250`,
+  `MARKET_PROTOCOL_EVENT_SAMPLE_RATE=0.02`,
+  `MARKET_PROTOCOL_EVENT_ERROR_SAMPLE_RATE=1.0`,
+  `MARKET_PROTOCOL_EVENT_MAX_PER_FLUSH=100`,
+  `MARKET_DB_WRITER_BACKPRESSURE_WARN_DEPTH=750`,
+  `MARKET_DB_WRITER_BACKPRESSURE_BLOCK_DEPTH=1500`, and
+  `MARKET_DB_WRITER_BACKPRESSURE_MAX_AGE_MS=10000`.
+- Validate market worker endpoints:
+
+```powershell
+$ws = Invoke-RestMethod https://ape-api-production.up.railway.app/ws/status
+$recent = Invoke-RestMethod "https://ape-api-production.up.railway.app/ws/protocol/recent?limit=200"
+$summary = Invoke-RestMethod "https://ape-api-production.up.railway.app/ws/protocol/summary?window_seconds=1800"
+$ws
+$summary
+```
+
+- Pass criteria:
+  `/ws/status.worker_role=market-data`,
+  `connection_state=subscribed`,
+  `market_feed_state=LIVE` except bounded rollover windows,
+  `subscription_reconciled=true`,
+  `orderbook_sid_confirmed=true`,
+  `market_feed_transport_state=healthy`,
+  `market_feed_subscription_state=subscribed`,
+  critical queue depth below `MARKET_DB_WRITER_BACKPRESSURE_BLOCK_DEPTH`,
+  critical queue oldest age below `MARKET_DB_WRITER_BACKPRESSURE_MAX_AGE_MS`,
+  and `latest_state_persisted_age_ms` below the critical backpressure age.
+- Diagnostic queue backlog, `protocol_events_sampled_out`, and
+  `protocol_events_dropped_backpressure` may increase under load, but they must
+  not produce readiness blockers.
+- `protocol_event_recent_error_count` should stay low unless actual close,
+  websocket error, subscription error, list-subscriptions error,
+  update-subscription error, get-snapshot error, or reconnect failure events
+  occurred.
+- There should be no repeated hard blockers named
+  `market_db_writer_queue_backpressure`, `orderbook_persistence_pending`,
+  `market_critical_persistence_backpressure`, or
+  `market_critical_persistence_failed`. If the critical blockers appear, treat
+  them as a real persistence failure and do not enable strategy validation.
+- `/ws/protocol/recent` and `/ws/protocol/summary` must not expose secrets,
+  signatures, private keys, headers, full raw payloads, private-channel data,
+  account data, or order/execution controls.
+- Confirm this PR did not tune strategy thresholds and did not add paper/live,
+  order, fill, private-channel, account, executor, credential, or dashboard
+  control behavior.

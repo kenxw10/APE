@@ -3436,10 +3436,20 @@ def _market_protocol_unusable_reason(
         timeout_ms = int(config.kalshi_ws_snapshot_timeout_seconds * 1000)
         if snapshot_age_ms is None or snapshot_age_ms > timeout_ms:
             return "kalshi_orderbook_snapshot_resync_timeout"
-    max_queue_depth = max(10, config.kalshi_ws_db_writer_queue_max_size // 2)
-    if _metadata_bool(metadata, "orderbook_persistence_pending"):
+    blockers = _metadata_string_list(metadata, "blockers")
+    if "market_critical_persistence_failed" in blockers:
         return "kalshi_orderbook_db_writer_backpressure"
-    if (_metadata_int(metadata, "db_writer_queue_depth") or 0) > max_queue_depth:
+    if "market_critical_persistence_backpressure" in blockers:
+        return "kalshi_orderbook_db_writer_backpressure"
+    critical_depth = _metadata_int(metadata, "db_writer_critical_queue_depth")
+    if critical_depth is None:
+        critical_depth = _metadata_int(metadata, "db_writer_queue_depth") or 0
+    critical_age_ms = _metadata_int(metadata, "db_writer_critical_queue_oldest_age_ms")
+    if critical_age_ms is None:
+        critical_age_ms = _metadata_int(metadata, "db_writer_queue_oldest_age_ms") or 0
+    if critical_depth >= config.market_db_writer_backpressure_block_depth:
+        return "kalshi_orderbook_db_writer_backpressure"
+    if critical_age_ms >= config.market_db_writer_backpressure_max_age_ms:
         return "kalshi_orderbook_db_writer_backpressure"
     if (_metadata_int(metadata, "protocol_event_recent_error_count") or 0) > 0:
         return "kalshi_orderbook_protocol_errors"

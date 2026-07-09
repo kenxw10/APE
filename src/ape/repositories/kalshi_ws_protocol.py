@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, insert, select
 from sqlalchemy.orm import Session
 
 from ape.db.models import KalshiWsProtocolEvent
@@ -21,6 +21,14 @@ class KalshiWsProtocolEventRepository:
         self.session.add(row)
         self.session.flush()
         return row
+
+    def insert_events(self, events: list[KalshiWsProtocolEventInput]) -> None:
+        if not events:
+            return
+        self.session.execute(
+            insert(KalshiWsProtocolEvent),
+            [event.__dict__ for event in events],
+        )
 
     def list_recent(self, *, limit: int = 200) -> list[KalshiWsProtocolEvent]:
         capped_limit = min(max(limit, 1), 500)

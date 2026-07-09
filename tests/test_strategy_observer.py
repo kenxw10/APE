@@ -97,6 +97,9 @@ def test_strategy_blocks_on_market_protocol_readiness_failures() -> None:
         "orderbook_sid_confirmed": True,
         "in_flight_snapshot_request": False,
         "db_writer_queue_depth": 0,
+        "db_writer_critical_queue_depth": 0,
+        "db_writer_critical_queue_oldest_age_ms": 0,
+        "db_writer_diagnostic_queue_depth": 0,
         "protocol_event_recent_error_count": 0,
     }
 
@@ -132,11 +135,23 @@ def test_strategy_blocks_on_market_protocol_readiness_failures() -> None:
             "snapshot_request_age_ms": 11_000,
         }
     ) == "kalshi_orderbook_snapshot_resync_timeout"
-    assert stale_reason({**base_metadata, "db_writer_queue_depth": 600}) == (
+    assert stale_reason({**base_metadata, "db_writer_critical_queue_depth": 1500}) == (
         "kalshi_orderbook_db_writer_backpressure"
     )
-    assert stale_reason({**base_metadata, "orderbook_persistence_pending": True}) == (
+    assert stale_reason(
+        {**base_metadata, "db_writer_critical_queue_oldest_age_ms": 10_000}
+    ) == (
         "kalshi_orderbook_db_writer_backpressure"
+    )
+    assert (
+        stale_reason(
+            {
+                **base_metadata,
+                "db_writer_diagnostic_queue_depth": 10_000,
+                "orderbook_persistence_pending": True,
+            }
+        )
+        is None
     )
     assert stale_reason({**base_metadata, "protocol_event_recent_error_count": 1}) == (
         "kalshi_orderbook_protocol_errors"

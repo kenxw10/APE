@@ -56,8 +56,29 @@ class MarketFeedLiveness:
     ws_reader_queue_oldest_age_ms: int | None
     db_writer_queue_depth: int
     db_writer_queue_oldest_age_ms: int | None
+    db_writer_critical_queue_depth: int
+    db_writer_critical_queue_oldest_age_ms: int | None
+    db_writer_diagnostic_queue_depth: int
+    db_writer_diagnostic_queue_oldest_age_ms: int | None
     db_writer_last_flush_ms: int | None
+    db_writer_last_critical_flush_ms: int | None
+    db_writer_last_diagnostic_flush_ms: int | None
     db_writer_slow_flush_count: int
+    db_writer_dropped_diagnostic_count: int
+    db_writer_coalesced_orderbook_count: int
+    db_writer_coalesced_trade_count: int
+    db_writer_dropped_superseded_count: int
+    latest_state_persisted_at: datetime | None
+    latest_state_persisted_age_ms: int | None
+    latest_state_persistence_lag_ms: int | None
+    historical_persistence_lag_ms: int | None
+    protocol_events_enqueued: int
+    protocol_events_persisted: int
+    protocol_events_sampled_out: int
+    protocol_events_dropped_backpressure: int
+    protocol_errors_persisted: int
+    protocol_event_queue_depth: int
+    protocol_event_oldest_age_ms: int | None
     orderbook_persistence_pending: bool
     orderbook_persistence_pending_count: int
     orderbook_persistence_pending_since: datetime | None
@@ -271,11 +292,74 @@ def load_market_feed_liveness(
         db_writer_queue_oldest_age_ms=_int_or_none(
             (metadata or {}).get("db_writer_queue_oldest_age_ms")
         ),
+        db_writer_critical_queue_depth=_int_or_zero(
+            (metadata or {}).get("db_writer_critical_queue_depth")
+        ),
+        db_writer_critical_queue_oldest_age_ms=_int_or_none(
+            (metadata or {}).get("db_writer_critical_queue_oldest_age_ms")
+        ),
+        db_writer_diagnostic_queue_depth=_int_or_zero(
+            (metadata or {}).get("db_writer_diagnostic_queue_depth")
+        ),
+        db_writer_diagnostic_queue_oldest_age_ms=_int_or_none(
+            (metadata or {}).get("db_writer_diagnostic_queue_oldest_age_ms")
+        ),
         db_writer_last_flush_ms=_int_or_none(
             (metadata or {}).get("db_writer_last_flush_ms")
         ),
+        db_writer_last_critical_flush_ms=_int_or_none(
+            (metadata or {}).get("db_writer_last_critical_flush_ms")
+        ),
+        db_writer_last_diagnostic_flush_ms=_int_or_none(
+            (metadata or {}).get("db_writer_last_diagnostic_flush_ms")
+        ),
         db_writer_slow_flush_count=_int_or_zero(
             (metadata or {}).get("db_writer_slow_flush_count")
+        ),
+        db_writer_dropped_diagnostic_count=_int_or_zero(
+            (metadata or {}).get("db_writer_dropped_diagnostic_count")
+        ),
+        db_writer_coalesced_orderbook_count=_int_or_zero(
+            (metadata or {}).get("db_writer_coalesced_orderbook_count")
+        ),
+        db_writer_coalesced_trade_count=_int_or_zero(
+            (metadata or {}).get("db_writer_coalesced_trade_count")
+        ),
+        db_writer_dropped_superseded_count=_int_or_zero(
+            (metadata or {}).get("db_writer_dropped_superseded_count")
+        ),
+        latest_state_persisted_at=_datetime_or_none(
+            (metadata or {}).get("latest_state_persisted_at")
+        ),
+        latest_state_persisted_age_ms=_int_or_none(
+            (metadata or {}).get("latest_state_persisted_age_ms")
+        ),
+        latest_state_persistence_lag_ms=_int_or_none(
+            (metadata or {}).get("latest_state_persistence_lag_ms")
+        ),
+        historical_persistence_lag_ms=_int_or_none(
+            (metadata or {}).get("historical_persistence_lag_ms")
+        ),
+        protocol_events_enqueued=_int_or_zero(
+            (metadata or {}).get("protocol_events_enqueued")
+        ),
+        protocol_events_persisted=_int_or_zero(
+            (metadata or {}).get("protocol_events_persisted")
+        ),
+        protocol_events_sampled_out=_int_or_zero(
+            (metadata or {}).get("protocol_events_sampled_out")
+        ),
+        protocol_events_dropped_backpressure=_int_or_zero(
+            (metadata or {}).get("protocol_events_dropped_backpressure")
+        ),
+        protocol_errors_persisted=_int_or_zero(
+            (metadata or {}).get("protocol_errors_persisted")
+        ),
+        protocol_event_queue_depth=_int_or_zero(
+            (metadata or {}).get("protocol_event_queue_depth")
+        ),
+        protocol_event_oldest_age_ms=_int_or_none(
+            (metadata or {}).get("protocol_event_oldest_age_ms")
         ),
         orderbook_persistence_pending=_bool_or_false(
             (metadata or {}).get("orderbook_persistence_pending")

@@ -61,6 +61,18 @@ class AppConfig:
     kalshi_ws_snapshot_timeout_seconds: float = 10.0
     kalshi_ws_db_writer_queue_max_size: int = 1000
     kalshi_ws_db_slow_write_ms: int = 500
+    market_db_writer_critical_queue_max_size: int = 2000
+    market_db_writer_diagnostic_queue_max_size: int = 5000
+    market_db_writer_flush_interval_ms: int = 250
+    market_db_writer_max_batch_size: int = 500
+    market_db_writer_max_flush_ms: int = 1000
+    market_orderbook_snapshot_min_interval_ms: int = 250
+    market_protocol_event_sample_rate: float = 0.02
+    market_protocol_event_error_sample_rate: float = 1.0
+    market_protocol_event_max_per_flush: int = 100
+    market_db_writer_backpressure_warn_depth: int = 750
+    market_db_writer_backpressure_block_depth: int = 1500
+    market_db_writer_backpressure_max_age_ms: int = 10000
     kalshi_ws_subscribe_orderbook: bool = True
     kalshi_ws_subscribe_ticker: bool = True
     kalshi_ws_subscribe_trades: bool = True
@@ -242,6 +254,54 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         kalshi_ws_db_slow_write_ms=_parse_int(
             "KALSHI_WS_DB_SLOW_WRITE_MS",
             _get(source, "KALSHI_WS_DB_SLOW_WRITE_MS", "500"),
+        ),
+        market_db_writer_critical_queue_max_size=_parse_int(
+            "MARKET_DB_WRITER_CRITICAL_QUEUE_MAX_SIZE",
+            _get(source, "MARKET_DB_WRITER_CRITICAL_QUEUE_MAX_SIZE", "2000"),
+        ),
+        market_db_writer_diagnostic_queue_max_size=_parse_int(
+            "MARKET_DB_WRITER_DIAGNOSTIC_QUEUE_MAX_SIZE",
+            _get(source, "MARKET_DB_WRITER_DIAGNOSTIC_QUEUE_MAX_SIZE", "5000"),
+        ),
+        market_db_writer_flush_interval_ms=_parse_int(
+            "MARKET_DB_WRITER_FLUSH_INTERVAL_MS",
+            _get(source, "MARKET_DB_WRITER_FLUSH_INTERVAL_MS", "250"),
+        ),
+        market_db_writer_max_batch_size=_parse_int(
+            "MARKET_DB_WRITER_MAX_BATCH_SIZE",
+            _get(source, "MARKET_DB_WRITER_MAX_BATCH_SIZE", "500"),
+        ),
+        market_db_writer_max_flush_ms=_parse_int(
+            "MARKET_DB_WRITER_MAX_FLUSH_MS",
+            _get(source, "MARKET_DB_WRITER_MAX_FLUSH_MS", "1000"),
+        ),
+        market_orderbook_snapshot_min_interval_ms=_parse_int(
+            "MARKET_ORDERBOOK_SNAPSHOT_MIN_INTERVAL_MS",
+            _get(source, "MARKET_ORDERBOOK_SNAPSHOT_MIN_INTERVAL_MS", "250"),
+        ),
+        market_protocol_event_sample_rate=_parse_sample_rate(
+            "MARKET_PROTOCOL_EVENT_SAMPLE_RATE",
+            _get(source, "MARKET_PROTOCOL_EVENT_SAMPLE_RATE", "0.02"),
+        ),
+        market_protocol_event_error_sample_rate=_parse_sample_rate(
+            "MARKET_PROTOCOL_EVENT_ERROR_SAMPLE_RATE",
+            _get(source, "MARKET_PROTOCOL_EVENT_ERROR_SAMPLE_RATE", "1.0"),
+        ),
+        market_protocol_event_max_per_flush=_parse_int(
+            "MARKET_PROTOCOL_EVENT_MAX_PER_FLUSH",
+            _get(source, "MARKET_PROTOCOL_EVENT_MAX_PER_FLUSH", "100"),
+        ),
+        market_db_writer_backpressure_warn_depth=_parse_int(
+            "MARKET_DB_WRITER_BACKPRESSURE_WARN_DEPTH",
+            _get(source, "MARKET_DB_WRITER_BACKPRESSURE_WARN_DEPTH", "750"),
+        ),
+        market_db_writer_backpressure_block_depth=_parse_int(
+            "MARKET_DB_WRITER_BACKPRESSURE_BLOCK_DEPTH",
+            _get(source, "MARKET_DB_WRITER_BACKPRESSURE_BLOCK_DEPTH", "1500"),
+        ),
+        market_db_writer_backpressure_max_age_ms=_parse_int(
+            "MARKET_DB_WRITER_BACKPRESSURE_MAX_AGE_MS",
+            _get(source, "MARKET_DB_WRITER_BACKPRESSURE_MAX_AGE_MS", "10000"),
         ),
         kalshi_ws_subscribe_orderbook=_parse_bool(
             "KALSHI_WS_SUBSCRIBE_ORDERBOOK",
@@ -727,6 +787,16 @@ def _parse_float(name: str, raw_value: str) -> float:
         raise ConfigError(f"Invalid number for {name}: {raw_value!r}.") from exc
     if value <= 0:
         raise ConfigError(f"{name} must be greater than 0.")
+    return value
+
+
+def _parse_sample_rate(name: str, raw_value: str) -> float:
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise ConfigError(f"Invalid number for {name}: {raw_value!r}.") from exc
+    if value < 0 or value > 1:
+        raise ConfigError(f"{name} must be between 0 and 1.")
     return value
 
 

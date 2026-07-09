@@ -32,6 +32,8 @@ PR 9e hardens the market subscription recovery path. The worker now records boun
 
 PR 9f splits the production worker into explicit roles and adds a read-only Kalshi WebSocket protocol ledger. Railway production should run dedicated market-data, reference-BRTI, strategy, and maintenance workers instead of the old all-in-one worker. `/ws/status`, `/ws/protocol/recent`, and `/ws/protocol/summary` expose subscription reconciliation, confirmed SIDs, list-subscription proof, snapshot request state, DB writer queue health, protocol errors, reconnects, closes, and ping/pong evidence without adding trading, paper trading, orders, private channels, account reads, credentials, or strategy tuning.
 
+PR 9g hardens the dedicated market worker persistence path after PR 9f proved the WebSocket was live but the single DB writer queue could saturate. The market worker now prioritizes critical latest market state over noncritical protocol diagnostics, coalesces high-frequency orderbook state, batches DB writes, and samples routine protocol events under load. Diagnostic backlog may warn, but only critical persistence backlog/failure should block readiness. No live trading, paper trading, orders, private channels, account reads, dashboard trading controls, or strategy tuning is added.
+
 ## Safety Defaults
 
 The default configuration is intentionally non-trading:
@@ -175,6 +177,18 @@ KALSHI_WS_MAX_RECONNECT_SECONDS=60
 KALSHI_WS_SUBSCRIBE_ORDERBOOK=true
 KALSHI_WS_SUBSCRIBE_TICKER=true
 KALSHI_WS_SUBSCRIBE_TRADES=true
+MARKET_DB_WRITER_CRITICAL_QUEUE_MAX_SIZE=2000
+MARKET_DB_WRITER_DIAGNOSTIC_QUEUE_MAX_SIZE=5000
+MARKET_DB_WRITER_FLUSH_INTERVAL_MS=250
+MARKET_DB_WRITER_MAX_BATCH_SIZE=500
+MARKET_DB_WRITER_MAX_FLUSH_MS=1000
+MARKET_ORDERBOOK_SNAPSHOT_MIN_INTERVAL_MS=250
+MARKET_PROTOCOL_EVENT_SAMPLE_RATE=0.02
+MARKET_PROTOCOL_EVENT_ERROR_SAMPLE_RATE=1.0
+MARKET_PROTOCOL_EVENT_MAX_PER_FLUSH=100
+MARKET_DB_WRITER_BACKPRESSURE_WARN_DEPTH=750
+MARKET_DB_WRITER_BACKPRESSURE_BLOCK_DEPTH=1500
+MARKET_DB_WRITER_BACKPRESSURE_MAX_AGE_MS=10000
 ```
 
 After PR 6 is merged, enable the collector only on the Railway worker by setting `KALSHI_WS_ENABLED=true`. The API service may keep `KALSHI_WS_ENABLED=false`; `/ws/status` is derived from database rows and worker heartbeat metadata. Do not add these variables or Kalshi credentials to Vercel.
@@ -254,6 +268,8 @@ The legacy `ape-worker` aggregate row and older component aliases remain for bac
 PR 9d separates market transport liveness from market-data freshness. `/ws/status`, `/strategy/status`, `/strategy/decisions/latest`, `/strategy/decisions/recent`, and `/strategy/gates/recent` expose feed-state fields such as `market_feed_transport_state`, `market_feed_subscription_state`, `market_feed_snapshot_state`, `market_feed_active_ticker_state`, `market_feed_sequence_state`, `market_data_quiet`, `orderbook_snapshot_source`, and `orderbook_recovery_action`. The strategy may warn with `kalshi_orderbook_data_quiet_carried_forward` instead of blocking when quiet market data is still backed by a healthy socket, active subscription, initialized snapshot, clean sequence, and in-cap book age. True failures still block, including stale transport, inactive subscription, active ticker mismatch, missing snapshot, sequence gap/reset, invalid orderbook updates, failed snapshot recovery, or carry-forward cap breach.
 
 PR 9e adds bounded recovery metadata and state-machine diagnostics on top of PR 9d. `/ws/status`, `/strategy/status`, strategy decisions, and gate summaries include `market_feed_state`, `market_subscription_recovery_count`, `market_subscription_recovery_last_reason`, `market_subscription_recovery_last_action`, `market_subscription_recovery_last_result`, `market_subscription_recovery_last_at`, `market_snapshot_resync_count`, `market_snapshot_resync_last_result`, `market_rollover_recovery_count`, `market_transport_reconnect_count`, `market_unrecovered_blocker_count`, `market_recovery_attempt_in_progress`, and `market_recovery_attempt_age_ms`. Rollover and subscribe recovery should appear as pending/resync states first; only timeouts, failed snapshot requests, or unrecovered subscription errors should become hard market-feed blockers.
+
+PR 9g changes market persistence throughput, not trading behavior. `/ws/status` now separates critical and diagnostic queue depth/age, exposes latest critical state persistence age/lag, and reports coalesced orderbook writes, dropped diagnostic protocol events, and sampled protocol events. Strategy readiness must not block on diagnostic protocol backlog or routine sampled/dropped events; it blocks on `market_critical_persistence_backpressure`, `market_critical_persistence_failed`, real protocol errors, or true transport/subscription/snapshot failures.
 
 The read-only endpoints are:
 
