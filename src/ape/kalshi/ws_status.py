@@ -61,6 +61,19 @@ class KalshiWsStatusSnapshot:
     orderbook_snapshot_age_ms: int | None
     orderbook_snapshot_source: str | None
     orderbook_recovery_action: str | None
+    market_feed_state: str | None
+    market_subscription_recovery_count: int
+    market_subscription_recovery_last_reason: str | None
+    market_subscription_recovery_last_action: str | None
+    market_subscription_recovery_last_result: str | None
+    market_subscription_recovery_last_at: datetime | None
+    market_snapshot_resync_count: int
+    market_snapshot_resync_last_result: str | None
+    market_rollover_recovery_count: int
+    market_transport_reconnect_count: int
+    market_unrecovered_blocker_count: int
+    market_recovery_attempt_in_progress: bool
+    market_recovery_attempt_age_ms: int | None
     reconnect_count: int
     last_error_type: str | None
     last_error_message: str | None
@@ -111,6 +124,19 @@ def build_kalshi_ws_status(
     orderbook_snapshot_age_ms: int | None = None
     orderbook_snapshot_source: str | None = None
     orderbook_recovery_action: str | None = None
+    market_feed_state: str | None = None
+    market_subscription_recovery_count = 0
+    market_subscription_recovery_last_reason: str | None = None
+    market_subscription_recovery_last_action: str | None = None
+    market_subscription_recovery_last_result: str | None = None
+    market_subscription_recovery_last_at: datetime | None = None
+    market_snapshot_resync_count = 0
+    market_snapshot_resync_last_result: str | None = None
+    market_rollover_recovery_count = 0
+    market_transport_reconnect_count = 0
+    market_unrecovered_blocker_count = 0
+    market_recovery_attempt_in_progress = False
+    market_recovery_attempt_age_ms: int | None = None
 
     if not config.kalshi_ws_enabled:
         connection_state = "disabled"
@@ -170,6 +196,41 @@ def build_kalshi_ws_status(
                     orderbook_snapshot_age_ms = liveness.orderbook_snapshot_age_ms
                     orderbook_snapshot_source = liveness.orderbook_snapshot_source
                     orderbook_recovery_action = liveness.orderbook_recovery_action
+                    market_feed_state = liveness.market_feed_state
+                    market_subscription_recovery_count = (
+                        liveness.market_subscription_recovery_count
+                    )
+                    market_subscription_recovery_last_reason = (
+                        liveness.market_subscription_recovery_last_reason
+                    )
+                    market_subscription_recovery_last_action = (
+                        liveness.market_subscription_recovery_last_action
+                    )
+                    market_subscription_recovery_last_result = (
+                        liveness.market_subscription_recovery_last_result
+                    )
+                    market_subscription_recovery_last_at = (
+                        liveness.market_subscription_recovery_last_at
+                    )
+                    market_snapshot_resync_count = liveness.market_snapshot_resync_count
+                    market_snapshot_resync_last_result = (
+                        liveness.market_snapshot_resync_last_result
+                    )
+                    market_rollover_recovery_count = (
+                        liveness.market_rollover_recovery_count
+                    )
+                    market_transport_reconnect_count = (
+                        liveness.market_transport_reconnect_count
+                    )
+                    market_unrecovered_blocker_count = (
+                        liveness.market_unrecovered_blocker_count
+                    )
+                    market_recovery_attempt_in_progress = (
+                        liveness.market_recovery_attempt_in_progress
+                    )
+                    market_recovery_attempt_age_ms = (
+                        liveness.market_recovery_attempt_age_ms
+                    )
             finally:
                 engine.dispose()
         except SQLAlchemyError:
@@ -284,6 +345,25 @@ def build_kalshi_ws_status(
         orderbook_snapshot_age_ms=orderbook_snapshot_age_ms,
         orderbook_snapshot_source=orderbook_snapshot_source,
         orderbook_recovery_action=orderbook_recovery_action,
+        market_feed_state=market_feed_state,
+        market_subscription_recovery_count=market_subscription_recovery_count,
+        market_subscription_recovery_last_reason=(
+            market_subscription_recovery_last_reason
+        ),
+        market_subscription_recovery_last_action=(
+            market_subscription_recovery_last_action
+        ),
+        market_subscription_recovery_last_result=(
+            market_subscription_recovery_last_result
+        ),
+        market_subscription_recovery_last_at=market_subscription_recovery_last_at,
+        market_snapshot_resync_count=market_snapshot_resync_count,
+        market_snapshot_resync_last_result=market_snapshot_resync_last_result,
+        market_rollover_recovery_count=market_rollover_recovery_count,
+        market_transport_reconnect_count=market_transport_reconnect_count,
+        market_unrecovered_blocker_count=market_unrecovered_blocker_count,
+        market_recovery_attempt_in_progress=market_recovery_attempt_in_progress,
+        market_recovery_attempt_age_ms=market_recovery_attempt_age_ms,
         reconnect_count=_int_or_zero(heartbeat_metadata.get("reconnect_count")),
         last_error_type=last_error_type,
         last_error_message=last_error_message,

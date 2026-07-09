@@ -125,6 +125,19 @@ class KalshiWsStatusResponse(BaseModel):
     orderbook_snapshot_age_ms: int | None
     orderbook_snapshot_source: str | None
     orderbook_recovery_action: str | None
+    market_feed_state: str | None
+    market_subscription_recovery_count: int
+    market_subscription_recovery_last_reason: str | None
+    market_subscription_recovery_last_action: str | None
+    market_subscription_recovery_last_result: str | None
+    market_subscription_recovery_last_at: datetime | None
+    market_snapshot_resync_count: int
+    market_snapshot_resync_last_result: str | None
+    market_rollover_recovery_count: int
+    market_transport_reconnect_count: int
+    market_unrecovered_blocker_count: int
+    market_recovery_attempt_in_progress: bool
+    market_recovery_attempt_age_ms: int | None
     reconnect_count: int
     last_error_type: str | None
     last_error_message: str | None
