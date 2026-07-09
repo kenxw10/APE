@@ -2707,6 +2707,8 @@ class KalshiWsCollector:
             return MARKET_DB_WRITE_DISABLED
         market_ticker = item.payload.market_ticker
         previous = self._pending_orderbook_writes.get(market_ticker)
+        if previous is not None:
+            item = _coalesced_orderbook_item(previous, item)
         self._pending_orderbook_writes[market_ticker] = item
         if previous is not None:
             self.status.db_writer_coalesced_orderbook_count += 1
@@ -3904,6 +3906,34 @@ def _protocol_event_counts_as_error(
     if event_type == "websocket_close":
         return close_code not in {None, 1000, 1001}
     return False
+
+
+def _coalesced_orderbook_item(
+    previous: _DbWriterItem,
+    current: _DbWriterItem,
+) -> _DbWriterItem:
+    if current.orderbook_recovery_result is not None:
+        recovery_result = current.orderbook_recovery_result
+        recovery_reason = current.orderbook_recovery_reason
+        recovery_action = current.orderbook_recovery_action
+    else:
+        recovery_result = previous.orderbook_recovery_result
+        recovery_reason = previous.orderbook_recovery_reason
+        recovery_action = previous.orderbook_recovery_action
+    return replace(
+        current,
+        orderbook_recovery_result=recovery_result,
+        orderbook_recovery_reason=recovery_reason,
+        orderbook_recovery_action=recovery_action,
+        clear_orderbook_recovery_warnings=(
+            current.clear_orderbook_recovery_warnings
+            or previous.clear_orderbook_recovery_warnings
+        ),
+        clear_orderbook_delta_warnings=(
+            current.clear_orderbook_delta_warnings
+            or previous.clear_orderbook_delta_warnings
+        ),
+    )
 
 
 def _orderbook_commit_matches_current(

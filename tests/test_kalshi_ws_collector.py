@@ -3715,6 +3715,85 @@ def test_collector_finishes_queued_snapshot_recovery_after_sequence_advances(
         engine.dispose()
 
 
+def test_collector_preserves_recovery_metadata_when_orderbook_is_coalesced(
+    tmp_path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_coalesced_recovery.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+
+    async def websocket_factory(*_args):
+        raise AssertionError("websocket factory should not be used")
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector.status.active_market_ticker = "KXBTC15M-TEST"
+    collector.status.orderbook_sequence_number = 2
+    collector.status.market_recovery_attempt_in_progress = True
+    collector.status.market_recovery_attempt_started_at = NOW
+    collector.status.orderbook_recovery_action = "request_snapshot"
+    collector.status.market_subscription_recovery_last_reason = "market_data_quiet"
+    collector.status.market_subscription_recovery_last_action = "get_snapshot"
+    collector.status.market_subscription_recovery_last_result = "requested"
+    collector._add_warning("snapshot_resync_pending")
+    collector._db_writer_queue = asyncio.Queue(maxsize=10)
+
+    try:
+        collector._persist_orderbook(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC15M-TEST",
+                received_at=NOW,
+                sequence_number=1,
+                yes_bid=Decimal("0.61"),
+            ),
+            queued_recovery_result="snapshot_initialized",
+            queued_clear_recovery_warnings=True,
+        )
+        collector._persist_orderbook(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC15M-TEST",
+                received_at=NOW + timedelta(milliseconds=250),
+                sequence_number=2,
+                yes_bid=Decimal("0.64"),
+            )
+        )
+
+        assert collector.status.db_writer_coalesced_orderbook_count == 1
+        _flush_queued_market_db_writes(collector)
+
+        assert collector.status.market_recovery_attempt_in_progress is False
+        assert collector.status.market_snapshot_resync_last_result == (
+            "snapshot_initialized"
+        )
+        assert collector.status.orderbook_recovery_action == "none"
+        assert "snapshot_resync_pending" not in collector.status.warnings
+        with session_factory() as session:
+            latest_book = OrderbookRepository(session).get_latest_snapshot(
+                "KXBTC15M-TEST"
+            )
+            assert latest_book is not None
+            assert latest_book.sequence_number == 2
+            assert latest_book.yes_bid == Decimal("0.64")
+    finally:
+        engine.dispose()
+
+
 def test_collector_clears_pending_orderbook_when_db_writer_drain_times_out() -> None:
     config = load_config(
         {
