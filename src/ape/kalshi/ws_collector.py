@@ -72,6 +72,9 @@ PROTOCOL_ERROR_EVENTS = {
 PROTOCOL_RECOVERY_EVENTS = {
     "reconnect_completed",
 }
+MARKET_DB_WRITE_DISABLED = "disabled"
+MARKET_DB_WRITE_QUEUED = "queued"
+MARKET_DB_WRITE_FULL = "full"
 
 WebSocketFactory = Callable[
     [str, dict[str, str], float, float],
@@ -1584,6 +1587,8 @@ class KalshiWsCollector:
         if request_id is not None and request_id == self.status.list_subscriptions_request_id:
             self.status.last_list_subscriptions_at = message.source_ts or self.now()
             self.status.last_list_subscriptions_result = message_type or "ok"
+            self.status.list_subscriptions_request_id = None
+            self._reconcile_list_subscriptions(payload)
             self.status.subscription_reconciled = self._subscriptions_confirmed()
             self._record_protocol_event(
                 "list_subscriptions_ok",
@@ -2062,8 +2067,15 @@ class KalshiWsCollector:
         if self.session_factory is None:
             self._add_warning("database_not_configured_for_orderbook")
             return False
-        if self._enqueue_market_db_write("orderbook", snapshot, snapshot.received_at):
+        enqueue_result = self._enqueue_market_db_write(
+            "orderbook",
+            snapshot,
+            snapshot.received_at,
+        )
+        if enqueue_result == MARKET_DB_WRITE_QUEUED:
             return True
+        if enqueue_result == MARKET_DB_WRITE_FULL:
+            return False
 
         try:
             with self.session_factory() as session:
@@ -2087,8 +2099,15 @@ class KalshiWsCollector:
         if self.session_factory is None:
             self._add_warning("database_not_configured_for_trades")
             return False
-        if self._enqueue_market_db_write("trade", trade, trade.received_at):
+        enqueue_result = self._enqueue_market_db_write(
+            "trade",
+            trade,
+            trade.received_at,
+        )
+        if enqueue_result == MARKET_DB_WRITE_QUEUED:
             return True
+        if enqueue_result == MARKET_DB_WRITE_FULL:
+            return False
 
         try:
             with self.session_factory() as session:
@@ -2202,10 +2221,10 @@ class KalshiWsCollector:
         kind: str,
         payload: Any,
         enqueued_at: datetime,
-    ) -> bool:
+    ) -> str:
         queue = self._db_writer_queue
         if queue is None:
-            return False
+            return MARKET_DB_WRITE_DISABLED
         try:
             queue.put_nowait(
                 _DbWriterItem(
@@ -2217,6 +2236,7 @@ class KalshiWsCollector:
         except asyncio.QueueFull:
             self._add_warning("market_db_writer_queue_backpressure")
             self._add_blocker("market_db_writer_queue_backpressure")
+            self._force_next_heartbeat = True
             self.status.db_writer_queue_depth = queue.qsize()
             if kind != "protocol":
                 self._record_protocol_event(
@@ -2225,10 +2245,10 @@ class KalshiWsCollector:
                     recovery_action="drop_or_block",
                     recovery_result="queue_full",
                 )
-            return False
+            return MARKET_DB_WRITE_FULL
         self._db_writer_enqueued_at.append(enqueued_at)
         self._refresh_db_writer_metrics(enqueued_at)
-        return True
+        return MARKET_DB_WRITE_QUEUED
 
     def _record_protocol_event(
         self,
@@ -2304,7 +2324,8 @@ class KalshiWsCollector:
             raw_payload_hash=raw_payload_hash,
             payload_summary_json=payload_summary_json,
         )
-        if self._enqueue_market_db_write("protocol", event, created_at):
+        enqueue_result = self._enqueue_market_db_write("protocol", event, created_at)
+        if enqueue_result in {MARKET_DB_WRITE_QUEUED, MARKET_DB_WRITE_FULL}:
             return
         try:
             with self.session_factory() as session:
@@ -2356,6 +2377,22 @@ class KalshiWsCollector:
         self.status.snapshot_request_age_ms = None
         self.status.close_code = None
         self.status.close_reason = None
+
+    def _reconcile_list_subscriptions(self, payload: dict[str, Any]) -> None:
+        active_market_ticker = self.status.active_market_ticker
+        requested_channels = set(self.status.subscribed_channels)
+        for entry in _list_subscription_entries(payload):
+            sid = _int_or_none(entry.get("sid"))
+            if sid is None:
+                continue
+            if not _subscription_entry_matches_market(entry, active_market_ticker):
+                continue
+            for channel in _subscription_entry_channels(entry):
+                if channel not in requested_channels:
+                    continue
+                self.status.subscription_ids[channel] = sid
+                self.status.subscription_request_ids.pop(channel, None)
+        self._refresh_sid_confirmations()
 
     def _refresh_sid_confirmations(self) -> None:
         self.status.orderbook_sid_confirmed = (
@@ -3408,6 +3445,52 @@ def _message_sid(payload: dict[str, Any]) -> int | None:
     if not isinstance(message, dict):
         return None
     return _int_or_none(message.get("sid"))
+
+
+def _list_subscription_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    message = payload.get("msg")
+    if isinstance(message, list):
+        return [entry for entry in message if isinstance(entry, dict)]
+    if not isinstance(message, dict):
+        return []
+
+    entries: list[dict[str, Any]] = []
+    if "sid" in message and ("channel" in message or "channels" in message):
+        entries.append(message)
+    for key in ("subscriptions", "subscription"):
+        value = message.get(key)
+        if isinstance(value, list):
+            entries.extend(entry for entry in value if isinstance(entry, dict))
+        elif isinstance(value, dict):
+            entries.append(value)
+    return entries
+
+
+def _subscription_entry_channels(entry: dict[str, Any]) -> list[str]:
+    channels = _string_list(entry.get("channels"))
+    channel = _safe_text(entry.get("channel"))
+    if channel is not None:
+        channels.append(channel)
+    deduped: list[str] = []
+    for value in channels:
+        if value not in deduped:
+            deduped.append(value)
+    return deduped
+
+
+def _subscription_entry_matches_market(
+    entry: dict[str, Any],
+    active_market_ticker: str | None,
+) -> bool:
+    if active_market_ticker is None:
+        return True
+    market_tickers = _string_list(entry.get("market_tickers"))
+    market_ticker = _safe_text(entry.get("market_ticker"))
+    if market_ticker is not None:
+        market_tickers.append(market_ticker)
+    if not market_tickers:
+        return True
+    return active_market_ticker in market_tickers
 
 
 def _websocket_error_message(payload: dict[str, Any]) -> str:

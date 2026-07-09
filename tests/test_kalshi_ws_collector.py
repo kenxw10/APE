@@ -14,13 +14,13 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from ape.config import load_config
 from ape.db.migrations import run_migrations
-from ape.db.models import KalshiWsProtocolEvent, WorkerHeartbeat
+from ape.db.models import KalshiWsProtocolEvent, OrderbookSnapshot, WorkerHeartbeat
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.kalshi.reference_messages import BRTI_SOURCE
 from ape.kalshi.resolver import ResolverResult, ResolverState
 from ape.kalshi.ws_collector import KalshiWsCollector
 from ape.kalshi.ws_status import build_kalshi_ws_status
-from ape.repositories.inputs import MarketInput, WorkerHeartbeatInput
+from ape.repositories.inputs import MarketInput, OrderbookSnapshotInput, WorkerHeartbeatInput
 from ape.repositories.orderbook import OrderbookRepository
 from ape.repositories.public_trades import PublicTradesRepository
 from ape.repositories.reference_ticks import ReferenceTicksRepository
@@ -543,6 +543,96 @@ def test_collector_uses_dedicated_brti_connection_by_default(tmp_path) -> None:
             }
         ]
         assert "market_ticker" not in brti_websocket.sent[0]["params"]
+    finally:
+        engine.dispose()
+
+
+def test_collector_reconciles_subscriptions_from_list_response(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_list_reconcile.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket(
+        [
+            {
+                "type": "ok",
+                "id": 1000,
+                "msg": [
+                    {
+                        "channel": "orderbook_delta",
+                        "sid": 98,
+                        "market_tickers": ["KXBTC15M-OTHER"],
+                    },
+                    {
+                        "channel": "orderbook_delta",
+                        "sid": 11,
+                        "market_tickers": ["KXBTC15M-TEST"],
+                    },
+                    {
+                        "channels": ["ticker", "trade"],
+                        "sid": 12,
+                        "market_tickers": ["KXBTC15M-TEST"],
+                    },
+                ],
+            },
+            {
+                "type": "orderbook_snapshot",
+                "sid": 11,
+                "seq": 1,
+                "msg": {
+                    "market_ticker": "KXBTC15M-TEST",
+                    "yes_dollars_fp": [["0.6000", "10.00"]],
+                    "no_dollars_fp": [["0.6500", "8.00"]],
+                },
+            },
+        ]
+    )
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            latest_book = OrderbookRepository(session).get_latest_snapshot(
+                "KXBTC15M-TEST"
+            )
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                WORKER_SERVICE_MARKET_WS
+            )
+
+            assert latest_book is not None
+            assert heartbeat is not None
+            ws_metadata = heartbeat.metadata_["ws"]
+            assert ws_metadata["subscription_reconciled"] is True
+            assert ws_metadata["orderbook_sid_confirmed"] is True
+            assert ws_metadata["ticker_sid_confirmed"] is True
+            assert ws_metadata["trade_sid_confirmed"] is True
+            assert ws_metadata["subscription_ids"] == {
+                "orderbook_delta": 11,
+                "ticker": 12,
+                "trade": 12,
+            }
     finally:
         engine.dispose()
 
@@ -2963,6 +3053,62 @@ def test_collector_protocol_error_count_expires_after_recent_window(tmp_path) ->
             )
             assert heartbeat is not None
             assert heartbeat.metadata_["ws"]["protocol_event_recent_error_count"] == 0
+    finally:
+        engine.dispose()
+
+
+def test_collector_does_not_sync_insert_when_market_db_queue_is_full(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_queue_full.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_DB_WRITER_QUEUE_MAX_SIZE": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+
+    async def websocket_factory(*_args):
+        raise AssertionError("websocket factory should not be used")
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector._db_writer_queue = asyncio.Queue(maxsize=1)
+    collector._db_writer_queue.put_nowait(object())
+
+    try:
+        persisted = collector._persist_orderbook(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC15M-TEST",
+                received_at=NOW,
+                yes_bid=Decimal("0.61"),
+            )
+        )
+
+        assert persisted is False
+        assert "market_db_writer_queue_backpressure" in collector.status.warnings
+        assert "market_db_writer_queue_backpressure" in collector.status.blockers
+        assert collector.status.protocol_event_recent_error_count == 1
+        with session_factory() as session:
+            assert (
+                session.scalar(select(func.count()).select_from(OrderbookSnapshot))
+                == 0
+            )
+            assert (
+                session.scalar(select(func.count()).select_from(KalshiWsProtocolEvent))
+                == 0
+            )
     finally:
         engine.dispose()
 
