@@ -1159,6 +1159,10 @@ class KalshiWsCollector:
                         "kalshi_orderbook_subscription_recovery_failed",
                         checked_at=received_at,
                     )
+                    self._finish_market_recovery(
+                        result="failed",
+                        checked_at=received_at,
+                    )
                     self._force_next_heartbeat = True
                     return "kalshi_orderbook_subscription_recovery_failed"
                 self._force_next_heartbeat = True
@@ -1512,6 +1516,11 @@ class KalshiWsCollector:
             )
             self._mark_unrecovered_market_blocker(
                 "kalshi_orderbook_snapshot_resync_failed",
+                checked_at=checked_at,
+            )
+            self.status.market_snapshot_resync_last_result = "failed"
+            self._finish_market_recovery(
+                result="failed",
                 checked_at=checked_at,
             )
             self._add_warning("kalshi_orderbook_snapshot_resync_failed")

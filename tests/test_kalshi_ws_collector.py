@@ -2611,11 +2611,65 @@ def test_collector_reconnects_after_market_subscription_error(tmp_path) -> None:
             )
             assert ws_metadata["market_subscription_recovery_last_action"] == "reconnect"
             assert ws_metadata["market_subscription_recovery_last_result"] == "failed"
+            assert ws_metadata["market_recovery_attempt_in_progress"] is False
             assert ws_metadata["market_unrecovered_blocker_count"] == 1
             assert (
                 "kalshi_orderbook_subscription_recovery_failed"
                 in ws_metadata["blockers"]
             )
+    finally:
+        engine.dispose()
+
+
+def test_collector_records_failed_snapshot_resync_result(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_snapshot_send_failed.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+
+    class FailingSendWebSocket(FakeWebSocket):
+        async def send(self, message: str) -> None:
+            del message
+            raise RuntimeError("snapshot send failed")
+
+    websocket = FailingSendWebSocket([])
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=lambda *_args: websocket,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector.status.subscription_ids = {"orderbook_delta": 11}
+
+    try:
+        requested = asyncio.run(
+            collector._request_orderbook_snapshot(
+                websocket,
+                market_ticker="KXBTC15M-TEST",
+                checked_at=NOW,
+                reason="market_data_quiet",
+            )
+        )
+
+        assert requested is False
+        assert collector.status.orderbook_recovery_action == "reconnect"
+        assert collector.status.market_snapshot_resync_last_result == "failed"
+        assert collector.status.market_recovery_attempt_in_progress is False
+        assert collector.status.orderbook_liveness_reason == (
+            "kalshi_orderbook_snapshot_resync_failed"
+        )
+        assert "kalshi_orderbook_snapshot_resync_failed" in collector.status.blockers
     finally:
         engine.dispose()
 
