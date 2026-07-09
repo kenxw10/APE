@@ -61,12 +61,16 @@ MAX_HEARTBEAT_INTERVAL_SECONDS = 10.0
 MIN_HEARTBEAT_INTERVAL_SECONDS = 1.0
 MAX_DIAGNOSTIC_SAMPLES = 3
 MAX_DIAGNOSTIC_KEYS = 20
+PROTOCOL_ERROR_WINDOW_SECONDS = 1800
 PROTOCOL_ERROR_EVENTS = {
     "websocket_error",
     "update_subscription_error",
     "reconnect_failed",
     "db_write_slow",
     "queue_backpressure",
+}
+PROTOCOL_RECOVERY_EVENTS = {
+    "reconnect_completed",
 }
 
 WebSocketFactory = Callable[
@@ -434,7 +438,8 @@ class KalshiWsCollector:
         self._db_writer_queue: asyncio.Queue[_DbWriterItem] | None = None
         self._db_writer_enqueued_at: deque[datetime] = deque()
         self._db_writer_task: asyncio.Task[None] | None = None
-        self._last_protocol_error_count_at: datetime | None = None
+        self._protocol_error_events: deque[datetime] = deque()
+        self._protocol_error_reset_at: datetime | None = None
 
     async def run(
         self,
@@ -2260,7 +2265,11 @@ class KalshiWsCollector:
             return
         created_at = self.now()
         if event_type in PROTOCOL_ERROR_EVENTS:
-            self.status.protocol_event_recent_error_count += 1
+            self._protocol_error_events.append(created_at)
+        elif event_type in PROTOCOL_RECOVERY_EVENTS:
+            self._protocol_error_reset_at = created_at
+            self._protocol_error_events.clear()
+        self._refresh_protocol_error_count(created_at)
         event = KalshiWsProtocolEventInput(
             event_type=event_type,
             created_at=created_at,
@@ -2379,6 +2388,18 @@ class KalshiWsCollector:
             _as_utc(checked_at) - _as_utc(self.status.snapshot_request_started_at)
         ).total_seconds()
         return age_seconds >= self.config.kalshi_ws_snapshot_timeout_seconds
+
+    def _refresh_protocol_error_count(self, checked_at: datetime) -> None:
+        window_start = _as_utc(checked_at) - timedelta(
+            seconds=PROTOCOL_ERROR_WINDOW_SECONDS
+        )
+        if self._protocol_error_reset_at is not None:
+            window_start = max(window_start, _as_utc(self._protocol_error_reset_at))
+        while self._protocol_error_events and (
+            _as_utc(self._protocol_error_events[0]) < window_start
+        ):
+            self._protocol_error_events.popleft()
+        self.status.protocol_event_recent_error_count = len(self._protocol_error_events)
 
     def _refresh_db_writer_metrics(self, checked_at: datetime) -> None:
         queue = self._db_writer_queue
@@ -2808,6 +2829,7 @@ class KalshiWsCollector:
     ) -> None:
         if not force and not self._market_liveness_heartbeat_due(heartbeat_at):
             return
+        self._refresh_protocol_error_count(heartbeat_at)
         self._refresh_market_feed_state(heartbeat_at)
         if self._record_component_heartbeat(
             service_name=WORKER_SERVICE_MARKET_WS,

@@ -138,6 +138,7 @@ class AppConfig:
     storage_retention_reference_ticks_seconds: int = 86400
     storage_retention_worker_heartbeats_seconds: int = 21600
     storage_retention_strategy_decisions_seconds: int = 1209600
+    storage_retention_kalshi_ws_protocol_events_seconds: int = 21600
     storage_retention_dry_run_positions_seconds: int = 2592000
     storage_retention_dry_run_events_seconds: int = 2592000
     storage_retention_markets_seconds: int = 2592000
@@ -559,6 +560,14 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         storage_retention_strategy_decisions_seconds=_parse_int(
             "STORAGE_RETENTION_STRATEGY_DECISIONS_SECONDS",
             _get(source, "STORAGE_RETENTION_STRATEGY_DECISIONS_SECONDS", "1209600"),
+        ),
+        storage_retention_kalshi_ws_protocol_events_seconds=_parse_int(
+            "STORAGE_RETENTION_KALSHI_WS_PROTOCOL_EVENTS_SECONDS",
+            _get(
+                source,
+                "STORAGE_RETENTION_KALSHI_WS_PROTOCOL_EVENTS_SECONDS",
+                "21600",
+            ),
         ),
         storage_retention_dry_run_positions_seconds=_parse_int(
             "STORAGE_RETENTION_DRY_RUN_POSITIONS_SECONDS",

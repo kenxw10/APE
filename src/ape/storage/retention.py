@@ -81,6 +81,12 @@ RETENTION_POLICIES: tuple[RetentionPolicy, ...] = (
         delete_condition_sql="evaluated_at < :cutoff",
     ),
     RetentionPolicy(
+        table_name="kalshi_ws_protocol_events",
+        retention_config_key="storage_retention_kalshi_ws_protocol_events_seconds",
+        timestamp_expression="created_at",
+        delete_condition_sql="created_at < :cutoff",
+    ),
+    RetentionPolicy(
         table_name="strategy_dry_run_positions",
         retention_config_key="storage_retention_dry_run_positions_seconds",
         timestamp_expression="closed_at",

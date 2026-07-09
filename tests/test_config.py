@@ -109,6 +109,7 @@ def test_default_config_is_observer_only() -> None:
     assert config.storage_retention_reference_ticks_seconds == 86400
     assert config.storage_retention_worker_heartbeats_seconds == 21600
     assert config.storage_retention_strategy_decisions_seconds == 1209600
+    assert config.storage_retention_kalshi_ws_protocol_events_seconds == 21600
     assert config.storage_retention_dry_run_positions_seconds == 2592000
     assert config.storage_retention_dry_run_events_seconds == 2592000
     assert config.storage_retention_markets_seconds == 2592000
@@ -371,6 +372,7 @@ def test_storage_retention_env_vars_parse_safely() -> None:
             "STORAGE_RETENTION_REFERENCE_TICKS_SECONDS": "86402",
             "STORAGE_RETENTION_WORKER_HEARTBEATS_SECONDS": "21601",
             "STORAGE_RETENTION_STRATEGY_DECISIONS_SECONDS": "1209601",
+            "STORAGE_RETENTION_KALSHI_WS_PROTOCOL_EVENTS_SECONDS": "21602",
             "STORAGE_RETENTION_DRY_RUN_POSITIONS_SECONDS": "2592001",
             "STORAGE_RETENTION_DRY_RUN_EVENTS_SECONDS": "2592002",
             "STORAGE_RETENTION_MARKETS_SECONDS": "2592001",
@@ -392,6 +394,7 @@ def test_storage_retention_env_vars_parse_safely() -> None:
     assert config.storage_retention_reference_ticks_seconds == 86402
     assert config.storage_retention_worker_heartbeats_seconds == 21601
     assert config.storage_retention_strategy_decisions_seconds == 1209601
+    assert config.storage_retention_kalshi_ws_protocol_events_seconds == 21602
     assert config.storage_retention_dry_run_positions_seconds == 2592001
     assert config.storage_retention_dry_run_events_seconds == 2592002
     assert config.storage_retention_markets_seconds == 2592001

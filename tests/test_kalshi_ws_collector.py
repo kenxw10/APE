@@ -2921,6 +2921,52 @@ def test_collector_counts_quiet_market_ping_failure_as_reconnect(tmp_path) -> No
         engine.dispose()
 
 
+def test_collector_protocol_error_count_expires_after_recent_window(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_protocol_errors.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    current_time = NOW
+
+    async def websocket_factory(*_args):
+        raise AssertionError("websocket factory should not be used")
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: current_time,
+    )
+
+    try:
+        collector._record_protocol_event("websocket_error")
+        assert collector.status.protocol_event_recent_error_count == 1
+
+        current_time = NOW + timedelta(seconds=1801)
+        collector.record_market_heartbeat()
+
+        assert collector.status.protocol_event_recent_error_count == 0
+        with session_factory() as session:
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                "ape-worker"
+            )
+            assert heartbeat is not None
+            assert heartbeat.metadata_["ws"]["protocol_event_recent_error_count"] == 0
+    finally:
+        engine.dispose()
+
+
 def test_collector_resets_orderbook_on_buffer_overflow(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_buffer_overflow.sqlite'}"
     config = load_config(
