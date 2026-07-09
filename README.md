@@ -30,6 +30,8 @@ PR 9d adds explicit market feed-state recovery. A quiet Kalshi orderbook/ticker/
 
 PR 9e hardens the market subscription recovery path. The worker now records bounded market recovery attempts, subscribe ACK waits, snapshot resync attempts, rollover recovery, transport reconnects, unrecovered blockers, and a high-level `market_feed_state`. Subscription-inactive states are recovered through confirmed orderbook SIDs, snapshot refreshes, or market WebSocket reconnects before becoming hard blockers. No trading, paper trading, order, fill, private-channel, account, credential, dashboard-control, or strategy-threshold behavior is added.
 
+PR 9f splits the production worker into explicit roles and adds a read-only Kalshi WebSocket protocol ledger. Railway production should run dedicated market-data, reference-BRTI, strategy, and maintenance workers instead of the old all-in-one worker. `/ws/status`, `/ws/protocol/recent`, and `/ws/protocol/summary` expose subscription reconciliation, confirmed SIDs, list-subscription proof, snapshot request state, DB writer queue health, protocol errors, reconnects, closes, and ping/pong evidence without adding trading, paper trading, orders, private channels, account reads, credentials, or strategy tuning.
+
 ## Safety Defaults
 
 The default configuration is intentionally non-trading:
@@ -238,16 +240,16 @@ After PR 8 is merged and market/BRTI WebSocket intake is healthy, enable the led
 
 PR 9b separates event-driven feed liveness from value-change persistence. `STRATEGY_REFERENCE_MAX_AGE_MS` and `STRATEGY_KALSHI_BOOK_MAX_AGE_MS` remain preferred fresh-update thresholds. The stream max-age settings prove the WebSocket is still active, and the carry-forward caps bound how long unchanged BRTI/orderbook values may be reused for dry-run readiness. True stream failures, active-ticker mismatches, sequence resets, missing sides, crossed books, persistence failures, or carry-forward cap breaches still block. This does not tune strategy thresholds and does not add paper/live/order/private-channel behavior.
 
-PR 9c changes the liveness source of truth, not the thresholds. The worker writes these component heartbeat names:
+PR 9c/9f changes the liveness source of truth, not the thresholds. The worker writes these component heartbeat names:
 
 ```text
-ape-worker.market_ws
+ape-worker.market_data
 ape-worker.reference_brti
 ape-worker.strategy
-ape-worker.storage_retention
+ape-worker.maintenance
 ```
 
-The legacy `ape-worker` aggregate row remains for backward compatibility. `/ws/status`, `/reference/brti/status`, and strategy readiness prefer the component row and fall back to the aggregate only when no component row exists; fallback responses include `feed_liveness_legacy_aggregate_fallback`. Strategy decision measurements expose `market_liveness_source`, `reference_liveness_source`, component heartbeat ages, stream ages, and liveness reasons so stale dry-run blockers can be tied to the actual feed component.
+The legacy `ape-worker` aggregate row and older component aliases remain for backward compatibility. `/ws/status`, `/reference/brti/status`, and strategy readiness prefer the role-specific component row and fall back only when no component row exists; fallback responses include `feed_liveness_legacy_aggregate_fallback`. Strategy decision measurements expose `market_liveness_source`, `reference_liveness_source`, component heartbeat ages, stream ages, and liveness reasons so stale dry-run blockers can be tied to the actual feed component.
 
 PR 9d separates market transport liveness from market-data freshness. `/ws/status`, `/strategy/status`, `/strategy/decisions/latest`, `/strategy/decisions/recent`, and `/strategy/gates/recent` expose feed-state fields such as `market_feed_transport_state`, `market_feed_subscription_state`, `market_feed_snapshot_state`, `market_feed_active_ticker_state`, `market_feed_sequence_state`, `market_data_quiet`, `orderbook_snapshot_source`, and `orderbook_recovery_action`. The strategy may warn with `kalshi_orderbook_data_quiet_carried_forward` instead of blocking when quiet market data is still backed by a healthy socket, active subscription, initialized snapshot, clean sequence, and in-cap book age. True failures still block, including stale transport, inactive subscription, active ticker mismatch, missing snapshot, sequence gap/reset, invalid orderbook updates, failed snapshot recovery, or carry-forward cap breach.
 
@@ -387,10 +389,12 @@ The Reference Price CF/BRTI chart reads `/reference/brti/series` from the public
 ## Run Worker Locally
 
 ```powershell
-python -m ape.worker.main
+python -m ape.worker --role all
 ```
 
-Successful startup should log that the worker is running in observer mode. Stop it with `Ctrl+C`.
+Successful startup should log that the local all-in-one worker is running. Stop
+it with `Ctrl+C`. Railway production should use the dedicated role commands in
+[docs/RAILWAY.md](docs/RAILWAY.md) instead.
 
 ## Intentionally Not Included Yet
 

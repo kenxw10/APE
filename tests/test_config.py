@@ -11,6 +11,7 @@ def test_default_config_is_observer_only() -> None:
     assert config.app_mode is AppMode.OBSERVER
     assert config.trading_enabled is False
     assert config.execute is False
+    assert config.ape_worker_role == "all"
     assert config.database_url is None
     assert config.db_echo is False
     assert config.db_pool_size == 5
@@ -27,6 +28,10 @@ def test_default_config_is_observer_only() -> None:
     assert config.kalshi_ws_heartbeat_timeout_seconds == 30
     assert config.kalshi_ws_reconnect_seconds == 5
     assert config.kalshi_ws_max_reconnect_seconds == 60
+    assert config.kalshi_ws_snapshot_min_interval_seconds == 1
+    assert config.kalshi_ws_snapshot_timeout_seconds == 10
+    assert config.kalshi_ws_db_writer_queue_max_size == 1000
+    assert config.kalshi_ws_db_slow_write_ms == 500
     assert config.kalshi_ws_subscribe_orderbook is True
     assert config.kalshi_ws_subscribe_ticker is True
     assert config.kalshi_ws_subscribe_trades is True
@@ -152,6 +157,10 @@ def test_kalshi_websocket_env_vars_parse_safely() -> None:
             "KALSHI_WS_HEARTBEAT_TIMEOUT_SECONDS": "25",
             "KALSHI_WS_RECONNECT_SECONDS": "3",
             "KALSHI_WS_MAX_RECONNECT_SECONDS": "45",
+            "KALSHI_WS_SNAPSHOT_MIN_INTERVAL_SECONDS": "2",
+            "KALSHI_WS_SNAPSHOT_TIMEOUT_SECONDS": "9",
+            "KALSHI_WS_DB_WRITER_QUEUE_MAX_SIZE": "25",
+            "KALSHI_WS_DB_SLOW_WRITE_MS": "250",
             "KALSHI_WS_SUBSCRIBE_ORDERBOOK": "false",
             "KALSHI_WS_SUBSCRIBE_TICKER": "true",
             "KALSHI_WS_SUBSCRIBE_TRADES": "false",
@@ -164,6 +173,10 @@ def test_kalshi_websocket_env_vars_parse_safely() -> None:
     assert config.kalshi_ws_heartbeat_timeout_seconds == 25
     assert config.kalshi_ws_reconnect_seconds == 3
     assert config.kalshi_ws_max_reconnect_seconds == 45
+    assert config.kalshi_ws_snapshot_min_interval_seconds == 2
+    assert config.kalshi_ws_snapshot_timeout_seconds == 9
+    assert config.kalshi_ws_db_writer_queue_max_size == 25
+    assert config.kalshi_ws_db_slow_write_ms == 250
     assert config.kalshi_ws_subscribe_orderbook is False
     assert config.kalshi_ws_subscribe_ticker is True
     assert config.kalshi_ws_subscribe_trades is False
@@ -216,6 +229,16 @@ def test_kalshi_cfbenchmarks_env_vars_parse_safely() -> None:
 def test_invalid_kalshi_cfbenchmarks_index_ids_raise_clear_config_error() -> None:
     with pytest.raises(ConfigError, match="KALSHI_CFBENCHMARKS_INDEX_IDS"):
         load_config({"KALSHI_CFBENCHMARKS_INDEX_IDS": " , "})
+
+
+def test_worker_role_env_var_parses_and_rejects_invalid_values() -> None:
+    assert load_config({"APE_WORKER_ROLE": "market-data"}).ape_worker_role == "market-data"
+    assert load_config({"APE_WORKER_ROLE": "reference_brti"}).ape_worker_role == (
+        "reference-brti"
+    )
+
+    with pytest.raises(ConfigError, match="APE_WORKER_ROLE"):
+        load_config({"APE_WORKER_ROLE": "market"})
 
 
 def test_strategy_observer_env_vars_parse_safely() -> None:

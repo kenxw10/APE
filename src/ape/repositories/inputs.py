@@ -98,6 +98,42 @@ class PublicTradeInput:
 
 
 @dataclass(frozen=True)
+class KalshiWsProtocolEventInput:
+    event_type: str
+    created_at: datetime
+    worker_service: str | None = None
+    worker_role: str | None = None
+    connection_id: str | None = None
+    channel: str | None = None
+    active_market_ticker: str | None = None
+    command_id: int | None = None
+    command_type: str | None = None
+    command_action: str | None = None
+    sid: int | None = None
+    expected_sid: int | None = None
+    seq: int | None = None
+    event_subtype: str | None = None
+    raw_code: str | None = None
+    raw_message: str | None = None
+    close_code: int | None = None
+    close_reason: str | None = None
+    exception_type: str | None = None
+    exception_message: str | None = None
+    latency_ms: int | None = None
+    round_trip_ms: int | None = None
+    ping_sent_at: datetime | None = None
+    pong_received_at: datetime | None = None
+    server_ping_received_at: datetime | None = None
+    client_pong_sent_at: datetime | None = None
+    subscription_state_before: str | None = None
+    subscription_state_after: str | None = None
+    recovery_action: str | None = None
+    recovery_result: str | None = None
+    raw_payload_hash: str | None = None
+    payload_summary_json: JsonPayload | None = None
+
+
+@dataclass(frozen=True)
 class StrategyDecisionInput:
     decision_id: str
     evaluated_at: datetime

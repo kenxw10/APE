@@ -8,6 +8,10 @@ from pydantic import BaseModel
 
 from ape.kalshi.diagnostics import KalshiConfigDiagnostic
 from ape.kalshi.resolver import ResolverResult
+from ape.kalshi.ws_protocol import (
+    KalshiWsProtocolRecentSnapshot,
+    KalshiWsProtocolSummarySnapshot,
+)
 from ape.kalshi.ws_status import KalshiWsStatusSnapshot
 from ape.repositories.inputs import JsonPayload, MarketInput
 
@@ -98,8 +102,29 @@ class KalshiWsStatusResponse(BaseModel):
     latest_aggregate_heartbeat_mode: str | None
     latest_component_heartbeat_mode: str | None
     liveness_source_mismatch: bool
+    worker_role: str | None
+    connection_id: str | None
+    protocol_connection_state: str | None
     subscribed_channels: list[str]
     subscription_ids: dict[str, int]
+    subscription_reconciled: bool
+    orderbook_sid_confirmed: bool
+    ticker_sid_confirmed: bool
+    trade_sid_confirmed: bool
+    last_list_subscriptions_at: datetime | None
+    last_list_subscriptions_result: str | None
+    in_flight_snapshot_request: bool
+    snapshot_request_age_ms: int | None
+    protocol_event_recent_error_count: int
+    ws_reader_queue_depth: int
+    ws_reader_queue_oldest_age_ms: int | None
+    db_writer_queue_depth: int
+    db_writer_queue_oldest_age_ms: int | None
+    db_writer_last_flush_ms: int | None
+    db_writer_slow_flush_count: int
+    reconnect_reason: str | None
+    close_code: int | None
+    close_reason: str | None
     last_connected_at: datetime | None
     last_message_at: datetime | None
     last_ticker_at: datetime | None
@@ -148,6 +173,63 @@ class KalshiWsStatusResponse(BaseModel):
     checked_at: datetime
 
 
+class KalshiWsProtocolEventResponse(BaseModel):
+    id: int
+    created_at: datetime
+    worker_service: str | None
+    worker_role: str | None
+    connection_id: str | None
+    channel: str | None
+    active_market_ticker: str | None
+    command_id: int | None
+    command_type: str | None
+    command_action: str | None
+    sid: int | None
+    expected_sid: int | None
+    seq: int | None
+    event_type: str
+    event_subtype: str | None
+    raw_code: str | None
+    raw_message: str | None
+    close_code: int | None
+    close_reason: str | None
+    exception_type: str | None
+    exception_message: str | None
+    latency_ms: int | None
+    round_trip_ms: int | None
+    ping_sent_at: datetime | None
+    pong_received_at: datetime | None
+    server_ping_received_at: datetime | None
+    client_pong_sent_at: datetime | None
+    subscription_state_before: str | None
+    subscription_state_after: str | None
+    recovery_action: str | None
+    recovery_result: str | None
+    raw_payload_hash: str | None
+    payload_summary_json: JsonPayload | None
+
+
+class KalshiWsProtocolRecentResponse(BaseModel):
+    limit: int
+    count: int
+    events: list[KalshiWsProtocolEventResponse]
+    checked_at: datetime
+    warnings: list[str]
+
+
+class KalshiWsProtocolSummaryResponse(BaseModel):
+    window_seconds: int
+    checked_at: datetime
+    since: datetime
+    total: int
+    error_count: int
+    close_count: int
+    reconnect_count: int
+    by_event_type: dict[str, int]
+    latest_event_at: datetime | None
+    warnings: list[str]
+
+
 def kalshi_status_response(diagnostic: KalshiConfigDiagnostic) -> KalshiStatusResponse:
     return KalshiStatusResponse(**diagnostic.__dict__)
 
@@ -173,6 +255,27 @@ def active_market_response(result: ResolverResult) -> ActiveMarketResponse:
 
 def kalshi_ws_status_response(snapshot: KalshiWsStatusSnapshot) -> KalshiWsStatusResponse:
     return KalshiWsStatusResponse(**snapshot.__dict__)
+
+
+def kalshi_ws_protocol_recent_response(
+    snapshot: KalshiWsProtocolRecentSnapshot,
+) -> KalshiWsProtocolRecentResponse:
+    return KalshiWsProtocolRecentResponse(
+        limit=snapshot.limit,
+        count=snapshot.count,
+        events=[
+            KalshiWsProtocolEventResponse(**event.__dict__)
+            for event in snapshot.events
+        ],
+        checked_at=snapshot.checked_at,
+        warnings=snapshot.warnings,
+    )
+
+
+def kalshi_ws_protocol_summary_response(
+    snapshot: KalshiWsProtocolSummarySnapshot,
+) -> KalshiWsProtocolSummaryResponse:
+    return KalshiWsProtocolSummaryResponse(**snapshot.__dict__)
 
 
 def _boundary_response(boundary) -> MarketBoundaryResponse | None:

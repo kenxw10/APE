@@ -9,12 +9,13 @@ from ape.config import ConfigError, load_config
 from ape.db.models import Base, SchemaMigration, utc_now
 from ape.db.session import DatabaseConfigError, create_engine_from_config
 
-CURRENT_SCHEMA_VERSION = "0005_strategy_dry_run_event_strategy_id"
+CURRENT_SCHEMA_VERSION = "0006_kalshi_ws_protocol_events"
 SCHEMA_VERSIONS = (
     "0001_initial_schema",
     "0002_fixed_point_ws_quantities",
     "0003_storage_retention_lifecycle",
     "0004_dry_run_strategy_ledger",
+    "0005_strategy_dry_run_event_strategy_id",
     CURRENT_SCHEMA_VERSION,
 )
 POSTGRES_MIGRATION_LOCK_ID = 4_150_002

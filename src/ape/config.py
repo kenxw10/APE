@@ -14,6 +14,7 @@ DEFAULT_KALSHI_WS_BASE_URL = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
 DEFAULT_KALSHI_BTC15_SERIES_TICKER = "KXBTC15M"
 DEFAULT_KALSHI_RESOLVER_PARSER_VERSION = "btc15_resolver_v1"
 DEFAULT_KALSHI_CFBENCHMARKS_INDEX_IDS = ("BRTI",)
+WORKER_ROLES = {"all", "market-data", "reference-brti", "strategy", "maintenance"}
 
 
 class ConfigError(ValueError):
@@ -37,6 +38,7 @@ class AppConfig:
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     worker_poll_seconds: float = 1.0
+    ape_worker_role: str = "all"
     database_url: str | None = None
     db_echo: bool = False
     db_pool_size: int = 5
@@ -55,6 +57,10 @@ class AppConfig:
     kalshi_ws_heartbeat_timeout_seconds: float = 30.0
     kalshi_ws_reconnect_seconds: float = 5.0
     kalshi_ws_max_reconnect_seconds: float = 60.0
+    kalshi_ws_snapshot_min_interval_seconds: float = 1.0
+    kalshi_ws_snapshot_timeout_seconds: float = 10.0
+    kalshi_ws_db_writer_queue_max_size: int = 1000
+    kalshi_ws_db_slow_write_ms: int = 500
     kalshi_ws_subscribe_orderbook: bool = True
     kalshi_ws_subscribe_ticker: bool = True
     kalshi_ws_subscribe_trades: bool = True
@@ -161,6 +167,7 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
             "WORKER_POLL_SECONDS",
             _get(source, "WORKER_POLL_SECONDS", "1.0"),
         ),
+        ape_worker_role=_parse_worker_role(_get(source, "APE_WORKER_ROLE", "all")),
         database_url=_optional_database_url(source.get("DATABASE_URL")),
         db_echo=_parse_bool("DB_ECHO", _get(source, "DB_ECHO", "false")),
         db_pool_size=_parse_int("DB_POOL_SIZE", _get(source, "DB_POOL_SIZE", "5")),
@@ -218,6 +225,22 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         kalshi_ws_max_reconnect_seconds=_parse_float(
             "KALSHI_WS_MAX_RECONNECT_SECONDS",
             _get(source, "KALSHI_WS_MAX_RECONNECT_SECONDS", "60"),
+        ),
+        kalshi_ws_snapshot_min_interval_seconds=_parse_float(
+            "KALSHI_WS_SNAPSHOT_MIN_INTERVAL_SECONDS",
+            _get(source, "KALSHI_WS_SNAPSHOT_MIN_INTERVAL_SECONDS", "1"),
+        ),
+        kalshi_ws_snapshot_timeout_seconds=_parse_float(
+            "KALSHI_WS_SNAPSHOT_TIMEOUT_SECONDS",
+            _get(source, "KALSHI_WS_SNAPSHOT_TIMEOUT_SECONDS", "10"),
+        ),
+        kalshi_ws_db_writer_queue_max_size=_parse_int(
+            "KALSHI_WS_DB_WRITER_QUEUE_MAX_SIZE",
+            _get(source, "KALSHI_WS_DB_WRITER_QUEUE_MAX_SIZE", "1000"),
+        ),
+        kalshi_ws_db_slow_write_ms=_parse_int(
+            "KALSHI_WS_DB_SLOW_WRITE_MS",
+            _get(source, "KALSHI_WS_DB_SLOW_WRITE_MS", "500"),
         ),
         kalshi_ws_subscribe_orderbook=_parse_bool(
             "KALSHI_WS_SUBSCRIBE_ORDERBOOK",
@@ -637,6 +660,16 @@ def _parse_mode(raw_value: str) -> AppMode:
         raise ConfigError(
             f"Invalid APP_MODE {raw_value!r}. Expected one of: {allowed}."
         ) from exc
+
+
+def _parse_worker_role(raw_value: str) -> str:
+    normalized = raw_value.strip().lower().replace("_", "-")
+    if normalized in WORKER_ROLES:
+        return normalized
+    allowed = ", ".join(sorted(WORKER_ROLES))
+    raise ConfigError(
+        f"Invalid APE_WORKER_ROLE {raw_value!r}. Expected one of: {allowed}."
+    )
 
 
 def _parse_bool(name: str, raw_value: str) -> bool:

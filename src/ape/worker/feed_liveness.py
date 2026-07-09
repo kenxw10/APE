@@ -16,6 +16,7 @@ from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.worker.services import (
     WORKER_SERVICE_AGGREGATE,
     WORKER_SERVICE_MARKET_WS,
+    WORKER_SERVICE_MARKET_WS_LEGACY,
     WORKER_SERVICE_REFERENCE_BRTI,
 )
 
@@ -38,7 +39,28 @@ class MarketFeedLiveness:
     latest_component_heartbeat_mode: str | None
     liveness_source_mismatch: bool
     warnings: list[str]
+    worker_role: str | None
+    connection_id: str | None
+    protocol_connection_state: str | None
     active_market_ticker: str | None
+    subscription_reconciled: bool
+    orderbook_sid_confirmed: bool
+    ticker_sid_confirmed: bool
+    trade_sid_confirmed: bool
+    last_list_subscriptions_at: datetime | None
+    last_list_subscriptions_result: str | None
+    in_flight_snapshot_request: bool
+    snapshot_request_age_ms: int | None
+    protocol_event_recent_error_count: int
+    ws_reader_queue_depth: int
+    ws_reader_queue_oldest_age_ms: int | None
+    db_writer_queue_depth: int
+    db_writer_queue_oldest_age_ms: int | None
+    db_writer_last_flush_ms: int | None
+    db_writer_slow_flush_count: int
+    reconnect_reason: str | None
+    close_code: int | None
+    close_reason: str | None
     latest_orderbook: OrderbookSnapshot | None
     latest_trade: PublicTrade | None
     latest_orderbook_received_at: datetime | None
@@ -104,6 +126,8 @@ def load_market_feed_liveness(
 ) -> MarketFeedLiveness:
     repository = WorkerHeartbeatRepository(session)
     component = repository.get_latest_heartbeat(WORKER_SERVICE_MARKET_WS)
+    if component is None:
+        component = repository.get_latest_heartbeat(WORKER_SERVICE_MARKET_WS_LEGACY)
     aggregate = repository.get_latest_heartbeat(WORKER_SERVICE_AGGREGATE)
     component_metadata = _ws_metadata(component)
     aggregate_metadata = _ws_metadata(aggregate)
@@ -198,7 +222,60 @@ def load_market_feed_liveness(
             aggregate=aggregate,
         ),
         warnings=warnings,
+        worker_role=_str_or_none((metadata or {}).get("worker_role")),
+        connection_id=_str_or_none((metadata or {}).get("connection_id")),
+        protocol_connection_state=_str_or_none(
+            (metadata or {}).get("protocol_connection_state")
+        ),
         active_market_ticker=active_ticker,
+        subscription_reconciled=_bool_or_false(
+            (metadata or {}).get("subscription_reconciled")
+        ),
+        orderbook_sid_confirmed=_bool_or_false(
+            (metadata or {}).get("orderbook_sid_confirmed")
+        ),
+        ticker_sid_confirmed=_bool_or_false(
+            (metadata or {}).get("ticker_sid_confirmed")
+        ),
+        trade_sid_confirmed=_bool_or_false(
+            (metadata or {}).get("trade_sid_confirmed")
+        ),
+        last_list_subscriptions_at=_datetime_or_none(
+            (metadata or {}).get("last_list_subscriptions_at")
+        ),
+        last_list_subscriptions_result=_str_or_none(
+            (metadata or {}).get("last_list_subscriptions_result")
+        ),
+        in_flight_snapshot_request=_bool_or_false(
+            (metadata or {}).get("in_flight_snapshot_request")
+        ),
+        snapshot_request_age_ms=_int_or_none(
+            (metadata or {}).get("snapshot_request_age_ms")
+        ),
+        protocol_event_recent_error_count=_int_or_zero(
+            (metadata or {}).get("protocol_event_recent_error_count")
+        ),
+        ws_reader_queue_depth=_int_or_zero(
+            (metadata or {}).get("ws_reader_queue_depth")
+        ),
+        ws_reader_queue_oldest_age_ms=_int_or_none(
+            (metadata or {}).get("ws_reader_queue_oldest_age_ms")
+        ),
+        db_writer_queue_depth=_int_or_zero(
+            (metadata or {}).get("db_writer_queue_depth")
+        ),
+        db_writer_queue_oldest_age_ms=_int_or_none(
+            (metadata or {}).get("db_writer_queue_oldest_age_ms")
+        ),
+        db_writer_last_flush_ms=_int_or_none(
+            (metadata or {}).get("db_writer_last_flush_ms")
+        ),
+        db_writer_slow_flush_count=_int_or_zero(
+            (metadata or {}).get("db_writer_slow_flush_count")
+        ),
+        reconnect_reason=_str_or_none((metadata or {}).get("reconnect_reason")),
+        close_code=_int_or_none((metadata or {}).get("close_code")),
+        close_reason=_str_or_none((metadata or {}).get("close_reason")),
         latest_orderbook=latest_orderbook,
         latest_trade=latest_trade,
         latest_orderbook_received_at=(

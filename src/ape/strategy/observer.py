@@ -2518,6 +2518,67 @@ def _measurements(
         "orderbook_stream_age_ms": orderbook_stream_age_ms,
         "orderbook_stream_connection_state": orderbook_stream_connection_state,
         "orderbook_stream_active_market_ticker": orderbook_stream_active_market_ticker,
+        "worker_role": _metadata_text(orderbook_worker_metadata, "worker_role"),
+        "connection_id": _metadata_text(orderbook_worker_metadata, "connection_id"),
+        "protocol_connection_state": _metadata_text(
+            orderbook_worker_metadata,
+            "protocol_connection_state",
+        ),
+        "subscription_reconciled": _metadata_bool(
+            orderbook_worker_metadata,
+            "subscription_reconciled",
+        ),
+        "orderbook_sid_confirmed": _metadata_bool(
+            orderbook_worker_metadata,
+            "orderbook_sid_confirmed",
+        ),
+        "ticker_sid_confirmed": _metadata_bool(
+            orderbook_worker_metadata,
+            "ticker_sid_confirmed",
+        ),
+        "trade_sid_confirmed": _metadata_bool(
+            orderbook_worker_metadata,
+            "trade_sid_confirmed",
+        ),
+        "last_list_subscriptions_at": _metadata_text(
+            orderbook_worker_metadata,
+            "last_list_subscriptions_at",
+        ),
+        "last_list_subscriptions_result": _metadata_text(
+            orderbook_worker_metadata,
+            "last_list_subscriptions_result",
+        ),
+        "in_flight_snapshot_request": _metadata_bool(
+            orderbook_worker_metadata,
+            "in_flight_snapshot_request",
+        ),
+        "snapshot_request_age_ms": _metadata_int(
+            orderbook_worker_metadata,
+            "snapshot_request_age_ms",
+        ),
+        "protocol_event_recent_error_count": _metadata_int(
+            orderbook_worker_metadata,
+            "protocol_event_recent_error_count",
+        ),
+        "db_writer_queue_depth": _metadata_int(
+            orderbook_worker_metadata,
+            "db_writer_queue_depth",
+        ),
+        "db_writer_queue_oldest_age_ms": _metadata_int(
+            orderbook_worker_metadata,
+            "db_writer_queue_oldest_age_ms",
+        ),
+        "db_writer_last_flush_ms": _metadata_int(
+            orderbook_worker_metadata,
+            "db_writer_last_flush_ms",
+        ),
+        "db_writer_slow_flush_count": _metadata_int(
+            orderbook_worker_metadata,
+            "db_writer_slow_flush_count",
+        ),
+        "reconnect_reason": _metadata_text(orderbook_worker_metadata, "reconnect_reason"),
+        "close_code": _metadata_int(orderbook_worker_metadata, "close_code"),
+        "close_reason": _metadata_text(orderbook_worker_metadata, "close_reason"),
         "orderbook_stream_warnings": orderbook_stream_warnings,
         "orderbook_stream_blockers": orderbook_stream_blockers,
         "market_feed_transport_state": market_feed_transport_state,
@@ -3249,6 +3310,12 @@ def _strategy_orderbook_stale_reason(
     if enforce_stream_live:
         if stream_live_reason is not None:
             return stream_live_reason
+        protocol_reason = _market_protocol_unusable_reason(
+            config=config,
+            metadata=orderbook_worker_metadata,
+        )
+        if protocol_reason is not None:
+            return protocol_reason
         recovery_reason = _market_recovery_stale_reason(orderbook_worker_metadata)
         if recovery_reason is not None:
             return recovery_reason
@@ -3304,6 +3371,10 @@ def _orderbook_stream_unusable_reason(
         return recovery_reason
     if connection_state != "subscribed":
         return "kalshi_orderbook_subscription_inactive"
+    if _metadata_bool_present(metadata, "subscription_reconciled") is False:
+        return "kalshi_orderbook_subscription_unreconciled"
+    if _metadata_bool_present(metadata, "orderbook_sid_confirmed") is False:
+        return "kalshi_orderbook_orderbook_sid_unconfirmed"
     if active_market_ticker is not None and active_market_ticker != market_ticker:
         return "kalshi_orderbook_active_ticker_mismatch"
     if metadata.get("orderbook_initialized") is not True:
@@ -3334,6 +3405,30 @@ def _orderbook_stream_unusable_reason(
     if blockers:
         return "kalshi_orderbook_transport_stale"
     del stream_age_ms
+    return None
+
+
+def _market_protocol_unusable_reason(
+    *,
+    config: AppConfig,
+    metadata: dict[str, Any] | None,
+) -> str | None:
+    if not isinstance(metadata, dict):
+        return None
+    if _metadata_bool_present(metadata, "subscription_reconciled") is False:
+        return "kalshi_orderbook_subscription_unreconciled"
+    if _metadata_bool_present(metadata, "orderbook_sid_confirmed") is False:
+        return "kalshi_orderbook_orderbook_sid_unconfirmed"
+    if _metadata_bool(metadata, "in_flight_snapshot_request"):
+        snapshot_age_ms = _metadata_int(metadata, "snapshot_request_age_ms")
+        timeout_ms = int(config.kalshi_ws_snapshot_timeout_seconds * 1000)
+        if snapshot_age_ms is None or snapshot_age_ms > timeout_ms:
+            return "kalshi_orderbook_snapshot_resync_timeout"
+    max_queue_depth = max(10, config.kalshi_ws_db_writer_queue_max_size // 2)
+    if (_metadata_int(metadata, "db_writer_queue_depth") or 0) > max_queue_depth:
+        return "kalshi_orderbook_db_writer_backpressure"
+    if (_metadata_int(metadata, "protocol_event_recent_error_count") or 0) > 0:
+        return "kalshi_orderbook_protocol_errors"
     return None
 
 
@@ -3443,6 +3538,12 @@ def _metadata_bool(metadata: dict[str, Any] | None, key: str) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return False
+
+
+def _metadata_bool_present(metadata: dict[str, Any] | None, key: str) -> bool | None:
+    if not isinstance(metadata, dict) or key not in metadata:
+        return None
+    return _metadata_bool(metadata, key)
 
 
 def _metadata_has_warning(

@@ -14,7 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from ape.config import load_config
 from ape.db.migrations import run_migrations
-from ape.db.models import WorkerHeartbeat
+from ape.db.models import KalshiWsProtocolEvent, WorkerHeartbeat
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.kalshi.reference_messages import BRTI_SOURCE
 from ape.kalshi.resolver import ResolverResult, ResolverState
@@ -184,6 +184,18 @@ def test_collector_subscribes_and_persists_mock_messages(tmp_path) -> None:
             assert market_heartbeat is not None
             assert market_heartbeat.metadata_["mode"] == "market_ws"
             assert market_heartbeat.metadata_["ws"]["connection_state"] == "subscribed"
+            assert market_heartbeat.metadata_["ws"]["worker_role"] == "all"
+            assert market_heartbeat.metadata_["ws"]["connection_id"] is not None
+            assert market_heartbeat.metadata_["ws"]["orderbook_sid_confirmed"] is False
+            protocol_events = list(
+                session.scalars(select(KalshiWsProtocolEvent.event_type))
+            )
+            assert "websocket_open" in protocol_events
+            assert "subscribe_sent" in protocol_events
+            assert "list_subscriptions_sent" in protocol_events
+            assert "orderbook_snapshot_received" in protocol_events
+            assert "orderbook_delta_received" in protocol_events
+            assert "trade_received" in protocol_events
             assert (
                 market_heartbeat.metadata_["ws"]["active_market_ticker"]
                 == "KXBTC15M-TEST"
@@ -206,6 +218,10 @@ def test_collector_subscribes_and_persists_mock_messages(tmp_path) -> None:
                     "channels": ["ticker", "trade"],
                     "market_ticker": "KXBTC15M-TEST",
                 },
+            },
+            {
+                "id": 1000,
+                "cmd": "list_subscriptions",
             },
         ]
     finally:
@@ -393,7 +409,19 @@ def test_collector_subscribes_to_brti_with_market_channels_and_persists_tick(tmp
             assert reference_metadata["connection_state"] == "subscribed"
             assert reference_metadata["subscription_id"] == 99
 
+        assert {
+            "id": 3,
+            "cmd": "subscribe",
+            "params": {
+                "channels": ["cfbenchmarks_value"],
+                "index_ids": ["BRTI"],
+            },
+        } in websocket.sent
         assert websocket.sent[-1] == {
+            "id": 1000,
+            "cmd": "list_subscriptions",
+        }
+        assert websocket.sent[-2] == {
             "id": 3,
             "cmd": "subscribe",
             "params": {
@@ -401,7 +429,7 @@ def test_collector_subscribes_to_brti_with_market_channels_and_persists_tick(tmp
                 "index_ids": ["BRTI"],
             },
         }
-        assert "market_ticker" not in websocket.sent[-1]["params"]
+        assert "market_ticker" not in websocket.sent[-2]["params"]
     finally:
         engine.dispose()
 
@@ -498,6 +526,10 @@ def test_collector_uses_dedicated_brti_connection_by_default(tmp_path) -> None:
                     "channels": ["ticker", "trade"],
                     "market_ticker": "KXBTC15M-TEST",
                 },
+            },
+            {
+                "id": 1000,
+                "cmd": "list_subscriptions",
             },
         ]
         assert brti_websocket.sent == [
@@ -1658,8 +1690,8 @@ def test_collector_throttles_repeated_invalid_parse_heartbeats(tmp_path) -> None
             )
             heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
 
-            assert heartbeat_count == 6
-            assert market_heartbeat_count == 3
+            assert heartbeat_count == 8
+            assert market_heartbeat_count == 4
             assert heartbeat is not None
             ws_metadata = heartbeat.metadata_["ws"]
             assert ws_metadata["warnings"] == ["invalid_orderbook_snapshot_yes_level_size"]
@@ -2183,9 +2215,9 @@ def test_collector_persists_market_liveness_heartbeats_before_stream_gate(
             )
             heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
 
-            assert heartbeat_count == 104
-            assert market_heartbeat_count == 52
-            assert aggregate_heartbeat_count == 52
+            assert heartbeat_count == 106
+            assert market_heartbeat_count == 53
+            assert aggregate_heartbeat_count == 53
             assert heartbeat is not None
             assert heartbeat.metadata_["ws"]["last_message_at"] == "2026-07-05T14:35:50Z"
     finally:
@@ -2819,6 +2851,16 @@ def test_collector_resets_backoff_after_successful_websocket_cycle(tmp_path) -> 
         assert websocket_factory_calls == 2
         assert collector.status.reconnect_count == 0
         assert collector.status.connection_state == "subscribed"
+        with session_factory() as session:
+            protocol_events = [
+                row.event_type
+                for row in session.scalars(
+                    select(KalshiWsProtocolEvent).order_by(KalshiWsProtocolEvent.id)
+                )
+            ]
+            assert "reconnect_failed" in protocol_events
+            assert "reconnect_started" in protocol_events
+            assert "reconnect_completed" in protocol_events
     finally:
         engine.dispose()
 

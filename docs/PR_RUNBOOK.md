@@ -218,7 +218,7 @@ PR 9c post-merge checkpoint:
   `/strategy/decisions/latest`, `/strategy/decisions/recent`,
   `/strategy/gates/recent`, `/storage/status`, `/health`, `/safety`,
   `/db/status`, and `/ready`.
-- Confirm `/ws/status.liveness_source=component` from `ape-worker.market_ws`
+- Confirm `/ws/status.liveness_source=component` from `ape-worker.market_data`
   and `/reference/brti/status.liveness_source=component` from
   `ape-worker.reference_brti` after fresh worker heartbeats are written.
 - Confirm `/strategy/decisions/latest.measurements` includes
@@ -312,6 +312,85 @@ foreach ($field in $requiredWsFields) {
 }
 ```
 
+- Confirm this PR did not tune strategy thresholds and did not add paper/live,
+  order, fill, private-channel, account, executor, credential, or dashboard
+  control behavior.
+
+PR 9f post-merge checkpoint:
+
+- Replace the old production all-in-one worker with dedicated Railway services:
+  `ape-market-worker`, `ape-reference-worker`, `ape-strategy-worker`, and
+  `ape-maintenance-worker`.
+- Keep the API read-only. The API service must not run market WebSocket, BRTI,
+  strategy, or storage retention loops.
+- Use these start commands:
+
+```text
+python -m ape.worker --role market-data
+python -m ape.worker --role reference-brti
+python -m ape.worker --role strategy
+python -m ape.worker --role maintenance
+```
+
+- Set matching `APE_WORKER_ROLE` values on the four worker services:
+  `market-data`, `reference-brti`, `strategy`, and `maintenance`.
+- Keep `TRADING_ENABLED=false` and `EXECUTE=false` on every service.
+- Keep `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`, and
+  `STRATEGY_DRY_RUN_ENABLED=true` only on the strategy worker for dry-run
+  validation.
+- Do not add paper/live controls, order placement, private channels, account
+  reads, executor code, Kalshi credentials, or worker-loop env vars to Vercel.
+- Run or confirm database migrations before starting the split workers.
+- First deploy only `ape-market-worker` and let it run for at least 30 minutes
+  before enabling strategy validation. This proves market WebSocket stability
+  without BRTI, strategy, or retention sharing the event loop.
+- Validate market worker endpoints:
+
+```powershell
+Invoke-RestMethod https://ape-api-production.up.railway.app/ws/status
+Invoke-RestMethod "https://ape-api-production.up.railway.app/ws/protocol/recent?limit=200"
+Invoke-RestMethod "https://ape-api-production.up.railway.app/ws/protocol/summary?window_seconds=1800"
+Invoke-RestMethod https://ape-api-production.up.railway.app/markets/active
+Invoke-RestMethod https://ape-api-production.up.railway.app/health
+Invoke-RestMethod https://ape-api-production.up.railway.app/safety
+Invoke-RestMethod https://ape-api-production.up.railway.app/db/status
+Invoke-RestMethod https://ape-api-production.up.railway.app/ready
+```
+
+- Confirm `/ws/status.worker_role=market-data`,
+  `liveness_source=component`, `subscription_reconciled=true`,
+  `orderbook_sid_confirmed=true`, and a recent `connection_id`.
+- Confirm `/ws/status` exposes `last_list_subscriptions_at`,
+  `last_list_subscriptions_result`, in-flight snapshot fields, DB writer queue
+  depth/age/flush metrics, recent protocol error count, reconnect reason, and
+  close code/reason fields.
+- Confirm `/ws/protocol/recent` shows subscribe, list-subscriptions,
+  orderbook/ticker/trade, ping/pong, reconnect, close, and error evidence
+  without secrets or full raw payloads.
+- Confirm `/ws/protocol/summary` has no repeated subscribe/list/get-snapshot
+  error pattern, and that `market_feed_state=SUBSCRIBING` or
+  `BLOCKED_UNRECOVERED` does not dominate the 30-minute window.
+- Confirm `get_snapshot` is not sent until a confirmed active orderbook SID is
+  known, and duplicate in-flight snapshot refreshes are suppressed.
+- Confirm market rollover creates a new connection/subscription/snapshot proof
+  before strategy uses the new ticker.
+- Confirm DB writer queue backlog stays bounded; if
+  `db_writer_queue_depth` grows or old queue age crosses the configured limit,
+  strategy should block instead of using stale market data.
+- After market worker validation passes, deploy `ape-reference-worker`, then
+  validate `/reference/brti/status`, `/reference/brti/latest`, and
+  `/reference/brti/series` as in PR 7a.
+- After market and reference workers are healthy, deploy `ape-strategy-worker`
+  and validate `/strategy/status`, `/strategy/decisions/latest`,
+  `/strategy/decisions/recent`, `/strategy/gates/recent`,
+  `/strategy/dry-run/status`, `/strategy/dry-run/positions/open`,
+  `/strategy/dry-run/positions/recent`, and
+  `/strategy/dry-run/events/recent`.
+- Confirm strategy decisions block on missing or stale market worker heartbeat,
+  unreconciled subscriptions, unconfirmed orderbook SID, stale snapshot beyond
+  the carry-forward cap, timed-out in-flight snapshot requests, DB writer
+  backlog, or recent protocol errors.
+- Deploy `ape-maintenance-worker` last and validate `/storage/status`.
 - Confirm this PR did not tune strategy thresholds and did not add paper/live,
   order, fill, private-channel, account, executor, credential, or dashboard
   control behavior.

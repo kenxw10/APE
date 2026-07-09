@@ -4,6 +4,9 @@ import asyncio
 import json
 import logging
 import threading
+import time
+import uuid
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -26,6 +29,7 @@ from ape.kalshi.reference_messages import (
 from ape.kalshi.resolver import ResolverState, resolve_active_btc15_market
 from ape.kalshi.ws_client import (
     build_cfbenchmarks_subscribe_message,
+    build_list_subscriptions_message,
     build_subscribe_message,
     build_update_subscription_message,
     connect_websocket,
@@ -33,7 +37,14 @@ from ape.kalshi.ws_client import (
 )
 from ape.kalshi.ws_messages import ParsedWsMessage, parse_ws_payload
 from ape.kalshi.ws_state import OrderbookState
-from ape.repositories.inputs import ReferenceTickInput, WorkerHeartbeatInput
+from ape.repositories.inputs import (
+    KalshiWsProtocolEventInput,
+    OrderbookSnapshotInput,
+    PublicTradeInput,
+    ReferenceTickInput,
+    WorkerHeartbeatInput,
+)
+from ape.repositories.kalshi_ws_protocol import KalshiWsProtocolEventRepository
 from ape.repositories.orderbook import OrderbookRepository
 from ape.repositories.public_trades import PublicTradesRepository
 from ape.repositories.reference_ticks import ReferenceTicksRepository
@@ -50,6 +61,13 @@ MAX_HEARTBEAT_INTERVAL_SECONDS = 10.0
 MIN_HEARTBEAT_INTERVAL_SECONDS = 1.0
 MAX_DIAGNOSTIC_SAMPLES = 3
 MAX_DIAGNOSTIC_KEYS = 20
+PROTOCOL_ERROR_EVENTS = {
+    "websocket_error",
+    "update_subscription_error",
+    "reconnect_failed",
+    "db_write_slow",
+    "queue_backpressure",
+}
 
 WebSocketFactory = Callable[
     [str, dict[str, str], float, float],
@@ -58,9 +76,19 @@ WebSocketFactory = Callable[
 Resolver = Callable[..., Any]
 
 
+@dataclass(frozen=True)
+class _DbWriterItem:
+    kind: str
+    payload: Any
+    enqueued_at: datetime
+
+
 @dataclass
 class KalshiWsCollectorStatus:
     enabled: bool
+    worker_role: str = "all"
+    connection_id: str | None = None
+    protocol_connection_state: str = "disconnected"
     configured: bool = False
     signer_ready: bool = False
     connection_state: str = "disabled"
@@ -68,6 +96,27 @@ class KalshiWsCollectorStatus:
     subscribed_channels: list[str] = field(default_factory=list)
     subscription_ids: dict[str, int] = field(default_factory=dict)
     subscription_request_ids: dict[str, int] = field(default_factory=dict)
+    subscription_reconciled: bool = False
+    orderbook_sid_confirmed: bool = False
+    ticker_sid_confirmed: bool = False
+    trade_sid_confirmed: bool = False
+    list_subscriptions_request_id: int | None = None
+    last_list_subscriptions_at: datetime | None = None
+    last_list_subscriptions_result: str | None = None
+    in_flight_snapshot_request: bool = False
+    snapshot_request_id: int | None = None
+    snapshot_request_started_at: datetime | None = None
+    snapshot_request_age_ms: int | None = None
+    protocol_event_recent_error_count: int = 0
+    ws_reader_queue_depth: int = 0
+    ws_reader_queue_oldest_age_ms: int | None = None
+    db_writer_queue_depth: int = 0
+    db_writer_queue_oldest_age_ms: int | None = None
+    db_writer_last_flush_ms: int | None = None
+    db_writer_slow_flush_count: int = 0
+    reconnect_reason: str | None = None
+    close_code: int | None = None
+    close_reason: str | None = None
     last_connected_at: datetime | None = None
     last_message_at: datetime | None = None
     transport_alive: bool = False
@@ -117,6 +166,9 @@ class KalshiWsCollectorStatus:
     def as_metadata(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
+            "worker_role": self.worker_role,
+            "connection_id": self.connection_id,
+            "protocol_connection_state": self.protocol_connection_state,
             "configured": self.configured,
             "signer_ready": self.signer_ready,
             "connection_state": self.connection_state,
@@ -124,6 +176,28 @@ class KalshiWsCollectorStatus:
             "subscribed_channels": self.subscribed_channels,
             "subscription_ids": self.subscription_ids,
             "subscription_request_ids": self.subscription_request_ids,
+            "subscription_reconciled": self.subscription_reconciled,
+            "orderbook_sid_confirmed": self.orderbook_sid_confirmed,
+            "ticker_sid_confirmed": self.ticker_sid_confirmed,
+            "trade_sid_confirmed": self.trade_sid_confirmed,
+            "last_list_subscriptions_at": _isoformat_or_none(
+                self.last_list_subscriptions_at
+            ),
+            "last_list_subscriptions_result": self.last_list_subscriptions_result,
+            "in_flight_snapshot_request": self.in_flight_snapshot_request,
+            "snapshot_request_age_ms": self.snapshot_request_age_ms,
+            "protocol_event_recent_error_count": (
+                self.protocol_event_recent_error_count
+            ),
+            "ws_reader_queue_depth": self.ws_reader_queue_depth,
+            "ws_reader_queue_oldest_age_ms": self.ws_reader_queue_oldest_age_ms,
+            "db_writer_queue_depth": self.db_writer_queue_depth,
+            "db_writer_queue_oldest_age_ms": self.db_writer_queue_oldest_age_ms,
+            "db_writer_last_flush_ms": self.db_writer_last_flush_ms,
+            "db_writer_slow_flush_count": self.db_writer_slow_flush_count,
+            "reconnect_reason": self.reconnect_reason,
+            "close_code": self.close_code,
+            "close_reason": self.close_reason,
             "last_connected_at": _isoformat_or_none(self.last_connected_at),
             "last_message_at": _isoformat_or_none(self.last_message_at),
             "transport_alive": self.transport_alive,
@@ -356,6 +430,11 @@ class KalshiWsCollector:
         self._next_request_id = 1000
         self._force_next_heartbeat = False
         self._forced_diagnostic_signatures: set[str] = set()
+        self._connection_sequence = 0
+        self._db_writer_queue: asyncio.Queue[_DbWriterItem] | None = None
+        self._db_writer_enqueued_at: deque[datetime] = deque()
+        self._db_writer_task: asyncio.Task[None] | None = None
+        self._last_protocol_error_count_at: datetime | None = None
 
     async def run(
         self,
@@ -396,6 +475,47 @@ class KalshiWsCollector:
             stop_event,
             max_cycles=max_cycles,
             include_market=True,
+            include_reference=True,
+        )
+
+    async def run_market_data(
+        self,
+        *,
+        stop_event: threading.Event,
+        max_cycles: int | None = None,
+    ) -> None:
+        self.status.worker_role = "market-data"
+        self.brti_status.connection_state = "disabled"
+        if not self.config.kalshi_ws_enabled:
+            self.status.connection_state = "disabled"
+            self.status.protocol_connection_state = "disabled"
+            self.status.warnings = ["kalshi_ws_disabled"]
+            self.record_market_heartbeat()
+            return
+        await self._run_loop(
+            stop_event,
+            max_cycles=max_cycles,
+            include_market=True,
+            include_reference=False,
+        )
+
+    async def run_reference_brti(
+        self,
+        *,
+        stop_event: threading.Event,
+        max_cycles: int | None = None,
+    ) -> None:
+        self.status.connection_state = "disabled"
+        self.status.protocol_connection_state = "disabled"
+        self.brti_status.connection_state = "disabled"
+        if not self._reference_collection_enabled():
+            self.brti_status.warnings = ["kalshi_cfbenchmarks_disabled"]
+            self.record_reference_heartbeat()
+            return
+        await self._run_loop(
+            stop_event,
+            max_cycles=max_cycles,
+            include_market=False,
             include_reference=True,
         )
 
@@ -581,6 +701,15 @@ class KalshiWsCollector:
                 api_key_id=self.config.kalshi_api_key_id,
                 private_key_pem=self.config.kalshi_private_key,
             )
+            if market_subscription_enabled:
+                self._start_market_connection()
+                if self.status.reconnect_count > 0 or self.status.reconnect_reason:
+                    self._record_protocol_event(
+                        "reconnect_started",
+                        event_subtype=self.status.reconnect_reason,
+                        recovery_action="reconnect",
+                        recovery_result="started",
+                    )
             websocket = await self.websocket_factory(
                 self.config.kalshi_ws_base_url,
                 headers,
@@ -589,10 +718,13 @@ class KalshiWsCollector:
             )
             try:
                 if market_subscription_enabled:
+                    await self._start_market_db_writer()
                     self.status.connection_state = "connected"
+                    self.status.protocol_connection_state = "open"
                     self.status.transport_alive = True
                     self.status.transport_last_pong_at = self.now()
                     self.status.transport_liveness_reason = None
+                    self._record_protocol_event("websocket_open")
                 if brti_enabled:
                     self.brti_status.connection_state = "connected"
                     self.brti_status.last_connected_at = self.now()
@@ -630,22 +762,57 @@ class KalshiWsCollector:
                 if include_market:
                     if _market_reconnect_result(read_result):
                         self.status.connection_state = "reconnect_pending"
+                        self.status.reconnect_reason = read_result
                         self.status.reconnect_count += 1
+                        self._record_protocol_event(
+                            "reconnect_scheduled",
+                            event_subtype=read_result,
+                            recovery_action="reconnect",
+                            recovery_result="scheduled",
+                        )
                         self.record_heartbeat(
                             include_market=True,
                             include_reference=False,
                         )
                     else:
                         self.status.reconnect_count = 0
+                        self.status.reconnect_reason = None
+                        self._record_protocol_event(
+                            "reconnect_completed",
+                            recovery_result="completed",
+                        )
                 if include_reference and not _reference_reconnect_result(read_result):
                     self.brti_status.reconnect_count = 0
             finally:
+                if market_subscription_enabled:
+                    self._record_protocol_event(
+                        "websocket_close",
+                        close_code=_websocket_close_code(websocket),
+                        close_reason=_websocket_close_reason(websocket),
+                    )
+                    self.status.protocol_connection_state = "closed"
+                    self.status.close_code = _websocket_close_code(websocket)
+                    self.status.close_reason = _websocket_close_reason(websocket)
                 await _close_websocket(websocket)
+                if market_subscription_enabled:
+                    await self._stop_market_db_writer()
         except Exception as exc:
             if include_market:
                 self.status.reconnect_count += 1
+                self.status.reconnect_reason = exc.__class__.__name__
             if market_ws_enabled:
                 self._set_error(exc.__class__.__name__, exc)
+                self._record_protocol_event(
+                    "websocket_error",
+                    exception_type=exc.__class__.__name__,
+                    exception_message=str(exc),
+                )
+                self._record_protocol_event(
+                    "reconnect_failed",
+                    event_subtype=exc.__class__.__name__,
+                    recovery_action="reconnect",
+                    recovery_result="failed",
+                )
             if brti_enabled:
                 self.brti_status.reconnect_count += 1
                 self._set_reference_error(exc.__class__.__name__, exc)
@@ -673,6 +840,13 @@ class KalshiWsCollector:
                 use_yes_price=True,
             )
             await websocket.send(json.dumps(message))
+            self._record_protocol_event(
+                "subscribe_sent",
+                channel="orderbook_delta",
+                command_id=request_id,
+                command_type="subscribe",
+                payload_summary_json=_payload_summary(message),
+            )
             subscribed_channels.append("orderbook_delta")
             subscription_request_ids["orderbook_delta"] = request_id
             request_id += 1
@@ -690,6 +864,14 @@ class KalshiWsCollector:
                 market_ticker=market_ticker,
             )
             await websocket.send(json.dumps(message))
+            for channel in secondary_channels:
+                self._record_protocol_event(
+                    "subscribe_sent",
+                    channel=channel,
+                    command_id=request_id,
+                    command_type="subscribe",
+                    payload_summary_json=_payload_summary(message),
+                )
             subscribed_channels.extend(secondary_channels)
             for channel in secondary_channels:
                 subscription_request_ids[channel] = request_id
@@ -708,6 +890,10 @@ class KalshiWsCollector:
             self.status.subscribed_channels = subscribed_channels
             self.status.subscription_ids = {}
             self.status.subscription_request_ids = subscription_request_ids
+            self.status.subscription_reconciled = False
+            self.status.orderbook_sid_confirmed = False
+            self.status.ticker_sid_confirmed = False
+            self.status.trade_sid_confirmed = False
             self._last_market_subscribe_requested_at = self.now()
             self._start_market_recovery(
                 reason="market_subscription_startup",
@@ -715,6 +901,22 @@ class KalshiWsCollector:
                 result="requested",
                 checked_at=self._last_market_subscribe_requested_at,
             )
+            if subscribed_channels:
+                await self._request_list_subscriptions(websocket)
+
+    async def _request_list_subscriptions(self, websocket: Any) -> None:
+        request_id = self._next_request_id
+        self._next_request_id += 1
+        message = build_list_subscriptions_message(request_id=request_id)
+        await websocket.send(json.dumps(message))
+        self.status.list_subscriptions_request_id = request_id
+        self.status.last_list_subscriptions_result = "requested"
+        self._record_protocol_event(
+            "list_subscriptions_sent",
+            command_id=request_id,
+            command_type="list_subscriptions",
+            payload_summary_json=_payload_summary(message),
+        )
 
     async def _read_messages(
         self,
@@ -906,6 +1108,7 @@ class KalshiWsCollector:
                 received_at=received_at,
             )
             self.status.last_message_at = received_at
+            self._record_market_protocol_message(message, parsed_json)
             resubscribe_reason = await self._handle_message(
                 websocket,
                 message,
@@ -987,7 +1190,19 @@ class KalshiWsCollector:
             previous_liveness_status = self.status.orderbook_liveness_status
             previous_liveness_reason = self.status.orderbook_liveness_reason
             orderbook.apply_snapshot(message)
+            self.status.in_flight_snapshot_request = False
+            self.status.snapshot_request_id = None
+            self.status.snapshot_request_started_at = None
+            self.status.snapshot_request_age_ms = None
             self._sync_orderbook_status(orderbook, status="live", reason=None)
+            self._record_protocol_event(
+                "orderbook_snapshot_received",
+                channel="orderbook_delta",
+                sid=message.sid,
+                seq=message.seq,
+                raw_payload_hash=message.raw_payload_hash,
+                payload_summary_json=_payload_summary(message.raw_payload),
+            )
             self.status.orderbook_snapshot_source = (
                 "resynced_snapshot"
                 if previous_liveness_status == "resync_pending"
@@ -1007,7 +1222,8 @@ class KalshiWsCollector:
                 result="snapshot_initialized",
                 checked_at=received_at,
             )
-            self.status.last_orderbook_at = received_at
+            if self._db_writer_queue is None:
+                self.status.last_orderbook_at = received_at
             liveness_recovered = (
                 previous_liveness_status != "live"
                 or previous_liveness_reason is not None
@@ -1045,6 +1261,14 @@ class KalshiWsCollector:
 
         if message.kind == "orderbook_delta":
             self._mark_market_data_message(received_at)
+            self._record_protocol_event(
+                "orderbook_delta_received",
+                channel="orderbook_delta",
+                sid=message.sid,
+                seq=message.seq,
+                raw_payload_hash=message.raw_payload_hash,
+                payload_summary_json=_payload_summary(message.raw_payload),
+            )
             if not orderbook.initialized:
                 self._sync_orderbook_status(
                     orderbook,
@@ -1097,7 +1321,8 @@ class KalshiWsCollector:
             )
             if not self._persist_orderbook(snapshot):
                 return None
-            self.status.last_orderbook_at = received_at
+            if self._db_writer_queue is None:
+                self.status.last_orderbook_at = received_at
             warnings_cleared = self._clear_warning_prefixes("invalid_orderbook_delta_")
             warnings_cleared = (
                 self._clear_warnings("orderbook_delta_before_snapshot") or warnings_cleared
@@ -1108,9 +1333,18 @@ class KalshiWsCollector:
 
         if message.kind == "trade" and message.trade is not None:
             self._mark_market_data_message(received_at)
+            self._record_protocol_event(
+                "trade_received",
+                channel="trade",
+                sid=message.sid,
+                seq=message.seq,
+                raw_payload_hash=message.raw_payload_hash,
+                payload_summary_json=_payload_summary(message.raw_payload),
+            )
             if not self._persist_trade(message.trade):
                 return None
-            self.status.last_trade_at = received_at
+            if self._db_writer_queue is None:
+                self.status.last_trade_at = received_at
             warnings_cleared = self._clear_warning_prefixes("invalid_trade_")
             warnings_cleared = (
                 self._clear_warnings("invalid_trade_price_or_size") or warnings_cleared
@@ -1143,6 +1377,26 @@ class KalshiWsCollector:
                     message.raw_payload if isinstance(message.raw_payload, dict) else {}
                 )
                 request_id = _int_or_none(raw_payload.get("id"))
+                error_message = _websocket_error_message(raw_payload)
+                self._record_protocol_event(
+                    "websocket_error",
+                    command_id=request_id,
+                    sid=message.sid,
+                    seq=message.seq,
+                    raw_code=_websocket_error_code(raw_payload),
+                    raw_message=error_message,
+                    raw_payload_hash=message.raw_payload_hash,
+                    payload_summary_json=_payload_summary(raw_payload),
+                )
+                if _already_subscribed_error(error_message):
+                    self._add_warning("kalshi_ws_already_subscribed_pending_reconcile")
+                    try:
+                        await self._request_list_subscriptions(websocket)
+                    except Exception as exc:
+                        self._set_error("list_subscriptions_failed", exc)
+                        self._add_warning("kalshi_ws_already_subscribed_unconfirmed")
+                    self._force_next_heartbeat = True
+                    return None
                 if (
                     request_id is not None
                     and request_id in self.status.subscription_request_ids.values()
@@ -1321,6 +1575,21 @@ class KalshiWsCollector:
         payload = message.raw_payload if isinstance(message.raw_payload, dict) else {}
         request_id = _int_or_none(payload.get("id"))
         subscription_id = message.sid or _message_sid(payload)
+        message_type = _safe_text(payload.get("type")) or message.control_type
+        if request_id is not None and request_id == self.status.list_subscriptions_request_id:
+            self.status.last_list_subscriptions_at = message.source_ts or self.now()
+            self.status.last_list_subscriptions_result = message_type or "ok"
+            self.status.subscription_reconciled = self._subscriptions_confirmed()
+            self._record_protocol_event(
+                "list_subscriptions_ok",
+                command_id=request_id,
+                command_type="list_subscriptions",
+                event_subtype=self.status.last_list_subscriptions_result,
+                subscription_state_after=self.status.market_feed_subscription_state,
+                payload_summary_json=_payload_summary(payload),
+            )
+            return
+
         if request_id is None or subscription_id is None:
             return
 
@@ -1328,6 +1597,17 @@ class KalshiWsCollector:
             if existing_id == request_id:
                 self.status.subscription_ids[channel] = subscription_id
                 del self.status.subscription_request_ids[channel]
+                self._refresh_sid_confirmations()
+                self._record_protocol_event(
+                    "subscribed_received",
+                    channel=channel,
+                    command_id=request_id,
+                    command_type="subscribe",
+                    sid=subscription_id,
+                    event_subtype=message_type,
+                    subscription_state_after=self.status.market_feed_subscription_state,
+                    payload_summary_json=_payload_summary(payload),
+                )
                 if channel == "orderbook_delta":
                     self._start_market_recovery(
                         reason="market_subscription_ack",
@@ -1335,6 +1615,8 @@ class KalshiWsCollector:
                         result="sid_confirmed",
                         checked_at=message.source_ts or self.now(),
                     )
+                if self.status.list_subscriptions_request_id is None:
+                    self.status.subscription_reconciled = self._subscriptions_confirmed()
 
     def _mark_market_data_message(self, received_at: datetime) -> None:
         self.status.last_market_data_message_at = received_at
@@ -1364,6 +1646,10 @@ class KalshiWsCollector:
             return False
 
         self.status.transport_last_ping_at = checked_at
+        self._record_protocol_event(
+            "client_ping_sent",
+            ping_sent_at=checked_at,
+        )
         try:
             pong_waiter = ping()
             if isawaitable(pong_waiter):
@@ -1381,10 +1667,23 @@ class KalshiWsCollector:
             self.status.transport_liveness_reason = "kalshi_orderbook_transport_stale"
             self._add_warning("kalshi_orderbook_transport_stale")
             self._set_error("market_ws_ping_failed", exc)
+            self._record_protocol_event(
+                "websocket_error",
+                event_subtype="client_ping_failed",
+                exception_type=exc.__class__.__name__,
+                exception_message=str(exc),
+            )
             self._refresh_market_feed_state(checked_at)
             return False
 
-        self._mark_market_transport_alive(self.now())
+        pong_at = self.now()
+        self._mark_market_transport_alive(pong_at)
+        self._record_protocol_event(
+            "server_pong_received",
+            ping_sent_at=checked_at,
+            pong_received_at=pong_at,
+            round_trip_ms=_age_ms(checked_at, pong_at),
+        )
         return True
 
     async def _request_orderbook_snapshot_if_due(
@@ -1413,6 +1712,29 @@ class KalshiWsCollector:
         if not needs_snapshot:
             self.status.orderbook_recovery_action = "none"
             return False
+        if self.status.in_flight_snapshot_request:
+            if self._snapshot_request_timed_out(checked_at):
+                self.status.orderbook_recovery_action = "reconnect"
+                self.status.market_snapshot_resync_last_result = "timeout"
+                self._mark_unrecovered_market_blocker(
+                    "kalshi_orderbook_snapshot_resync_timeout",
+                    checked_at=checked_at,
+                )
+                self._start_market_recovery(
+                    reason="kalshi_orderbook_snapshot_resync_timeout",
+                    action="reconnect",
+                    result="failed",
+                    checked_at=checked_at,
+                    count_snapshot=True,
+                )
+                self._record_protocol_event(
+                    "reconnect_scheduled",
+                    event_subtype="snapshot_timeout",
+                    recovery_action="reconnect",
+                    recovery_result="scheduled",
+                )
+                return False
+            return False
         if not self._snapshot_resync_due(checked_at):
             return False
         return await self._request_orderbook_snapshot(
@@ -1430,6 +1752,7 @@ class KalshiWsCollector:
         checked_at: datetime,
         reason: str,
     ) -> bool:
+        self._refresh_sid_confirmations()
         subscription_id = self.status.subscription_ids.get("orderbook_delta")
         if subscription_id is None:
             if self.status.subscription_request_ids.get("orderbook_delta") is not None:
@@ -1494,6 +1817,15 @@ class KalshiWsCollector:
             )
             self._add_warning("orderbook_snapshot_resync_unavailable")
             return False
+        if not self.status.orderbook_sid_confirmed:
+            self.status.orderbook_recovery_action = "wait_for_subscription_ack"
+            self._start_market_recovery(
+                reason="orderbook_sid_unconfirmed",
+                action="wait_for_subscription_ack",
+                result="waiting",
+                checked_at=checked_at,
+            )
+            return False
 
         request_id = self._next_request_id
         self._next_request_id += 1
@@ -1528,6 +1860,10 @@ class KalshiWsCollector:
             return False
 
         self._last_snapshot_resync_requested_at = checked_at
+        self.status.in_flight_snapshot_request = True
+        self.status.snapshot_request_id = request_id
+        self.status.snapshot_request_started_at = checked_at
+        self.status.snapshot_request_age_ms = 0
         background_refresh = (
             reason == "market_data_quiet"
             and self.status.orderbook_initialized
@@ -1552,6 +1888,18 @@ class KalshiWsCollector:
             checked_at=checked_at,
             count_snapshot=True,
         )
+        self._record_protocol_event(
+            "get_snapshot_sent",
+            channel="orderbook_delta",
+            command_id=request_id,
+            command_type="update_subscription",
+            command_action="get_snapshot",
+            sid=subscription_id,
+            expected_sid=subscription_id,
+            recovery_action="get_snapshot",
+            recovery_result="requested",
+            payload_summary_json=_payload_summary(message),
+        )
         self.status.market_snapshot_resync_last_result = "requested"
         self._force_next_heartbeat = True
         if reason == "market_roll":
@@ -1565,10 +1913,7 @@ class KalshiWsCollector:
             checked_at.astimezone(UTC)
             - self._last_snapshot_resync_requested_at.astimezone(UTC)
         ).total_seconds()
-        return elapsed >= max(
-            1.0,
-            self.config.strategy_kalshi_book_stream_max_age_ms / 1000,
-        )
+        return elapsed >= self.config.kalshi_ws_snapshot_min_interval_seconds
 
     def _refresh_market_feed_state(self, checked_at: datetime) -> None:
         self.status.market_recovery_attempt_age_ms = (
@@ -1576,6 +1921,13 @@ class KalshiWsCollector:
             if self.status.market_recovery_attempt_in_progress
             else None
         )
+        self.status.snapshot_request_age_ms = (
+            _age_ms(self.status.snapshot_request_started_at, checked_at)
+            if self.status.in_flight_snapshot_request
+            else None
+        )
+        self._refresh_sid_confirmations()
+        self._refresh_db_writer_metrics(checked_at)
         transport_age_ms = _age_ms(self.status.transport_last_pong_at, checked_at)
         self.status.transport_age_ms = transport_age_ms
         if self.status.transport_last_pong_at is None:
@@ -1593,8 +1945,10 @@ class KalshiWsCollector:
             self.status.transport_alive = False
             self.status.transport_liveness_reason = "kalshi_orderbook_transport_stale"
 
-        if self.status.connection_state == "subscribed":
+        if self.status.connection_state == "subscribed" and self._subscriptions_confirmed():
             self.status.market_feed_subscription_state = "subscribed"
+        elif self.status.connection_state == "subscribed":
+            self.status.market_feed_subscription_state = "unreconciled"
         elif self.status.connection_state == "error":
             self.status.market_feed_subscription_state = "error"
         elif self.status.connection_state in {"disabled", "not_configured"}:
@@ -1699,10 +2053,12 @@ class KalshiWsCollector:
             return "LIVE"
         return "BLOCKED_UNRECOVERED"
 
-    def _persist_orderbook(self, snapshot) -> bool:
+    def _persist_orderbook(self, snapshot: OrderbookSnapshotInput) -> bool:
         if self.session_factory is None:
             self._add_warning("database_not_configured_for_orderbook")
             return False
+        if self._enqueue_market_db_write("orderbook", snapshot, snapshot.received_at):
+            return True
 
         try:
             with self.session_factory() as session:
@@ -1722,10 +2078,12 @@ class KalshiWsCollector:
         )
         return True
 
-    def _persist_trade(self, trade) -> bool:
+    def _persist_trade(self, trade: PublicTradeInput) -> bool:
         if self.session_factory is None:
             self._add_warning("database_not_configured_for_trades")
             return False
+        if self._enqueue_market_db_write("trade", trade, trade.received_at):
+            return True
 
         try:
             with self.session_factory() as session:
@@ -1740,6 +2098,299 @@ class KalshiWsCollector:
 
         self._mark_persistence_success(warning="trade_persistence_failed")
         return True
+
+    async def _start_market_db_writer(self) -> None:
+        if self._db_writer_queue is not None:
+            return
+        self._db_writer_queue = asyncio.Queue(
+            maxsize=self.config.kalshi_ws_db_writer_queue_max_size
+        )
+        self._db_writer_enqueued_at.clear()
+        self._db_writer_task = asyncio.create_task(self._market_db_writer_loop())
+        self._refresh_db_writer_metrics(self.now())
+
+    async def _stop_market_db_writer(self) -> None:
+        queue = self._db_writer_queue
+        task = self._db_writer_task
+        if queue is None or task is None:
+            return
+        try:
+            await asyncio.wait_for(
+                queue.join(),
+                timeout=max(1.0, self.config.kalshi_ws_heartbeat_timeout_seconds),
+            )
+        except TimeoutError:
+            self._add_warning("market_db_writer_drain_timeout")
+        self._refresh_db_writer_metrics(self.now())
+        self.record_market_heartbeat()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        self._db_writer_task = None
+        self._db_writer_queue = None
+        self._db_writer_enqueued_at.clear()
+        self._refresh_db_writer_metrics(self.now())
+
+    async def _market_db_writer_loop(self) -> None:
+        while True:
+            queue = self._db_writer_queue
+            if queue is None:
+                await asyncio.sleep(0)
+                continue
+            item = await queue.get()
+            if self._db_writer_enqueued_at:
+                self._db_writer_enqueued_at.popleft()
+            started = time.perf_counter()
+            try:
+                await asyncio.to_thread(self._write_market_db_item, item)
+            except SQLAlchemyError as exc:
+                LOGGER.warning("Kalshi market DB writer failed.", exc_info=True)
+                self._set_error(exc.__class__.__name__, exc)
+                if item.kind == "orderbook":
+                    self._add_warning("orderbook_persistence_failed")
+                    self._add_blocker("orderbook_persistence_failed")
+                elif item.kind == "trade":
+                    self._add_warning("trade_persistence_failed")
+                else:
+                    self._add_warning("protocol_event_persistence_failed")
+            finally:
+                flush_ms = max(0, int((time.perf_counter() - started) * 1000))
+                self.status.db_writer_last_flush_ms = flush_ms
+                if flush_ms >= self.config.kalshi_ws_db_slow_write_ms:
+                    self.status.db_writer_slow_flush_count += 1
+                    if item.kind != "protocol":
+                        self._record_protocol_event(
+                            "db_write_slow",
+                            event_subtype=item.kind,
+                            latency_ms=flush_ms,
+                        )
+                queue.task_done()
+                self._refresh_db_writer_metrics(self.now())
+
+    def _write_market_db_item(self, item: _DbWriterItem) -> None:
+        if self.session_factory is None:
+            return
+        with self.session_factory() as session:
+            if item.kind == "orderbook":
+                OrderbookRepository(session).insert_snapshot(item.payload)
+            elif item.kind == "trade":
+                PublicTradesRepository(session).insert_trade(item.payload)
+            elif item.kind == "protocol":
+                KalshiWsProtocolEventRepository(session).insert_event(item.payload)
+            else:
+                raise ValueError(f"Unsupported market DB writer item kind: {item.kind}")
+            session.commit()
+        if item.kind == "orderbook":
+            self._mark_persistence_success(
+                warning="orderbook_persistence_failed",
+                blockers=("orderbook_persistence_failed",),
+            )
+            self.status.last_orderbook_at = item.payload.received_at
+        elif item.kind == "trade":
+            self._mark_persistence_success(warning="trade_persistence_failed")
+            self.status.last_trade_at = item.payload.received_at
+
+    def _enqueue_market_db_write(
+        self,
+        kind: str,
+        payload: Any,
+        enqueued_at: datetime,
+    ) -> bool:
+        queue = self._db_writer_queue
+        if queue is None:
+            return False
+        try:
+            queue.put_nowait(
+                _DbWriterItem(
+                    kind=kind,
+                    payload=payload,
+                    enqueued_at=enqueued_at,
+                )
+            )
+        except asyncio.QueueFull:
+            self._add_warning("market_db_writer_queue_backpressure")
+            self._add_blocker("market_db_writer_queue_backpressure")
+            self.status.db_writer_queue_depth = queue.qsize()
+            if kind != "protocol":
+                self._record_protocol_event(
+                    "queue_backpressure",
+                    event_subtype=kind,
+                    recovery_action="drop_or_block",
+                    recovery_result="queue_full",
+                )
+            return False
+        self._db_writer_enqueued_at.append(enqueued_at)
+        self._refresh_db_writer_metrics(enqueued_at)
+        return True
+
+    def _record_protocol_event(
+        self,
+        event_type: str,
+        *,
+        channel: str | None = None,
+        command_id: int | None = None,
+        command_type: str | None = None,
+        command_action: str | None = None,
+        sid: int | None = None,
+        expected_sid: int | None = None,
+        seq: int | None = None,
+        event_subtype: str | None = None,
+        raw_code: str | None = None,
+        raw_message: str | None = None,
+        close_code: int | None = None,
+        close_reason: str | None = None,
+        exception_type: str | None = None,
+        exception_message: str | None = None,
+        latency_ms: int | None = None,
+        round_trip_ms: int | None = None,
+        ping_sent_at: datetime | None = None,
+        pong_received_at: datetime | None = None,
+        server_ping_received_at: datetime | None = None,
+        client_pong_sent_at: datetime | None = None,
+        subscription_state_before: str | None = None,
+        subscription_state_after: str | None = None,
+        recovery_action: str | None = None,
+        recovery_result: str | None = None,
+        raw_payload_hash: str | None = None,
+        payload_summary_json: Any | None = None,
+    ) -> None:
+        if self.session_factory is None:
+            return
+        created_at = self.now()
+        if event_type in PROTOCOL_ERROR_EVENTS:
+            self.status.protocol_event_recent_error_count += 1
+        event = KalshiWsProtocolEventInput(
+            event_type=event_type,
+            created_at=created_at,
+            worker_service=WORKER_SERVICE_MARKET_WS,
+            worker_role=self.status.worker_role,
+            connection_id=self.status.connection_id,
+            channel=channel,
+            active_market_ticker=self.status.active_market_ticker,
+            command_id=command_id,
+            command_type=command_type,
+            command_action=command_action,
+            sid=sid,
+            expected_sid=expected_sid,
+            seq=seq,
+            event_subtype=event_subtype,
+            raw_code=raw_code,
+            raw_message=_safe_protocol_text(raw_message),
+            close_code=close_code,
+            close_reason=_safe_protocol_text(close_reason),
+            exception_type=exception_type,
+            exception_message=_safe_protocol_text(exception_message),
+            latency_ms=latency_ms,
+            round_trip_ms=round_trip_ms,
+            ping_sent_at=ping_sent_at,
+            pong_received_at=pong_received_at,
+            server_ping_received_at=server_ping_received_at,
+            client_pong_sent_at=client_pong_sent_at,
+            subscription_state_before=subscription_state_before,
+            subscription_state_after=subscription_state_after,
+            recovery_action=recovery_action,
+            recovery_result=recovery_result,
+            raw_payload_hash=raw_payload_hash,
+            payload_summary_json=payload_summary_json,
+        )
+        if self._enqueue_market_db_write("protocol", event, created_at):
+            return
+        try:
+            with self.session_factory() as session:
+                KalshiWsProtocolEventRepository(session).insert_event(event)
+                session.commit()
+        except SQLAlchemyError:
+            LOGGER.warning("Kalshi WS protocol event persistence failed.", exc_info=True)
+
+    def _record_market_protocol_message(
+        self,
+        message: ParsedWsMessage,
+        payload: Any,
+    ) -> None:
+        if message.kind == "ticker":
+            self._record_protocol_event(
+                "ticker_received",
+                channel="ticker",
+                sid=message.sid,
+                seq=message.seq,
+                raw_payload_hash=message.raw_payload_hash,
+                payload_summary_json=_payload_summary(payload),
+            )
+        elif message.kind == "control":
+            self._record_protocol_event(
+                f"{message.control_type or 'control'}_received",
+                sid=message.sid,
+                seq=message.seq,
+                event_subtype=message.control_type,
+                raw_payload_hash=message.raw_payload_hash,
+                payload_summary_json=_payload_summary(payload),
+            )
+
+    def _start_market_connection(self) -> None:
+        self._connection_sequence += 1
+        self.status.connection_id = (
+            f"{self.started_at.strftime('%Y%m%dT%H%M%S')}-"
+            f"{self._connection_sequence}-{uuid.uuid4().hex[:8]}"
+        )
+        self.status.protocol_connection_state = "opening"
+        self.status.subscription_reconciled = False
+        self.status.orderbook_sid_confirmed = False
+        self.status.ticker_sid_confirmed = False
+        self.status.trade_sid_confirmed = False
+        self.status.last_list_subscriptions_at = None
+        self.status.last_list_subscriptions_result = None
+        self.status.in_flight_snapshot_request = False
+        self.status.snapshot_request_id = None
+        self.status.snapshot_request_started_at = None
+        self.status.snapshot_request_age_ms = None
+        self.status.close_code = None
+        self.status.close_reason = None
+
+    def _refresh_sid_confirmations(self) -> None:
+        self.status.orderbook_sid_confirmed = (
+            not self.config.kalshi_ws_subscribe_orderbook
+            or "orderbook_delta" in self.status.subscription_ids
+        )
+        self.status.ticker_sid_confirmed = (
+            not self.config.kalshi_ws_subscribe_ticker
+            or "ticker" in self.status.subscription_ids
+        )
+        self.status.trade_sid_confirmed = (
+            not self.config.kalshi_ws_subscribe_trades
+            or "trade" in self.status.subscription_ids
+        )
+
+    def _subscriptions_confirmed(self) -> bool:
+        self._refresh_sid_confirmations()
+        requested_channels = set(self.status.subscribed_channels)
+        if not requested_channels:
+            return False
+        return all(channel in self.status.subscription_ids for channel in requested_channels)
+
+    def _snapshot_request_timed_out(self, checked_at: datetime) -> bool:
+        if (
+            not self.status.in_flight_snapshot_request
+            or self.status.snapshot_request_started_at is None
+        ):
+            return False
+        age_seconds = (
+            _as_utc(checked_at) - _as_utc(self.status.snapshot_request_started_at)
+        ).total_seconds()
+        return age_seconds >= self.config.kalshi_ws_snapshot_timeout_seconds
+
+    def _refresh_db_writer_metrics(self, checked_at: datetime) -> None:
+        queue = self._db_writer_queue
+        self.status.ws_reader_queue_depth = 0
+        self.status.ws_reader_queue_oldest_age_ms = None
+        if queue is None:
+            self.status.db_writer_queue_depth = 0
+            self.status.db_writer_queue_oldest_age_ms = None
+            return
+        self.status.db_writer_queue_depth = queue.qsize()
+        oldest = self._db_writer_enqueued_at[0] if self._db_writer_enqueued_at else None
+        self.status.db_writer_queue_oldest_age_ms = _age_ms(oldest, checked_at)
 
     def _persist_reference_tick(self, tick: ReferenceTickInput) -> bool:
         if self.session_factory is None:
@@ -2422,13 +3073,14 @@ class KalshiWsCollector:
             return False
         signature = _diagnostic_sample_signature(sample)
         force_heartbeat = signature not in self._forced_diagnostic_signatures
-        if force_heartbeat:
-            self._forced_diagnostic_signatures.add(signature)
+        if not force_heartbeat:
+            return False
+        self._forced_diagnostic_signatures.add(signature)
         self.status.diagnostic_samples.append(sample)
         self.status.diagnostic_samples = self.status.diagnostic_samples[
             -MAX_DIAGNOSTIC_SAMPLES:
         ]
-        return force_heartbeat
+        return True
 
     def _consume_force_next_heartbeat(self) -> bool:
         force = self._force_next_heartbeat
@@ -2754,6 +3406,103 @@ def _websocket_error_message(payload: dict[str, Any]) -> str:
             return f"code={code}"
     text = _safe_text(message)
     return text or "Kalshi cfbenchmarks_value subscription error."
+
+
+def _websocket_error_code(payload: dict[str, Any]) -> str | None:
+    message = payload.get("msg")
+    if isinstance(message, dict):
+        return _safe_text(message.get("code"))
+    return None
+
+
+def _already_subscribed_error(message: str | None) -> bool:
+    return bool(message and "already subscribed" in message.lower())
+
+
+def _payload_summary(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    summary: dict[str, Any] = {
+        "type": _safe_text(payload.get("type")),
+        "cmd": _safe_text(payload.get("cmd")),
+        "id": _int_or_none(payload.get("id")),
+        "sid": _int_or_none(payload.get("sid")),
+        "seq": _int_or_none(payload.get("seq")),
+    }
+    params = payload.get("params")
+    if isinstance(params, dict):
+        summary["params"] = {
+            "channels": _string_list(params.get("channels")),
+            "action": _safe_text(params.get("action")),
+            "sids": _int_list(params.get("sids")),
+            "market_ticker": _safe_text(params.get("market_ticker")),
+            "market_tickers": _string_list(params.get("market_tickers")),
+            "index_ids": _string_list(params.get("index_ids")),
+        }
+    message = payload.get("msg")
+    if isinstance(message, dict):
+        summary["msg"] = {
+            "channel": _safe_text(message.get("channel")),
+            "market_ticker": _safe_text(message.get("market_ticker")),
+            "sid": _int_or_none(message.get("sid")),
+            "code": _safe_text(message.get("code")),
+            "text": _safe_text(
+                message.get("msg")
+                or message.get("message")
+                or message.get("reason")
+                or message.get("error")
+            ),
+        }
+    return {
+        key: value
+        for key, value in summary.items()
+        if value not in (None, [], {})
+    }
+
+
+def _safe_protocol_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = value[:500]
+    lowered = text.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "private key",
+            "kalshi-access-signature",
+            "authorization",
+            "secret",
+        )
+    ):
+        return "[redacted]"
+    return text
+
+
+def _int_list(value: Any) -> list[int]:
+    if not isinstance(value, list | tuple):
+        return []
+    parsed = [_int_or_none(item) for item in value]
+    return [item for item in parsed if item is not None]
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list | tuple):
+        return []
+    return [str(item)[:128] for item in value if str(item).strip()]
+
+
+def _websocket_close_code(websocket: Any) -> int | None:
+    return _int_or_none(
+        getattr(websocket, "close_code", None)
+        or getattr(websocket, "close_rcvd", None)
+    )
+
+
+def _websocket_close_reason(websocket: Any) -> str | None:
+    return _safe_text(
+        getattr(websocket, "close_reason", None)
+        or getattr(websocket, "close_rcvd", None)
+    )
 
 
 def heartbeat_interval_seconds(config: AppConfig) -> float:

@@ -10,6 +10,7 @@ from ape.config import load_config
 from ape.db.migrations import run_migrations
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.repositories.inputs import (
+    KalshiWsProtocolEventInput,
     MarketInput,
     OrderbookSnapshotInput,
     PublicTradeInput,
@@ -19,6 +20,7 @@ from ape.repositories.inputs import (
     StrategyDryRunPositionInput,
     WorkerHeartbeatInput,
 )
+from ape.repositories.kalshi_ws_protocol import KalshiWsProtocolEventRepository
 from ape.repositories.markets import MarketsRepository
 from ape.repositories.orderbook import OrderbookRepository
 from ape.repositories.public_trades import PublicTradesRepository, _recent_trades_statement
@@ -382,3 +384,47 @@ def test_worker_heartbeat_repository_records_and_reads_latest(session) -> None:
     assert heartbeat.service_name == "ape-worker"
     assert heartbeat.is_safe is True
     assert heartbeat.metadata_ == {"mode": "idle"}
+
+
+def test_kalshi_ws_protocol_repository_records_recent_and_summary(session) -> None:
+    repository = KalshiWsProtocolEventRepository(session)
+    now = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+
+    repository.insert_event(
+        KalshiWsProtocolEventInput(
+            event_type="subscribe_sent",
+            created_at=now,
+            worker_service="ape-worker.market_data",
+            worker_role="market-data",
+            connection_id="conn-1",
+            channel="orderbook_delta",
+            command_id=1,
+            command_type="subscribe",
+        )
+    )
+    repository.insert_event(
+        KalshiWsProtocolEventInput(
+            event_type="websocket_error",
+            created_at=now + timedelta(seconds=1),
+            worker_service="ape-worker.market_data",
+            worker_role="market-data",
+            connection_id="conn-1",
+            raw_code="400",
+            raw_message="Already subscribed",
+        )
+    )
+    session.commit()
+
+    recent = repository.list_recent(limit=10)
+    summary = repository.summary_since(since=now - timedelta(seconds=5))
+
+    assert [event.event_type for event in recent] == [
+        "websocket_error",
+        "subscribe_sent",
+    ]
+    assert summary["total"] == 2
+    assert summary["error_count"] == 1
+    assert summary["by_event_type"] == {
+        "subscribe_sent": 1,
+        "websocket_error": 1,
+    }

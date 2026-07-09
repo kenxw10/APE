@@ -34,8 +34,29 @@ class KalshiWsStatusSnapshot:
     latest_aggregate_heartbeat_mode: str | None
     latest_component_heartbeat_mode: str | None
     liveness_source_mismatch: bool
+    worker_role: str | None
+    connection_id: str | None
+    protocol_connection_state: str | None
     subscribed_channels: list[str]
     subscription_ids: dict[str, int]
+    subscription_reconciled: bool
+    orderbook_sid_confirmed: bool
+    ticker_sid_confirmed: bool
+    trade_sid_confirmed: bool
+    last_list_subscriptions_at: datetime | None
+    last_list_subscriptions_result: str | None
+    in_flight_snapshot_request: bool
+    snapshot_request_age_ms: int | None
+    protocol_event_recent_error_count: int
+    ws_reader_queue_depth: int
+    ws_reader_queue_oldest_age_ms: int | None
+    db_writer_queue_depth: int
+    db_writer_queue_oldest_age_ms: int | None
+    db_writer_last_flush_ms: int | None
+    db_writer_slow_flush_count: int
+    reconnect_reason: str | None
+    close_code: int | None
+    close_reason: str | None
     last_connected_at: datetime | None
     last_message_at: datetime | None
     last_ticker_at: datetime | None
@@ -104,6 +125,27 @@ def build_kalshi_ws_status(
     latest_aggregate_heartbeat_mode: str | None = None
     latest_component_heartbeat_mode: str | None = None
     liveness_source_mismatch = False
+    worker_role: str | None = None
+    connection_id: str | None = None
+    protocol_connection_state: str | None = None
+    subscription_reconciled = False
+    orderbook_sid_confirmed = False
+    ticker_sid_confirmed = False
+    trade_sid_confirmed = False
+    last_list_subscriptions_at: datetime | None = None
+    last_list_subscriptions_result: str | None = None
+    in_flight_snapshot_request = False
+    snapshot_request_age_ms: int | None = None
+    protocol_event_recent_error_count = 0
+    ws_reader_queue_depth = 0
+    ws_reader_queue_oldest_age_ms: int | None = None
+    db_writer_queue_depth = 0
+    db_writer_queue_oldest_age_ms: int | None = None
+    db_writer_last_flush_ms: int | None = None
+    db_writer_slow_flush_count = 0
+    reconnect_reason: str | None = None
+    close_code: int | None = None
+    close_reason: str | None = None
     active_market_ticker: str | None = None
     latest_orderbook_at: datetime | None = None
     latest_trade_at: datetime | None = None
@@ -172,6 +214,35 @@ def build_kalshi_ws_status(
                         liveness.latest_component_heartbeat_mode
                     )
                     liveness_source_mismatch = liveness.liveness_source_mismatch
+                    worker_role = liveness.worker_role
+                    connection_id = liveness.connection_id
+                    protocol_connection_state = liveness.protocol_connection_state
+                    subscription_reconciled = liveness.subscription_reconciled
+                    orderbook_sid_confirmed = liveness.orderbook_sid_confirmed
+                    ticker_sid_confirmed = liveness.ticker_sid_confirmed
+                    trade_sid_confirmed = liveness.trade_sid_confirmed
+                    last_list_subscriptions_at = liveness.last_list_subscriptions_at
+                    last_list_subscriptions_result = (
+                        liveness.last_list_subscriptions_result
+                    )
+                    in_flight_snapshot_request = liveness.in_flight_snapshot_request
+                    snapshot_request_age_ms = liveness.snapshot_request_age_ms
+                    protocol_event_recent_error_count = (
+                        liveness.protocol_event_recent_error_count
+                    )
+                    ws_reader_queue_depth = liveness.ws_reader_queue_depth
+                    ws_reader_queue_oldest_age_ms = (
+                        liveness.ws_reader_queue_oldest_age_ms
+                    )
+                    db_writer_queue_depth = liveness.db_writer_queue_depth
+                    db_writer_queue_oldest_age_ms = (
+                        liveness.db_writer_queue_oldest_age_ms
+                    )
+                    db_writer_last_flush_ms = liveness.db_writer_last_flush_ms
+                    db_writer_slow_flush_count = liveness.db_writer_slow_flush_count
+                    reconnect_reason = liveness.reconnect_reason
+                    close_code = liveness.close_code
+                    close_reason = liveness.close_reason
                     active_market_ticker = liveness.active_market_ticker
                     latest_orderbook_at = liveness.latest_orderbook_received_at
                     latest_trade_at = liveness.latest_trade_received_at
@@ -310,8 +381,29 @@ def build_kalshi_ws_status(
         latest_aggregate_heartbeat_mode=latest_aggregate_heartbeat_mode,
         latest_component_heartbeat_mode=latest_component_heartbeat_mode,
         liveness_source_mismatch=liveness_source_mismatch,
+        worker_role=worker_role,
+        connection_id=connection_id,
+        protocol_connection_state=protocol_connection_state,
         subscribed_channels=_string_list(heartbeat_metadata.get("subscribed_channels")),
         subscription_ids=_int_dict(heartbeat_metadata.get("subscription_ids")),
+        subscription_reconciled=subscription_reconciled,
+        orderbook_sid_confirmed=orderbook_sid_confirmed,
+        ticker_sid_confirmed=ticker_sid_confirmed,
+        trade_sid_confirmed=trade_sid_confirmed,
+        last_list_subscriptions_at=last_list_subscriptions_at,
+        last_list_subscriptions_result=last_list_subscriptions_result,
+        in_flight_snapshot_request=in_flight_snapshot_request,
+        snapshot_request_age_ms=snapshot_request_age_ms,
+        protocol_event_recent_error_count=protocol_event_recent_error_count,
+        ws_reader_queue_depth=ws_reader_queue_depth,
+        ws_reader_queue_oldest_age_ms=ws_reader_queue_oldest_age_ms,
+        db_writer_queue_depth=db_writer_queue_depth,
+        db_writer_queue_oldest_age_ms=db_writer_queue_oldest_age_ms,
+        db_writer_last_flush_ms=db_writer_last_flush_ms,
+        db_writer_slow_flush_count=db_writer_slow_flush_count,
+        reconnect_reason=reconnect_reason,
+        close_code=close_code,
+        close_reason=close_reason,
         last_connected_at=_datetime_or_none(heartbeat_metadata.get("last_connected_at")),
         last_message_at=last_message_at,
         last_ticker_at=_datetime_or_none(heartbeat_metadata.get("last_ticker_at")),
