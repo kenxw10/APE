@@ -3357,6 +3357,15 @@ def _market_recovery_stale_reason(metadata: dict[str, Any] | None) -> str | None
         if last_action in {"subscribe", "resubscribe", "wait_for_subscription_ack"}:
             return "kalshi_orderbook_subscription_recovery_pending"
         if last_action == "get_snapshot":
+            snapshot_state = _metadata_text(metadata, "market_feed_snapshot_state")
+            snapshot_source = _metadata_text(metadata, "orderbook_snapshot_source")
+            liveness_status = _metadata_text(metadata, "orderbook_liveness_status")
+            if (
+                snapshot_state == "initialized"
+                and snapshot_source != "blocked"
+                and liveness_status != "resync_pending"
+            ):
+                return None
             return "kalshi_orderbook_snapshot_resync_pending"
         if last_action == "reconnect":
             return "kalshi_orderbook_transport_stale"
