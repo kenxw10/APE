@@ -20,6 +20,7 @@ from ape.kalshi.reference_messages import BRTI_SOURCE
 from ape.kalshi.resolver import ResolverResult, ResolverState
 from ape.kalshi.ws_collector import KalshiWsCollector, _market_reconnect_result
 from ape.kalshi.ws_messages import parse_ws_payload
+from ape.kalshi.ws_state import OrderbookState
 from ape.kalshi.ws_status import build_kalshi_ws_status
 from ape.repositories.inputs import MarketInput, OrderbookSnapshotInput, WorkerHeartbeatInput
 from ape.repositories.orderbook import OrderbookRepository
@@ -3413,6 +3414,101 @@ def test_collector_marks_queued_orderbook_pending_until_writer_commit(tmp_path) 
         assert collector.status.orderbook_persistence_pending_age_ms is None
         assert "orderbook_persistence_pending" not in collector.status.blockers
         assert collector.status.last_orderbook_at == NOW
+        with session_factory() as session:
+            assert (
+                session.scalar(select(func.count()).select_from(OrderbookSnapshot))
+                == 1
+            )
+    finally:
+        engine.dispose()
+
+
+def test_collector_clears_delta_warnings_after_queued_valid_delta_commit(
+    tmp_path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_delta_cleanup.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+
+    async def websocket_factory(*_args):
+        raise AssertionError("websocket factory should not be used")
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector.status.active_market_ticker = "KXBTC15M-TEST"
+    collector._db_writer_queue = asyncio.Queue(maxsize=10)
+    collector._add_warning("invalid_orderbook_delta_delta_fp")
+    collector._add_warning("orderbook_delta_before_snapshot")
+
+    orderbook = OrderbookState(market_ticker="KXBTC15M-TEST")
+    orderbook.apply_snapshot(
+        parse_ws_payload(
+            {
+                "type": "orderbook_snapshot",
+                "sid": 11,
+                "seq": 1,
+                "msg": {
+                    "market_ticker": "KXBTC15M-TEST",
+                    "yes_dollars_fp": [["0.60", "10"]],
+                    "no_dollars_fp": [["0.65", "8"]],
+                },
+            },
+            target_market_ticker="KXBTC15M-TEST",
+            received_at=NOW,
+        )
+    )
+    delta = parse_ws_payload(
+        {
+            "type": "orderbook_delta",
+            "sid": 11,
+            "seq": 2,
+            "msg": {
+                "market_ticker": "KXBTC15M-TEST",
+                "side": "yes",
+                "price_dollars": "0.61",
+                "delta_fp": "4",
+            },
+        },
+        target_market_ticker="KXBTC15M-TEST",
+        received_at=NOW,
+    )
+
+    try:
+        result = asyncio.run(
+            collector._handle_message(FakeWebSocket([]), delta, orderbook, NOW)
+        )
+
+        assert result is None
+        assert "invalid_orderbook_delta_delta_fp" in collector.status.warnings
+        assert "orderbook_delta_before_snapshot" in collector.status.warnings
+
+        queued_items = []
+        while not collector._db_writer_queue.empty():
+            queued_items.append(collector._db_writer_queue.get_nowait())
+        assert any(item.kind == "orderbook" for item in queued_items)
+
+        for item in queued_items:
+            collector._write_market_db_item(item)
+
+        assert "invalid_orderbook_delta_delta_fp" not in collector.status.warnings
+        assert "orderbook_delta_before_snapshot" not in collector.status.warnings
+        assert collector.status.orderbook_persistence_pending_count == 0
         with session_factory() as session:
             assert (
                 session.scalar(select(func.count()).select_from(OrderbookSnapshot))

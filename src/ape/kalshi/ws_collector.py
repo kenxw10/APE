@@ -92,6 +92,7 @@ class _DbWriterItem:
     orderbook_recovery_reason: str | None = None
     orderbook_recovery_action: str | None = None
     clear_orderbook_recovery_warnings: bool = False
+    clear_orderbook_delta_warnings: bool = False
 
 
 @dataclass
@@ -1349,14 +1350,14 @@ class KalshiWsCollector:
                 raw_payload_hash=message.raw_payload_hash,
                 raw_payload=message.raw_payload,
             )
-            if not self._persist_orderbook(snapshot):
+            if not self._persist_orderbook(
+                snapshot,
+                queued_clear_delta_warnings=True,
+            ):
                 return None
             if self._db_writer_queue is None:
                 self.status.last_orderbook_at = received_at
-            warnings_cleared = self._clear_warning_prefixes("invalid_orderbook_delta_")
-            warnings_cleared = (
-                self._clear_warnings("orderbook_delta_before_snapshot") or warnings_cleared
-            )
+            warnings_cleared = self._clear_orderbook_delta_warnings()
             if warnings_cleared:
                 self.record_market_heartbeat()
             return None
@@ -1557,6 +1558,12 @@ class KalshiWsCollector:
             "kalshi_orderbook_snapshot_resync_failed",
         )
         return warnings_cleared or blockers_cleared
+
+    def _clear_orderbook_delta_warnings(self) -> bool:
+        warnings_cleared = self._clear_warning_prefixes("invalid_orderbook_delta_")
+        return (
+            self._clear_warnings("orderbook_delta_before_snapshot") or warnings_cleared
+        )
 
     def _start_market_recovery(
         self,
@@ -2149,6 +2156,7 @@ class KalshiWsCollector:
         *,
         queued_recovery_result: str | None = None,
         queued_clear_recovery_warnings: bool = False,
+        queued_clear_delta_warnings: bool = False,
     ) -> bool:
         if self.session_factory is None:
             self._add_warning("database_not_configured_for_orderbook")
@@ -2159,6 +2167,7 @@ class KalshiWsCollector:
             snapshot.received_at,
             orderbook_recovery_result=queued_recovery_result,
             clear_orderbook_recovery_warnings=queued_clear_recovery_warnings,
+            clear_orderbook_delta_warnings=queued_clear_delta_warnings,
         )
         if enqueue_result == MARKET_DB_WRITE_QUEUED:
             self._mark_orderbook_persistence_pending(snapshot.received_at)
@@ -2329,6 +2338,8 @@ class KalshiWsCollector:
                 and recovery_still_current
             ):
                 self._clear_orderbook_recovery_warnings()
+            if item.clear_orderbook_delta_warnings and matches_active_market:
+                self._clear_orderbook_delta_warnings()
             self._finish_orderbook_persistence_pending(item.payload.received_at)
         elif item.kind == "trade":
             self._mark_persistence_success(warning="trade_persistence_failed")
@@ -2389,6 +2400,7 @@ class KalshiWsCollector:
         *,
         orderbook_recovery_result: str | None = None,
         clear_orderbook_recovery_warnings: bool = False,
+        clear_orderbook_delta_warnings: bool = False,
     ) -> str:
         queue = self._db_writer_queue
         if queue is None:
@@ -2413,6 +2425,7 @@ class KalshiWsCollector:
                     clear_orderbook_recovery_warnings=(
                         clear_orderbook_recovery_warnings
                     ),
+                    clear_orderbook_delta_warnings=clear_orderbook_delta_warnings,
                 )
             )
         except asyncio.QueueFull:
