@@ -181,6 +181,64 @@ class PublicTrade(Base):
     )
 
 
+class KalshiWsProtocolEvent(Base):
+    __tablename__ = "kalshi_ws_protocol_events"
+    __table_args__ = (
+        Index("ix_kalshi_ws_protocol_events_created", "created_at"),
+        Index(
+            "ix_kalshi_ws_protocol_events_worker_created",
+            "worker_service",
+            "created_at",
+        ),
+        Index(
+            "ix_kalshi_ws_protocol_events_type_created",
+            "event_type",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+        index=True,
+    )
+    worker_service: Mapped[str | None] = mapped_column(String(128), index=True)
+    worker_role: Mapped[str | None] = mapped_column(String(64), index=True)
+    connection_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    channel: Mapped[str | None] = mapped_column(String(64), index=True)
+    active_market_ticker: Mapped[str | None] = mapped_column(String(128), index=True)
+    command_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    command_type: Mapped[str | None] = mapped_column(String(64))
+    command_action: Mapped[str | None] = mapped_column(String(64))
+    sid: Mapped[int | None] = mapped_column(Integer, index=True)
+    expected_sid: Mapped[int | None] = mapped_column(Integer)
+    seq: Mapped[int | None] = mapped_column(Integer)
+    event_type: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    event_subtype: Mapped[str | None] = mapped_column(String(128))
+    raw_code: Mapped[str | None] = mapped_column(String(128))
+    raw_message: Mapped[str | None] = mapped_column(Text)
+    close_code: Mapped[int | None] = mapped_column(Integer)
+    close_reason: Mapped[str | None] = mapped_column(Text)
+    exception_type: Mapped[str | None] = mapped_column(String(128))
+    exception_message: Mapped[str | None] = mapped_column(Text)
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    round_trip_ms: Mapped[int | None] = mapped_column(Integer)
+    ping_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    pong_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    server_ping_received_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    client_pong_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    subscription_state_before: Mapped[str | None] = mapped_column(String(128))
+    subscription_state_after: Mapped[str | None] = mapped_column(String(128))
+    recovery_action: Mapped[str | None] = mapped_column(String(128))
+    recovery_result: Mapped[str | None] = mapped_column(String(128))
+    raw_payload_hash: Mapped[str | None] = mapped_column(String(128))
+    payload_summary_json: Mapped[Any | None] = mapped_column(JSON)
+
+
 class StrategyDecision(Base):
     __tablename__ = "strategy_decisions"
     __table_args__ = (

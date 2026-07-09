@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 WORKER_SERVICE_AGGREGATE = "ape-worker"
-WORKER_SERVICE_MARKET_WS = "ape-worker.market_ws"
+WORKER_SERVICE_MARKET_DATA = "ape-worker.market_data"
+WORKER_SERVICE_MARKET_WS = WORKER_SERVICE_MARKET_DATA
+WORKER_SERVICE_MARKET_WS_LEGACY = "ape-worker.market_ws"
 WORKER_SERVICE_REFERENCE_BRTI = "ape-worker.reference_brti"
 WORKER_SERVICE_STRATEGY = "ape-worker.strategy"
-WORKER_SERVICE_STORAGE_RETENTION = "ape-worker.storage_retention"
+WORKER_SERVICE_MAINTENANCE = "ape-worker.maintenance"
+WORKER_SERVICE_STORAGE_RETENTION = WORKER_SERVICE_MAINTENANCE
+WORKER_SERVICE_STORAGE_RETENTION_LEGACY = "ape-worker.storage_retention"
 

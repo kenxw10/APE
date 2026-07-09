@@ -18,6 +18,10 @@ from ape.kalshi.reference_status import (
     build_brti_reference_status,
 )
 from ape.kalshi.resolver import resolve_active_btc15_market
+from ape.kalshi.ws_protocol import (
+    build_kalshi_ws_protocol_recent,
+    build_kalshi_ws_protocol_summary,
+)
 from ape.kalshi.ws_status import build_kalshi_ws_status
 from ape.models.health import (
     DatabaseStatusResponse,
@@ -28,9 +32,13 @@ from ape.models.health import (
 from ape.models.kalshi import (
     ActiveMarketResponse,
     KalshiStatusResponse,
+    KalshiWsProtocolRecentResponse,
+    KalshiWsProtocolSummaryResponse,
     KalshiWsStatusResponse,
     active_market_response,
     kalshi_status_response,
+    kalshi_ws_protocol_recent_response,
+    kalshi_ws_protocol_summary_response,
     kalshi_ws_status_response,
 )
 from ape.models.reference import (
@@ -126,6 +134,25 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.get("/ws/status", response_model=KalshiWsStatusResponse)
     def websocket_status() -> KalshiWsStatusResponse:
         return kalshi_ws_status_response(build_kalshi_ws_status(settings))
+
+    @app.get("/ws/protocol/recent", response_model=KalshiWsProtocolRecentResponse)
+    def websocket_protocol_recent(
+        limit: int = Query(default=200, ge=1, le=500),
+    ) -> KalshiWsProtocolRecentResponse:
+        return kalshi_ws_protocol_recent_response(
+            build_kalshi_ws_protocol_recent(settings, limit=limit)
+        )
+
+    @app.get("/ws/protocol/summary", response_model=KalshiWsProtocolSummaryResponse)
+    def websocket_protocol_summary(
+        window_seconds: int = Query(default=1800, ge=1, le=86_400),
+    ) -> KalshiWsProtocolSummaryResponse:
+        return kalshi_ws_protocol_summary_response(
+            build_kalshi_ws_protocol_summary(
+                settings,
+                window_seconds=window_seconds,
+            )
+        )
 
     @app.get("/reference/brti/status", response_model=BrtiReferenceStatusResponse)
     def brti_reference_status() -> BrtiReferenceStatusResponse:

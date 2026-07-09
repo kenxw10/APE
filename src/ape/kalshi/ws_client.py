@@ -86,6 +86,13 @@ def build_update_subscription_message(
     }
 
 
+def build_list_subscriptions_message(*, request_id: int) -> dict[str, Any]:
+    return {
+        "id": request_id,
+        "cmd": "list_subscriptions",
+    }
+
+
 async def connect_websocket(
     *,
     endpoint: str,

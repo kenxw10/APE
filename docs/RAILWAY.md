@@ -2,10 +2,22 @@
 
 PR 3 adds Railway deployment scaffolding for APE in observer-only mode.
 
-APE should be deployed as two Railway services from the same GitHub repo:
+APE started as two Railway services from the same GitHub repo:
 
 - API service
 - Always-on worker service
+
+After PR 9f, production should use dedicated worker services instead of the
+old all-in-one worker:
+
+- `ape-api`
+- `ape-market-worker`
+- `ape-reference-worker`
+- `ape-strategy-worker`
+- `ape-maintenance-worker`
+
+The all-in-one worker remains available only for local development and small
+test deployments with `python -m ape.worker --role all`.
 
 Railway Postgres should be attached to the project and should provide `DATABASE_URL`.
 
@@ -35,13 +47,18 @@ After PR 8a merges, storage retention is still disabled by default. Enable it on
 
 After PR 9 merges, dry-run remains disabled by default. Enable it only on the Railway worker service with `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`, `STRATEGY_DRY_RUN_ENABLED=true`, `TRADING_ENABLED=false`, and `EXECUTE=false` after market WebSocket, BRTI, strategy observer, and storage retention are healthy. Dry-run writes hypothetical simulated positions/events only; it does not place orders, paper trade, live trade, read balances, or use private/user channels.
 
+After PR 9f merges, production workers are split by role. The role is selected
+with `--role` or `APE_WORKER_ROLE`; the CLI flag wins when both are set. A
+role-specific worker only starts loops for that role, even if unrelated env
+flags are accidentally enabled.
+
 ## Create Railway Project
 
 1. Create a new Railway project for APE.
 2. Add Railway Postgres.
 3. Create the API service from `https://github.com/kenxw10/APE`.
-4. Create the worker service from the same GitHub repo.
-5. Link both services to the Railway Postgres variables so each service receives `DATABASE_URL`.
+4. Create the four worker services from the same GitHub repo.
+5. Link all services to the Railway Postgres variables so each service receives `DATABASE_URL`.
 
 ## API Service
 
@@ -70,6 +87,8 @@ Useful API endpoints:
 /kalshi/status
 /markets/active
 /ws/status
+/ws/protocol/recent
+/ws/protocol/summary
 /reference/brti/status
 /reference/brti/latest
 /reference/brti/series
@@ -86,40 +105,57 @@ Useful API endpoints:
 
 `/ready` should return `ready` only when safety is safe and database connectivity works.
 
-## Worker Service
+## Worker Services
 
-Set the worker service start command:
+Use one dedicated Railway worker service for each production role. The role can
+also be supplied with `APE_WORKER_ROLE`, but the start command makes the owner
+of each process explicit.
 
-```text
-python -m scripts.railway_start_worker
-```
-
-The helper runs:
+Market data worker:
 
 ```text
-python -m ape.db.migrations
-python -m ape.worker.main
+python -m ape.worker --role market-data
 ```
 
-The API and worker helpers both run the same idempotent migrations before their service starts. The migration runner takes a PostgreSQL advisory transaction lock and uses idempotent schema/version writes so simultaneous API and worker restarts serialize safely. Prefer redeploying the API first for schema-changing PRs, but the worker is protected if it starts first or restarts during a deploy. If migrations fail, the worker does not start.
+Reference BRTI worker:
 
-The worker is an always-on observer process. Do not configure a Railway cron job for it.
+```text
+python -m ape.worker --role reference-brti
+```
 
-When `KALSHI_WS_ENABLED=false`, the worker records heartbeat-only diagnostics. When `KALSHI_WS_ENABLED=true`, the worker owns the observer-only Kalshi WebSocket collector for the active BTC15 market.
+Strategy worker:
 
-When `KALSHI_CFBENCHMARKS_ENABLED=true`, the worker also subscribes to Kalshi's authenticated `cfbenchmarks_value` channel with `index_ids=["BRTI"]` and stores observer-only reference ticks in `reference_ticks`. By default this runs on a dedicated BRTI WebSocket connection so BTC15 market rollover/resubscribe does not disconnect the reference feed. This does not add strategy, paper trading, live trading, orders, private channels, or execution.
+```text
+python -m ape.worker --role strategy
+```
 
-When `STRATEGY_OBSERVER_ENABLED=true`, the worker also evaluates the observer-only strategy ledger from persisted database rows. It reads active market metadata, BRTI ticks, Kalshi orderbook snapshots, and public trades; then writes a diagnostic row to `strategy_decisions`. It does not call Kalshi REST, subscribe to private channels, place orders, paper trade, live trade, or emit enter/fill/execution states.
+Maintenance worker:
 
-When `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`, and `STRATEGY_DRY_RUN_ENABLED=true`, the same strategy worker evaluates the dry-run momentum gates and may write hypothetical rows to `strategy_dry_run_positions` and `strategy_dry_run_events`. This is not paper trading: there are no Kalshi order API calls, no account balance reads, no private/user WebSocket channels, no real fills, and no execution controls.
+```text
+python -m ape.worker --role maintenance
+```
 
-When `STORAGE_RETENTION_ENABLED=true`, the worker also runs the storage retention loop. It strips old raw payload JSON and deletes old observer rows in bounded chunks, then records each run in `storage_retention_runs` and worker heartbeat metadata. A failed retention run should not stop market WebSocket, BRTI, or strategy observer loops.
+Run database migrations through the API startup helper or `python -m scripts.railway_migrate` before starting role-specific workers on schema-changing deploys. The migration runner takes a PostgreSQL advisory transaction lock and uses idempotent schema/version writes so simultaneous starts serialize safely.
 
-Worker feed liveness is component-scoped after PR 9c. The market collector writes `ape-worker.market_ws`, the BRTI collector writes `ape-worker.reference_brti`, the strategy observer writes `ape-worker.strategy`, and storage retention writes `ape-worker.storage_retention`. The legacy `ape-worker` aggregate row is still written for compatibility, but `/ws/status`, `/reference/brti/status`, and strategy readiness prefer the component rows and show `feed_liveness_legacy_aggregate_fallback` only when falling back to the old aggregate.
+Each worker is an always-on process. Do not configure a Railway cron job for these services.
+
+The market data worker owns only the observer-only Kalshi public market WebSocket collector for the active BTC15 market. It may resolve the active BTC15 market, subscribe to `orderbook_delta`, `ticker`, and `trade`, persist market metadata, orderbook snapshots, public trades, market heartbeats, and Kalshi WebSocket protocol events. It does not run BRTI, strategy evaluation, dry-run ledger logic, or storage retention.
+
+The reference worker owns only Kalshi's authenticated `cfbenchmarks_value` channel with `index_ids=["BRTI"]` and stores observer-only reference ticks in `reference_ticks`. It does not run market WebSockets, strategy evaluation, dry-run ledger logic, or storage retention.
+
+The strategy worker reads persisted market, orderbook, public trade, reference, and component heartbeat rows only. It evaluates strategy diagnostics and dry-run hypothetical ledger rows when enabled. It does not open Kalshi WebSocket connections, call order APIs, read balances, subscribe to private channels, paper trade, or live trade.
+
+The maintenance worker runs storage retention only. It does not run market WebSockets, BRTI, strategy evaluation, or dry-run ledger logic.
+
+When `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`, and `STRATEGY_DRY_RUN_ENABLED=true`, the strategy worker may write hypothetical rows to `strategy_dry_run_positions` and `strategy_dry_run_events`. This is not paper trading: there are no Kalshi order API calls, no account balance reads, no private/user WebSocket channels, no real fills, and no execution controls.
+
+Worker feed liveness is component-scoped. The market collector writes `ape-worker.market_data`, the BRTI collector writes `ape-worker.reference_brti`, the strategy observer writes `ape-worker.strategy`, and storage retention writes `ape-worker.maintenance`. The legacy `ape-worker` aggregate row and older component aliases remain only for backward compatibility; `/ws/status`, `/reference/brti/status`, and strategy readiness prefer the role-specific component rows.
 
 After PR 9d, market feed readiness separates WebSocket transport liveness from market-data quietness. The market collector proves transport with a client ping/pong, records `last_market_data_message_at` separately, and exposes transport, subscription, active ticker, snapshot, sequence, quiet-data, snapshot-source, and recovery-action fields through `/ws/status` and strategy diagnostics. A quiet public market-data stream may be carried forward as a warning only while the transport, subscription, ticker, snapshot, and sequence state are healthy and the latest book remains inside the hard carry-forward cap. BRTI remains stricter because valid BRTI ticks are expected roughly once per second.
 
 After PR 9e, market feed recovery adds bounded subscription and rollover diagnostics. The worker waits for confirmed Kalshi orderbook subscription SIDs before requesting snapshots, escalates missing or timed-out SIDs to a market WebSocket reconnect, requests snapshots for uninitialized books and quiet-but-live streams, and records recovery fields including `market_feed_state`, subscription recovery count/reason/action/result, snapshot resync count/result, rollover recovery count, transport reconnect count, unrecovered blocker count, and recovery attempt age. These diagnostics remain read-only and do not add paper/live trading, order placement, private channels, account reads, credentials, or dashboard trading controls.
+
+After PR 9f, the market worker also records raw Kalshi WebSocket protocol evidence in `kalshi_ws_protocol_events`. `/ws/status` exposes worker role, connection ID, subscription reconciliation, confirmed SIDs, list-subscription results, in-flight snapshot state, market DB writer queue metrics, recent protocol error count, reconnect reason, and close details. `/ws/protocol/recent` and `/ws/protocol/summary` expose read-only subscribe/update/list/ping/pong/close/error evidence for production validation.
 
 For `/ws/status`, `last_error_type` and `last_error_message` describe a current unresolved worker error. A successful current orderbook or trade database write clears old recovered errors so stale startup failures do not keep the status page red.
 
@@ -152,6 +188,144 @@ DB_POOL_SIZE=5
 DB_MAX_OVERFLOW=10
 DB_STATEMENT_TIMEOUT_MS=5000
 ```
+
+## Dedicated Worker Environment Matrix After PR 9f
+
+Use these service-specific groups for production validation. Keep Kalshi
+credentials and worker-loop variables out of Vercel.
+
+`ape-api`:
+
+```text
+DATABASE_URL=<provided by Railway Postgres>
+ENV=railway
+LOG_LEVEL=INFO
+DB_ECHO=false
+DB_POOL_SIZE=5
+DB_MAX_OVERFLOW=10
+DB_STATEMENT_TIMEOUT_MS=5000
+APP_MODE=DRY_RUN
+TRADING_ENABLED=false
+EXECUTE=false
+```
+
+Kalshi REST credentials may remain on the API only for read-only
+`/kalshi/status` and `/markets/active` diagnostics if that is the current
+deployment choice. Do not put `KALSHI_WS_*`, `KALSHI_CFBENCHMARKS_*`, strategy
+worker loop settings, or storage retention loop settings on the API unless a
+future PR explicitly needs a read-only config display.
+
+`ape-market-worker`:
+
+```text
+DATABASE_URL=<provided by Railway Postgres>
+ENV=railway
+LOG_LEVEL=INFO
+DB_ECHO=false
+DB_POOL_SIZE=5
+DB_MAX_OVERFLOW=10
+DB_STATEMENT_TIMEOUT_MS=5000
+KALSHI_API_KEY_ID=<Railway secret>
+KALSHI_PRIVATE_KEY=<Railway secret>
+KALSHI_API_BASE_URL=https://external-api.kalshi.com/trade-api/v2
+KALSHI_ENV=prod
+KALSHI_BTC15_SERIES_TICKER=KXBTC15M
+KALSHI_REST_TIMEOUT_SECONDS=10
+KALSHI_RESOLVER_PARSER_VERSION=btc15_resolver_v1
+KALSHI_WS_BASE_URL=wss://external-api-ws.kalshi.com/trade-api/ws/v2
+KALSHI_WS_ENABLED=true
+KALSHI_WS_CONNECT_TIMEOUT_SECONDS=10
+KALSHI_WS_HEARTBEAT_TIMEOUT_SECONDS=30
+KALSHI_WS_RECONNECT_SECONDS=5
+KALSHI_WS_MAX_RECONNECT_SECONDS=60
+KALSHI_WS_SUBSCRIBE_ORDERBOOK=true
+KALSHI_WS_SUBSCRIBE_TICKER=true
+KALSHI_WS_SUBSCRIBE_TRADES=true
+APE_WORKER_ROLE=market-data
+APP_MODE=OBSERVER
+TRADING_ENABLED=false
+EXECUTE=false
+```
+
+`APP_MODE=DRY_RUN` is also safe on `ape-market-worker`; the `market-data` role
+still prevents strategy and dry-run loops from starting.
+
+`ape-reference-worker`:
+
+```text
+DATABASE_URL=<provided by Railway Postgres>
+ENV=railway
+LOG_LEVEL=INFO
+DB_ECHO=false
+DB_POOL_SIZE=5
+DB_MAX_OVERFLOW=10
+DB_STATEMENT_TIMEOUT_MS=5000
+KALSHI_API_KEY_ID=<Railway secret>
+KALSHI_PRIVATE_KEY=<Railway secret>
+KALSHI_WS_BASE_URL=wss://external-api-ws.kalshi.com/trade-api/ws/v2
+KALSHI_CFBENCHMARKS_ENABLED=true
+KALSHI_CFBENCHMARKS_INDEX_IDS=BRTI
+KALSHI_CFBENCHMARKS_STALE_AFTER_SECONDS=3
+KALSHI_CFBENCHMARKS_MAX_SOURCE_AGE_MS=3000
+KALSHI_CFBENCHMARKS_SUBSCRIBE_ON_WORKER=true
+KALSHI_CFBENCHMARKS_DEDICATED_CONNECTION=true
+KALSHI_CFBENCHMARKS_TRANSPORT_STALE_AFTER_SECONDS=5
+KALSHI_CFBENCHMARKS_PERSISTENCE_STALE_AFTER_SECONDS=5
+KALSHI_CFBENCHMARKS_SOURCE_AGE_WARN_MS=45000
+KALSHI_CFBENCHMARKS_KALSHI_RECEIVED_WARN_MS=10000
+KALSHI_CFBENCHMARKS_TRADE_FRESH_MS=2000
+APE_WORKER_ROLE=reference-brti
+TRADING_ENABLED=false
+EXECUTE=false
+```
+
+`ape-strategy-worker`:
+
+```text
+DATABASE_URL=<provided by Railway Postgres>
+ENV=railway
+LOG_LEVEL=INFO
+DB_ECHO=false
+DB_POOL_SIZE=5
+DB_MAX_OVERFLOW=10
+DB_STATEMENT_TIMEOUT_MS=5000
+APP_MODE=DRY_RUN
+STRATEGY_OBSERVER_ENABLED=true
+STRATEGY_DRY_RUN_ENABLED=true
+STRATEGY_ID=btc15_momentum_v1
+TRADING_ENABLED=false
+EXECUTE=false
+APE_WORKER_ROLE=strategy
+```
+
+Add the remaining `STRATEGY_*` readiness and dry-run variables from the dry-run
+checkpoint below. The strategy worker should not need `KALSHI_WS_*` or
+`KALSHI_CFBENCHMARKS_*` worker-loop variables to run because it reads persisted
+database rows and component heartbeats.
+
+`ape-maintenance-worker`:
+
+```text
+DATABASE_URL=<provided by Railway Postgres>
+ENV=railway
+LOG_LEVEL=INFO
+DB_ECHO=false
+DB_POOL_SIZE=5
+DB_MAX_OVERFLOW=10
+DB_STATEMENT_TIMEOUT_MS=5000
+STORAGE_RETENTION_ENABLED=true
+STORAGE_RETENTION_INTERVAL_SECONDS=300
+STORAGE_RETENTION_BATCH_SIZE=5000
+STORAGE_RETENTION_MAX_RUN_SECONDS=20
+STORAGE_RETENTION_DRY_RUN=false
+STORAGE_RETENTION_KALSHI_WS_PROTOCOL_EVENTS_SECONDS=21600
+APE_WORKER_ROLE=maintenance
+TRADING_ENABLED=false
+EXECUTE=false
+```
+
+Add the remaining `STORAGE_RETENTION_*` retention windows from the storage
+retention checkpoint below.
 
 ## Kalshi Credential Checkpoint After PR 5
 
@@ -314,7 +488,7 @@ KALSHI_CFBENCHMARKS_INDEX_IDS=BRTI
 
 The API service may keep `STRATEGY_OBSERVER_ENABLED=false`; `/strategy/status` reads latest decision rows and worker heartbeat metadata. Do not add strategy observer env vars, WebSocket settings, BRTI env vars, or Kalshi credentials to Vercel.
 
-PR 9b/9c/9d liveness note: orderbook and BRTI feeds are event-driven, but they do not use identical readiness rules. Market orderbook readiness separates transport, subscription, active ticker, snapshot, sequence, and quiet-data state; quiet market data may warn with `kalshi_orderbook_data_quiet_carried_forward` while the latest book is safely inside the carry-forward cap. BRTI is stricter: missing valid BRTI ticks beyond the configured timeout still block with `REFERENCE_STALE` and reconnect diagnostics. A newer strategy or retention heartbeat must not make market/BRTI feed liveness stale because strategy reads `ape-worker.market_ws` and `ape-worker.reference_brti` directly.
+PR 9b/9c/9d/9f liveness note: orderbook and BRTI feeds are event-driven, but they do not use identical readiness rules. Market orderbook readiness separates transport, subscription, active ticker, snapshot, sequence, and quiet-data state; quiet market data may warn with `kalshi_orderbook_data_quiet_carried_forward` while the latest book is safely inside the carry-forward cap. BRTI is stricter: missing valid BRTI ticks beyond the configured timeout still block with `REFERENCE_STALE` and reconnect diagnostics. A newer strategy or retention heartbeat must not make market/BRTI feed liveness stale because strategy reads `ape-worker.market_data` and `ape-worker.reference_brti` directly.
 
 After enabling the strategy observer on the worker, redeploy the worker and validate:
 
@@ -355,6 +529,7 @@ STORAGE_RETENTION_PUBLIC_TRADES_SECONDS=86400
 STORAGE_RETENTION_REFERENCE_TICKS_SECONDS=86400
 STORAGE_RETENTION_WORKER_HEARTBEATS_SECONDS=21600
 STORAGE_RETENTION_STRATEGY_DECISIONS_SECONDS=1209600
+STORAGE_RETENTION_KALSHI_WS_PROTOCOL_EVENTS_SECONDS=21600
 STORAGE_RETENTION_DRY_RUN_POSITIONS_SECONDS=2592000
 STORAGE_RETENTION_DRY_RUN_EVENTS_SECONDS=2592000
 STORAGE_RETENTION_MARKETS_SECONDS=2592000

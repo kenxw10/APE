@@ -24,6 +24,7 @@ from ape.repositories.strategy_decisions import StrategyDecisionsRepository
 from ape.repositories.strategy_dry_run import StrategyDryRunRepository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import assess_startup_safety
+from ape.strategy import observer as observer_module
 from ape.strategy.observer import (
     STATE_CONTRACT_NOT_CONFIRMED,
     STATE_ENTER_DRY_RUN,
@@ -83,6 +84,63 @@ def test_strategy_observer_evaluates_observer_only_market(session) -> None:
     assert decision.measurements["desired_side_ask"] == "0.62"
     assert decision.measurements["config"]["strategy_max_spread_cents"] == 4
     assert "ENTER" not in decision.decision_state
+
+
+def test_strategy_blocks_on_market_protocol_readiness_failures() -> None:
+    config = load_config({})
+    base_metadata = {
+        "connection_state": "subscribed",
+        "active_market_ticker": "KXBTC15M-TEST",
+        "orderbook_initialized": True,
+        "market_recovery_attempt_in_progress": False,
+        "subscription_reconciled": True,
+        "orderbook_sid_confirmed": True,
+        "in_flight_snapshot_request": False,
+        "db_writer_queue_depth": 0,
+        "protocol_event_recent_error_count": 0,
+    }
+
+    def stale_reason(metadata):
+        return observer_module._strategy_orderbook_stale_reason(
+            config=config,
+            orderbook=object(),
+            orderbook_age_ms=2500,
+            orderbook_worker_metadata=metadata,
+            orderbook_stream_age_ms=100,
+            orderbook_stream_connection_state="subscribed",
+            orderbook_stream_active_market_ticker="KXBTC15M-TEST",
+            orderbook_stream_warnings=[],
+            orderbook_stream_blockers=[],
+            market_feed_transport_state="healthy",
+            market_feed_subscription_state="subscribed",
+            market_feed_snapshot_state="initialized",
+            market_feed_active_ticker_state="match",
+            market_feed_sequence_state="clean",
+            market_ticker="KXBTC15M-TEST",
+        )
+
+    assert stale_reason({**base_metadata, "subscription_reconciled": False}) == (
+        "kalshi_orderbook_subscription_unreconciled"
+    )
+    assert stale_reason({**base_metadata, "orderbook_sid_confirmed": False}) == (
+        "kalshi_orderbook_orderbook_sid_unconfirmed"
+    )
+    assert stale_reason(
+        {
+            **base_metadata,
+            "in_flight_snapshot_request": True,
+            "snapshot_request_age_ms": 11_000,
+        }
+    ) == "kalshi_orderbook_snapshot_resync_timeout"
+    assert stale_reason({**base_metadata, "db_writer_queue_depth": 600}) == (
+        "kalshi_orderbook_db_writer_backpressure"
+    )
+    assert stale_reason({**base_metadata, "orderbook_persistence_pending": True}) == (
+        "kalshi_orderbook_db_writer_backpressure"
+    )
+    assert stale_reason({**base_metadata, "protocol_event_recent_error_count": 1}) == (
+        "kalshi_orderbook_protocol_errors"
+    )
 
 
 def test_strategy_dry_run_records_hypothetical_entry_and_event(tmp_path) -> None:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
+import os
 import threading
 from datetime import UTC, datetime
 
@@ -24,6 +26,18 @@ from ape.worker.services import (
 )
 
 LOGGER = logging.getLogger(__name__)
+WORKER_ROLE_ALL = "all"
+WORKER_ROLE_MARKET_DATA = "market-data"
+WORKER_ROLE_REFERENCE_BRTI = "reference-brti"
+WORKER_ROLE_STRATEGY = "strategy"
+WORKER_ROLE_MAINTENANCE = "maintenance"
+WORKER_ROLES = {
+    WORKER_ROLE_ALL,
+    WORKER_ROLE_MARKET_DATA,
+    WORKER_ROLE_REFERENCE_BRTI,
+    WORKER_ROLE_STRATEGY,
+    WORKER_ROLE_MAINTENANCE,
+}
 
 
 def configure_logging(log_level: str) -> None:
@@ -38,7 +52,9 @@ def run_worker(
     config: AppConfig,
     stop_event: threading.Event | None = None,
     max_iterations: int | None = None,
+    worker_role: str | None = None,
 ) -> None:
+    role = _normalize_worker_role(worker_role or config.ape_worker_role)
     safety = assess_startup_safety(config)
     assert_startup_safe(safety)
     started_at = datetime.now(UTC)
@@ -50,12 +66,13 @@ def run_worker(
     try:
         LOGGER.info(
             "Starting ape-worker env=%s app_mode=%s safety=%s db_configured=%s "
-            "ws_enabled=%s brti_enabled=%s strategy_observer_enabled=%s "
+            "role=%s ws_enabled=%s brti_enabled=%s strategy_observer_enabled=%s "
             "strategy_dry_run_enabled=%s storage_retention_enabled=%s",
             config.env,
             config.app_mode.value,
             "safe" if safety.is_safe else "blocked",
             bool(config.database_url),
+            role,
             config.kalshi_ws_enabled,
             config.kalshi_cfbenchmarks_enabled,
             config.strategy_observer_enabled,
@@ -64,6 +81,18 @@ def run_worker(
         )
 
         event = stop_event or threading.Event()
+        if role != WORKER_ROLE_ALL:
+            _run_role_worker(
+                role=role,
+                config=config,
+                safety=safety,
+                session_factory=session_factory,
+                started_at=started_at,
+                event=event,
+                max_iterations=max_iterations,
+            )
+            return
+
         if (
             config.kalshi_ws_enabled
             or _reference_worker_enabled(config)
@@ -256,15 +285,96 @@ def _reference_worker_enabled(config: AppConfig) -> bool:
     )
 
 
+def _run_role_worker(
+    *,
+    role: str,
+    config: AppConfig,
+    safety,
+    session_factory,
+    started_at: datetime,
+    event: threading.Event,
+    max_iterations: int | None,
+) -> None:
+    tasks = []
+    if role == WORKER_ROLE_MARKET_DATA:
+        collector = KalshiWsCollector(
+            config=config,
+            safety=safety,
+            session_factory=session_factory,
+            started_at=started_at,
+        )
+        tasks.append(
+            collector.run_market_data(stop_event=event, max_cycles=max_iterations)
+        )
+    elif role == WORKER_ROLE_REFERENCE_BRTI:
+        collector = KalshiWsCollector(
+            config=config,
+            safety=safety,
+            session_factory=session_factory,
+            started_at=started_at,
+        )
+        tasks.append(
+            collector.run_reference_brti(stop_event=event, max_cycles=max_iterations)
+        )
+    elif role == WORKER_ROLE_STRATEGY:
+        if config.strategy_observer_enabled:
+            observer = StrategyObserver(
+                config=config,
+                safety=safety,
+                session_factory=session_factory,
+                started_at=started_at,
+            )
+            tasks.append(observer.run(stop_event=event, max_iterations=max_iterations))
+    elif role == WORKER_ROLE_MAINTENANCE:
+        if config.storage_retention_enabled:
+            retention = StorageRetentionWorker(
+                config=config,
+                safety=safety,
+                session_factory=session_factory,
+                started_at=started_at,
+            )
+            tasks.append(retention.run(stop_event=event, max_iterations=max_iterations))
+
+    if not tasks:
+        LOGGER.info("APE worker role=%s has no enabled eligible loop.", role)
+        return
+
+    LOGGER.info("APE worker running role=%s with %s eligible loop(s).", role, len(tasks))
+    asyncio.run(_run_enabled_observer_tasks(*tasks))
+
+
 async def _run_enabled_observer_tasks(*tasks) -> None:
     await asyncio.gather(*tasks)
 
 
-def main() -> int:
+def _normalize_worker_role(raw_role: str) -> str:
+    normalized = raw_role.strip().lower().replace("_", "-")
+    if normalized not in WORKER_ROLES:
+        allowed = ", ".join(sorted(WORKER_ROLES))
+        raise ConfigError(f"Invalid worker role {raw_role!r}. Expected one of: {allowed}.")
+    return normalized
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run an APE worker role.")
+    parser.add_argument(
+        "--role",
+        choices=sorted(WORKER_ROLES),
+        help="Worker role. Overrides APE_WORKER_ROLE when provided.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
     try:
-        config = load_config()
+        args = _parse_args(argv)
+        config_env = None
+        if args.role is not None:
+            config_env = dict(os.environ)
+            config_env["APE_WORKER_ROLE"] = args.role
+        config = load_config(config_env)
         configure_logging(config.log_level)
-        run_worker(config)
+        run_worker(config, worker_role=args.role)
     except ConfigError as exc:
         LOGGER.error("Configuration error: %s", exc)
         return 1

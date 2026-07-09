@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from ape.config import load_config
 from ape.db.migrations import run_migrations
 from ape.db.models import (
+    KalshiWsProtocolEvent,
     Market,
     OrderbookSnapshot,
     PublicTrade,
@@ -21,6 +22,7 @@ from ape.db.models import (
 )
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.repositories.inputs import (
+    KalshiWsProtocolEventInput,
     MarketInput,
     OrderbookSnapshotInput,
     PublicTradeInput,
@@ -29,6 +31,7 @@ from ape.repositories.inputs import (
     StrategyDryRunPositionInput,
     WorkerHeartbeatInput,
 )
+from ape.repositories.kalshi_ws_protocol import KalshiWsProtocolEventRepository
 from ape.repositories.markets import MarketsRepository
 from ape.repositories.orderbook import OrderbookRepository
 from ape.repositories.public_trades import PublicTradesRepository
@@ -76,6 +79,7 @@ def test_storage_retention_deletes_old_rows_in_chunks(retention_db) -> None:
     assert result.deleted_rows["reference_ticks"] == 1
     assert result.deleted_rows["worker_heartbeats"] == 1
     assert result.deleted_rows["strategy_decisions"] == 1
+    assert result.deleted_rows["kalshi_ws_protocol_events"] == 1
     assert result.deleted_rows["markets"] == 2
 
     with session_factory() as session:
@@ -84,6 +88,7 @@ def test_storage_retention_deletes_old_rows_in_chunks(retention_db) -> None:
         assert session.scalar(select(func.count()).select_from(ReferenceTick)) == 1
         assert session.scalar(select(func.count()).select_from(WorkerHeartbeat)) == 1
         assert session.scalar(select(func.count()).select_from(StrategyDecision)) == 1
+        assert session.scalar(select(func.count()).select_from(KalshiWsProtocolEvent)) == 1
         assert session.scalar(select(func.count()).select_from(Market)) == 1
         audit_row = session.scalar(
             select(StorageRetentionRun).where(StorageRetentionRun.run_id == result.run_id)
@@ -91,6 +96,7 @@ def test_storage_retention_deletes_old_rows_in_chunks(retention_db) -> None:
         assert audit_row is not None
         assert audit_row.status == RETENTION_SUCCESS
         assert audit_row.deleted_rows["orderbook_snapshots"] == 1
+        assert audit_row.deleted_rows["kalshi_ws_protocol_events"] == 1
         assert audit_row.deleted_rows["markets"] == 2
 
 
@@ -414,6 +420,23 @@ def _insert_all_retained_tables(session, now: datetime) -> None:
             app_mode="OBSERVER",
         )
     )
+    protocol_repository = KalshiWsProtocolEventRepository(session)
+    protocol_repository.insert_event(
+        KalshiWsProtocolEventInput(
+            created_at=now - timedelta(seconds=120),
+            event_type="orderbook_delta_received",
+            worker_service="ape-worker.market_data",
+            worker_role="market-data",
+        )
+    )
+    protocol_repository.insert_event(
+        KalshiWsProtocolEventInput(
+            created_at=now - timedelta(seconds=10),
+            event_type="orderbook_delta_received",
+            worker_service="ape-worker.market_data",
+            worker_role="market-data",
+        )
+    )
     MarketsRepository(session).upsert_market(
         MarketInput(
             market_ticker="KXBTC15M-OLD",
@@ -462,6 +485,7 @@ def _retention_config(
             "STORAGE_RETENTION_REFERENCE_TICKS_SECONDS": str(row_seconds),
             "STORAGE_RETENTION_WORKER_HEARTBEATS_SECONDS": str(row_seconds),
             "STORAGE_RETENTION_STRATEGY_DECISIONS_SECONDS": str(row_seconds),
+            "STORAGE_RETENTION_KALSHI_WS_PROTOCOL_EVENTS_SECONDS": str(row_seconds),
             "STORAGE_RETENTION_DRY_RUN_POSITIONS_SECONDS": str(row_seconds),
             "STORAGE_RETENTION_DRY_RUN_EVENTS_SECONDS": str(row_seconds),
             "STORAGE_RETENTION_MARKETS_SECONDS": str(row_seconds),

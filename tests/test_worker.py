@@ -4,6 +4,7 @@ import logging
 
 from sqlalchemy import func, select
 
+import ape.worker.main as worker_main
 from ape.config import load_config
 from ape.db.migrations import run_migrations
 from ape.db.models import StorageRetentionRun, WorkerHeartbeat
@@ -30,6 +31,23 @@ def test_configure_logging_reapplies_requested_level() -> None:
         for handler in previous_handlers:
             root_logger.addHandler(handler)
         root_logger.setLevel(previous_level)
+
+
+def test_worker_main_cli_role_overrides_invalid_env_role(monkeypatch) -> None:
+    captured: dict[str, str | None] = {}
+
+    def fake_run_worker(config, *, worker_role=None) -> None:
+        captured["config_role"] = config.ape_worker_role
+        captured["worker_role"] = worker_role
+
+    monkeypatch.setenv("APE_WORKER_ROLE", "stale-invalid-role")
+    monkeypatch.setattr(worker_main, "run_worker", fake_run_worker)
+
+    assert worker_main.main(["--role", "market-data"]) == 0
+    assert captured == {
+        "config_role": "market-data",
+        "worker_role": "market-data",
+    }
 
 
 def test_worker_disabled_websocket_records_idle_heartbeat(tmp_path) -> None:
@@ -117,3 +135,138 @@ def test_worker_enabled_storage_retention_runs_periodic_task(tmp_path) -> None:
             assert run_count == 1
     finally:
         engine.dispose()
+
+
+def test_worker_market_data_role_only_starts_market_loop(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class FakeCollector:
+        def __init__(self, **_kwargs) -> None:
+            calls.append("collector_init")
+
+        async def run_market_data(self, **_kwargs) -> None:
+            calls.append("market")
+
+        async def run_reference_brti(self, **_kwargs) -> None:
+            calls.append("reference")
+
+    class FakeStrategyObserver:
+        def __init__(self, **_kwargs) -> None:
+            calls.append("strategy_init")
+
+    class FakeRetentionWorker:
+        def __init__(self, **_kwargs) -> None:
+            calls.append("retention_init")
+
+    monkeypatch.setattr(worker_main, "KalshiWsCollector", FakeCollector)
+    monkeypatch.setattr(worker_main, "StrategyObserver", FakeStrategyObserver)
+    monkeypatch.setattr(worker_main, "StorageRetentionWorker", FakeRetentionWorker)
+
+    config = load_config(
+        {
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STORAGE_RETENTION_ENABLED": "true",
+        }
+    )
+
+    run_worker(config, max_iterations=1, worker_role="market-data")
+
+    assert calls == ["collector_init", "market"]
+
+
+def test_worker_reference_role_only_starts_brti_loop(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class FakeCollector:
+        def __init__(self, **_kwargs) -> None:
+            calls.append("collector_init")
+
+        async def run_market_data(self, **_kwargs) -> None:
+            calls.append("market")
+
+        async def run_reference_brti(self, **_kwargs) -> None:
+            calls.append("reference")
+
+    monkeypatch.setattr(worker_main, "KalshiWsCollector", FakeCollector)
+
+    config = load_config(
+        {
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STORAGE_RETENTION_ENABLED": "true",
+        }
+    )
+
+    run_worker(config, max_iterations=1, worker_role="reference-brti")
+
+    assert calls == ["collector_init", "reference"]
+
+
+def test_worker_strategy_role_starts_no_websocket_collector(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class FakeCollector:
+        def __init__(self, **_kwargs) -> None:
+            raise AssertionError("strategy role must not start Kalshi WebSockets")
+
+    class FakeStrategyObserver:
+        def __init__(self, **_kwargs) -> None:
+            calls.append("strategy_init")
+
+        async def run(self, **_kwargs) -> None:
+            calls.append("strategy")
+
+    monkeypatch.setattr(worker_main, "KalshiWsCollector", FakeCollector)
+    monkeypatch.setattr(worker_main, "StrategyObserver", FakeStrategyObserver)
+
+    config = load_config(
+        {
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STORAGE_RETENTION_ENABLED": "true",
+        }
+    )
+
+    run_worker(config, max_iterations=1, worker_role="strategy")
+
+    assert calls == ["strategy_init", "strategy"]
+
+
+def test_worker_maintenance_role_only_starts_retention(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class FakeCollector:
+        def __init__(self, **_kwargs) -> None:
+            raise AssertionError("maintenance role must not start Kalshi WebSockets")
+
+    class FakeStrategyObserver:
+        def __init__(self, **_kwargs) -> None:
+            raise AssertionError("maintenance role must not start strategy")
+
+    class FakeRetentionWorker:
+        def __init__(self, **_kwargs) -> None:
+            calls.append("retention_init")
+
+        async def run(self, **_kwargs) -> None:
+            calls.append("retention")
+
+    monkeypatch.setattr(worker_main, "KalshiWsCollector", FakeCollector)
+    monkeypatch.setattr(worker_main, "StrategyObserver", FakeStrategyObserver)
+    monkeypatch.setattr(worker_main, "StorageRetentionWorker", FakeRetentionWorker)
+
+    config = load_config(
+        {
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_CFBENCHMARKS_ENABLED": "true",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STORAGE_RETENTION_ENABLED": "true",
+        }
+    )
+
+    run_worker(config, max_iterations=1, worker_role="maintenance")
+
+    assert calls == ["retention_init", "retention"]

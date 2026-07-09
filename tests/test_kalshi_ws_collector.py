@@ -14,13 +14,15 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from ape.config import load_config
 from ape.db.migrations import run_migrations
-from ape.db.models import WorkerHeartbeat
+from ape.db.models import KalshiWsProtocolEvent, OrderbookSnapshot, WorkerHeartbeat
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.kalshi.reference_messages import BRTI_SOURCE
 from ape.kalshi.resolver import ResolverResult, ResolverState
-from ape.kalshi.ws_collector import KalshiWsCollector
+from ape.kalshi.ws_collector import KalshiWsCollector, _market_reconnect_result
+from ape.kalshi.ws_messages import parse_ws_payload
+from ape.kalshi.ws_state import OrderbookState
 from ape.kalshi.ws_status import build_kalshi_ws_status
-from ape.repositories.inputs import MarketInput, WorkerHeartbeatInput
+from ape.repositories.inputs import MarketInput, OrderbookSnapshotInput, WorkerHeartbeatInput
 from ape.repositories.orderbook import OrderbookRepository
 from ape.repositories.public_trades import PublicTradesRepository
 from ape.repositories.reference_ticks import ReferenceTicksRepository
@@ -33,6 +35,10 @@ from ape.worker.services import (
 )
 
 NOW = datetime(2026, 7, 5, 14, 35, tzinfo=UTC)
+
+
+def test_market_reconnect_result_includes_snapshot_timeout() -> None:
+    assert _market_reconnect_result("kalshi_orderbook_snapshot_resync_timeout") is True
 
 
 class FakeWebSocket:
@@ -59,6 +65,21 @@ class FakeWebSocket:
         if not self.messages:
             raise StopAsyncIteration
         return self.messages.pop(0)
+
+
+class StopAfterFirstMessageFakeWebSocket(FakeWebSocket):
+    def __init__(
+        self,
+        messages: list[dict[str, Any]],
+        stop_event: threading.Event,
+    ) -> None:
+        super().__init__(messages)
+        self.stop_event = stop_event
+
+    async def __anext__(self) -> str:
+        message = await super().__anext__()
+        self.stop_event.set()
+        return message
 
 
 class AdvancingFakeWebSocket(FakeWebSocket):
@@ -184,6 +205,19 @@ def test_collector_subscribes_and_persists_mock_messages(tmp_path) -> None:
             assert market_heartbeat is not None
             assert market_heartbeat.metadata_["mode"] == "market_ws"
             assert market_heartbeat.metadata_["ws"]["connection_state"] == "subscribed"
+            assert market_heartbeat.metadata_["ws"]["worker_role"] == "all"
+            assert market_heartbeat.metadata_["ws"]["connection_id"] is not None
+            assert market_heartbeat.metadata_["ws"]["orderbook_sid_confirmed"] is False
+            protocol_events = list(
+                session.scalars(select(KalshiWsProtocolEvent.event_type))
+            )
+            assert "websocket_open" in protocol_events
+            assert "subscribe_sent" in protocol_events
+            assert "list_subscriptions_sent" in protocol_events
+            assert "orderbook_snapshot_received" in protocol_events
+            assert "orderbook_delta_received" in protocol_events
+            assert "trade_received" in protocol_events
+            assert "reconnect_completed" not in protocol_events
             assert (
                 market_heartbeat.metadata_["ws"]["active_market_ticker"]
                 == "KXBTC15M-TEST"
@@ -206,6 +240,10 @@ def test_collector_subscribes_and_persists_mock_messages(tmp_path) -> None:
                     "channels": ["ticker", "trade"],
                     "market_ticker": "KXBTC15M-TEST",
                 },
+            },
+            {
+                "id": 1000,
+                "cmd": "list_subscriptions",
             },
         ]
     finally:
@@ -393,7 +431,19 @@ def test_collector_subscribes_to_brti_with_market_channels_and_persists_tick(tmp
             assert reference_metadata["connection_state"] == "subscribed"
             assert reference_metadata["subscription_id"] == 99
 
+        assert {
+            "id": 3,
+            "cmd": "subscribe",
+            "params": {
+                "channels": ["cfbenchmarks_value"],
+                "index_ids": ["BRTI"],
+            },
+        } in websocket.sent
         assert websocket.sent[-1] == {
+            "id": 1000,
+            "cmd": "list_subscriptions",
+        }
+        assert websocket.sent[-2] == {
             "id": 3,
             "cmd": "subscribe",
             "params": {
@@ -401,7 +451,7 @@ def test_collector_subscribes_to_brti_with_market_channels_and_persists_tick(tmp
                 "index_ids": ["BRTI"],
             },
         }
-        assert "market_ticker" not in websocket.sent[-1]["params"]
+        assert "market_ticker" not in websocket.sent[-2]["params"]
     finally:
         engine.dispose()
 
@@ -499,6 +549,10 @@ def test_collector_uses_dedicated_brti_connection_by_default(tmp_path) -> None:
                     "market_ticker": "KXBTC15M-TEST",
                 },
             },
+            {
+                "id": 1000,
+                "cmd": "list_subscriptions",
+            },
         ]
         assert brti_websocket.sent == [
             {
@@ -513,6 +567,243 @@ def test_collector_uses_dedicated_brti_connection_by_default(tmp_path) -> None:
         assert "market_ticker" not in brti_websocket.sent[0]["params"]
     finally:
         engine.dispose()
+
+
+def test_collector_reconciles_subscriptions_from_list_response(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_list_reconcile.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket(
+        [
+            {
+                "type": "ok",
+                "id": 1000,
+                "msg": [
+                    {
+                        "channel": "orderbook_delta",
+                        "sid": 98,
+                        "market_tickers": ["KXBTC15M-OTHER"],
+                    },
+                    {
+                        "channel": "orderbook_delta",
+                        "sid": 11,
+                        "market_tickers": ["KXBTC15M-TEST"],
+                    },
+                    {
+                        "channels": ["ticker", "trade"],
+                        "sid": 12,
+                        "market_tickers": ["KXBTC15M-TEST"],
+                    },
+                ],
+            },
+            {
+                "type": "orderbook_snapshot",
+                "sid": 11,
+                "seq": 1,
+                "msg": {
+                    "market_ticker": "KXBTC15M-TEST",
+                    "yes_dollars_fp": [["0.6000", "10.00"]],
+                    "no_dollars_fp": [["0.6500", "8.00"]],
+                },
+            },
+        ]
+    )
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            latest_book = OrderbookRepository(session).get_latest_snapshot(
+                "KXBTC15M-TEST"
+            )
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                WORKER_SERVICE_MARKET_WS
+            )
+
+            assert latest_book is not None
+            assert heartbeat is not None
+            ws_metadata = heartbeat.metadata_["ws"]
+            assert ws_metadata["subscription_reconciled"] is True
+            assert ws_metadata["orderbook_sid_confirmed"] is True
+            assert ws_metadata["ticker_sid_confirmed"] is True
+            assert ws_metadata["trade_sid_confirmed"] is True
+            assert ws_metadata["subscription_ids"] == {
+                "orderbook_delta": 11,
+                "ticker": 12,
+                "trade": 12,
+            }
+    finally:
+        engine.dispose()
+
+
+def test_collector_does_not_count_recovered_already_subscribed_as_protocol_error(
+    tmp_path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_already_subscribed.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket(
+        [
+            {
+                "type": "error",
+                "id": 1,
+                "msg": {"code": 6, "msg": "Already subscribed"},
+            },
+            {
+                "type": "ok",
+                "id": 1001,
+                "msg": [
+                    {
+                        "channel": "orderbook_delta",
+                        "sid": 11,
+                        "market_tickers": ["KXBTC15M-TEST"],
+                    },
+                    {
+                        "channels": ["ticker", "trade"],
+                        "sid": 12,
+                        "market_tickers": ["KXBTC15M-TEST"],
+                    },
+                ],
+            },
+            {
+                "type": "orderbook_snapshot",
+                "sid": 11,
+                "seq": 1,
+                "msg": {
+                    "market_ticker": "KXBTC15M-TEST",
+                    "yes_dollars_fp": [["0.6000", "10.00"]],
+                    "no_dollars_fp": [["0.6500", "8.00"]],
+                },
+            },
+        ]
+    )
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                WORKER_SERVICE_MARKET_WS
+            )
+            protocol_events = list(
+                session.scalars(select(KalshiWsProtocolEvent.event_type))
+            )
+
+            assert heartbeat is not None
+            ws_metadata = heartbeat.metadata_["ws"]
+            assert ws_metadata["subscription_reconciled"] is True
+            assert ws_metadata["orderbook_sid_confirmed"] is True
+            assert ws_metadata["ticker_sid_confirmed"] is True
+            assert ws_metadata["trade_sid_confirmed"] is True
+            assert ws_metadata["protocol_event_recent_error_count"] == 0
+            assert (
+                "kalshi_ws_already_subscribed_pending_reconcile"
+                not in ws_metadata["warnings"]
+            )
+            assert "already_subscribed_received" in protocol_events
+            assert "websocket_error" not in protocol_events
+
+        list_subscription_requests = [
+            message
+            for message in websocket.sent
+            if message.get("cmd") == "list_subscriptions"
+        ]
+        assert list_subscription_requests == [
+            {"id": 1000, "cmd": "list_subscriptions"},
+            {"id": 1001, "cmd": "list_subscriptions"},
+        ]
+    finally:
+        engine.dispose()
+
+
+def test_collector_applies_subscribe_sid_to_acknowledged_channel_only() -> None:
+    config = load_config(
+        {
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+        }
+    )
+
+    async def websocket_factory(*_args):
+        raise AssertionError("websocket factory should not be used")
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=None,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector.status.subscription_request_ids = {"ticker": 2, "trade": 2}
+
+    collector._handle_market_control_message(
+        parse_ws_payload(
+            {
+                "type": "subscribed",
+                "id": 2,
+                "msg": {
+                    "sid": 12,
+                    "channel": "ticker",
+                },
+            },
+            target_market_ticker="KXBTC15M-TEST",
+            received_at=NOW,
+        )
+    )
+
+    assert collector.status.subscription_ids == {"ticker": 12}
+    assert collector.status.subscription_request_ids == {"trade": 2}
+    assert collector.status.ticker_sid_confirmed is True
+    assert collector.status.trade_sid_confirmed is False
 
 
 def test_collector_dedicated_brti_failure_does_not_stop_market_ws(tmp_path) -> None:
@@ -1658,8 +1949,8 @@ def test_collector_throttles_repeated_invalid_parse_heartbeats(tmp_path) -> None
             )
             heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
 
-            assert heartbeat_count == 6
-            assert market_heartbeat_count == 3
+            assert heartbeat_count == 8
+            assert market_heartbeat_count == 4
             assert heartbeat is not None
             ws_metadata = heartbeat.metadata_["ws"]
             assert ws_metadata["warnings"] == ["invalid_orderbook_snapshot_yes_level_size"]
@@ -2183,9 +2474,9 @@ def test_collector_persists_market_liveness_heartbeats_before_stream_gate(
             )
             heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
 
-            assert heartbeat_count == 104
-            assert market_heartbeat_count == 52
-            assert aggregate_heartbeat_count == 52
+            assert heartbeat_count == 106
+            assert market_heartbeat_count == 53
+            assert aggregate_heartbeat_count == 53
             assert heartbeat is not None
             assert heartbeat.metadata_["ws"]["last_message_at"] == "2026-07-05T14:35:50Z"
     finally:
@@ -2819,6 +3110,93 @@ def test_collector_resets_backoff_after_successful_websocket_cycle(tmp_path) -> 
         assert websocket_factory_calls == 2
         assert collector.status.reconnect_count == 0
         assert collector.status.connection_state == "subscribed"
+        with session_factory() as session:
+            protocol_events = [
+                row.event_type
+                for row in session.scalars(
+                    select(KalshiWsProtocolEvent).order_by(KalshiWsProtocolEvent.id)
+                )
+            ]
+            assert "reconnect_failed" in protocol_events
+            assert "reconnect_started" in protocol_events
+            assert "reconnect_completed" in protocol_events
+    finally:
+        engine.dispose()
+
+
+def test_collector_marks_reconnect_completed_on_first_usable_message(tmp_path) -> None:
+    database_url = (
+        f"sqlite+pysqlite:///{tmp_path / 'ape_ws_reconnect_live_read.sqlite'}"
+    )
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    stop_event = threading.Event()
+    websocket = StopAfterFirstMessageFakeWebSocket(
+        [
+            {
+                "type": "ticker",
+                "sid": 2,
+                "seq": 1,
+                "msg": {"market_ticker": "KXBTC15M-TEST"},
+            }
+        ],
+        stop_event,
+    )
+
+    async def websocket_factory(*_args):
+        raise AssertionError("websocket factory should not be used")
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector.status.connection_state = "subscribed"
+    collector.status.active_market_ticker = "KXBTC15M-TEST"
+    collector.status.reconnect_count = 1
+    collector.status.reconnect_reason = "RuntimeError"
+    collector._market_reconnect_completion_pending_reason = "RuntimeError"
+    collector._record_protocol_event("websocket_error")
+
+    try:
+        assert collector.status.protocol_event_recent_error_count == 1
+
+        asyncio.run(
+            collector._read_messages(
+                websocket,
+                "KXBTC15M-TEST",
+                None,
+                stop_event,
+                include_reference=False,
+            )
+        )
+
+        assert collector.status.reconnect_count == 0
+        assert collector.status.reconnect_reason is None
+        assert collector.status.protocol_event_recent_error_count == 0
+        with session_factory() as session:
+            protocol_events = [
+                row.event_type
+                for row in session.scalars(
+                    select(KalshiWsProtocolEvent).order_by(KalshiWsProtocolEvent.id)
+                )
+            ]
+            assert "websocket_error" in protocol_events
+            assert "ticker_received" in protocol_events
+            assert "reconnect_completed" in protocol_events
     finally:
         engine.dispose()
 
@@ -2877,6 +3255,386 @@ def test_collector_counts_quiet_market_ping_failure_as_reconnect(tmp_path) -> No
             assert "kalshi_orderbook_transport_stale" in ws_metadata["warnings"]
     finally:
         engine.dispose()
+
+
+def test_collector_protocol_error_count_expires_after_recent_window(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_protocol_errors.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    current_time = NOW
+
+    async def websocket_factory(*_args):
+        raise AssertionError("websocket factory should not be used")
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: current_time,
+    )
+
+    try:
+        collector._record_protocol_event("websocket_error")
+        assert collector.status.protocol_event_recent_error_count == 1
+
+        current_time = NOW + timedelta(seconds=1801)
+        collector.record_market_heartbeat()
+
+        assert collector.status.protocol_event_recent_error_count == 0
+        with session_factory() as session:
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                "ape-worker"
+            )
+            assert heartbeat is not None
+            assert heartbeat.metadata_["ws"]["protocol_event_recent_error_count"] == 0
+    finally:
+        engine.dispose()
+
+
+def test_collector_does_not_sync_insert_when_market_db_queue_is_full(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_queue_full.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_DB_WRITER_QUEUE_MAX_SIZE": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+
+    async def websocket_factory(*_args):
+        raise AssertionError("websocket factory should not be used")
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector._db_writer_queue = asyncio.Queue(maxsize=1)
+    collector._db_writer_queue.put_nowait(object())
+
+    try:
+        persisted = collector._persist_orderbook(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC15M-TEST",
+                received_at=NOW,
+                yes_bid=Decimal("0.61"),
+            )
+        )
+
+        assert persisted is False
+        assert "market_db_writer_queue_backpressure" in collector.status.warnings
+        assert "market_db_writer_queue_backpressure" in collector.status.blockers
+        assert collector.status.protocol_event_recent_error_count == 1
+        with session_factory() as session:
+            assert (
+                session.scalar(select(func.count()).select_from(OrderbookSnapshot))
+                == 0
+            )
+            assert (
+                session.scalar(select(func.count()).select_from(KalshiWsProtocolEvent))
+                == 0
+            )
+    finally:
+        engine.dispose()
+
+
+def test_collector_marks_queued_orderbook_pending_until_writer_commit(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_orderbook_pending.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+
+    async def websocket_factory(*_args):
+        raise AssertionError("websocket factory should not be used")
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector._db_writer_queue = asyncio.Queue(maxsize=10)
+
+    try:
+        persisted = collector._persist_orderbook(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC15M-TEST",
+                received_at=NOW,
+                yes_bid=Decimal("0.61"),
+            )
+        )
+
+        assert persisted is False
+        assert collector.status.orderbook_persistence_pending_count == 1
+        assert collector.status.orderbook_persistence_pending_age_ms == 0
+        assert "orderbook_persistence_pending" in collector.status.blockers
+        with session_factory() as session:
+            assert (
+                session.scalar(select(func.count()).select_from(OrderbookSnapshot))
+                == 0
+            )
+
+        item = collector._db_writer_queue.get_nowait()
+        collector._write_market_db_item(item)
+
+        assert collector.status.orderbook_persistence_pending_count == 0
+        assert collector.status.orderbook_persistence_pending_since is None
+        assert collector.status.orderbook_persistence_pending_age_ms is None
+        assert "orderbook_persistence_pending" not in collector.status.blockers
+        assert collector.status.last_orderbook_at == NOW
+        with session_factory() as session:
+            assert (
+                session.scalar(select(func.count()).select_from(OrderbookSnapshot))
+                == 1
+            )
+    finally:
+        engine.dispose()
+
+
+def test_collector_clears_delta_warnings_after_queued_valid_delta_commit(
+    tmp_path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_delta_cleanup.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+
+    async def websocket_factory(*_args):
+        raise AssertionError("websocket factory should not be used")
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector.status.active_market_ticker = "KXBTC15M-TEST"
+    collector._db_writer_queue = asyncio.Queue(maxsize=10)
+    collector._add_warning("invalid_orderbook_delta_delta_fp")
+    collector._add_warning("orderbook_delta_before_snapshot")
+
+    orderbook = OrderbookState(market_ticker="KXBTC15M-TEST")
+    orderbook.apply_snapshot(
+        parse_ws_payload(
+            {
+                "type": "orderbook_snapshot",
+                "sid": 11,
+                "seq": 1,
+                "msg": {
+                    "market_ticker": "KXBTC15M-TEST",
+                    "yes_dollars_fp": [["0.60", "10"]],
+                    "no_dollars_fp": [["0.65", "8"]],
+                },
+            },
+            target_market_ticker="KXBTC15M-TEST",
+            received_at=NOW,
+        )
+    )
+    delta = parse_ws_payload(
+        {
+            "type": "orderbook_delta",
+            "sid": 11,
+            "seq": 2,
+            "msg": {
+                "market_ticker": "KXBTC15M-TEST",
+                "side": "yes",
+                "price_dollars": "0.61",
+                "delta_fp": "4",
+            },
+        },
+        target_market_ticker="KXBTC15M-TEST",
+        received_at=NOW,
+    )
+
+    try:
+        result = asyncio.run(
+            collector._handle_message(FakeWebSocket([]), delta, orderbook, NOW)
+        )
+
+        assert result is None
+        assert "invalid_orderbook_delta_delta_fp" in collector.status.warnings
+        assert "orderbook_delta_before_snapshot" in collector.status.warnings
+
+        queued_items = []
+        while not collector._db_writer_queue.empty():
+            queued_items.append(collector._db_writer_queue.get_nowait())
+        assert any(item.kind == "orderbook" for item in queued_items)
+
+        for item in queued_items:
+            collector._write_market_db_item(item)
+
+        assert "invalid_orderbook_delta_delta_fp" not in collector.status.warnings
+        assert "orderbook_delta_before_snapshot" not in collector.status.warnings
+        assert collector.status.orderbook_persistence_pending_count == 0
+        with session_factory() as session:
+            assert (
+                session.scalar(select(func.count()).select_from(OrderbookSnapshot))
+                == 1
+            )
+    finally:
+        engine.dispose()
+
+
+def test_collector_finishes_queued_snapshot_recovery_after_sequence_advances(
+    tmp_path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_slow_snapshot.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+
+    async def websocket_factory(*_args):
+        raise AssertionError("websocket factory should not be used")
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector.status.active_market_ticker = "KXBTC15M-TEST"
+    collector.status.orderbook_sequence_number = 1
+    collector.status.market_recovery_attempt_in_progress = True
+    collector.status.market_recovery_attempt_started_at = NOW
+    collector.status.orderbook_recovery_action = "request_snapshot"
+    collector.status.market_subscription_recovery_last_reason = "market_data_quiet"
+    collector.status.market_subscription_recovery_last_action = "get_snapshot"
+    collector.status.market_subscription_recovery_last_result = "requested"
+    collector._add_warning("snapshot_resync_pending")
+    collector._db_writer_queue = asyncio.Queue(maxsize=10)
+
+    try:
+        persisted = collector._persist_orderbook(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC15M-TEST",
+                received_at=NOW,
+                sequence_number=1,
+                yes_bid=Decimal("0.61"),
+            ),
+            queued_recovery_result="snapshot_initialized",
+            queued_clear_recovery_warnings=True,
+        )
+
+        assert persisted is False
+        item = collector._db_writer_queue.get_nowait()
+        collector.status.orderbook_sequence_number = 2
+        collector._write_market_db_item(item)
+
+        assert collector.status.market_recovery_attempt_in_progress is False
+        assert collector.status.market_snapshot_resync_last_result == (
+            "snapshot_initialized"
+        )
+        assert collector.status.orderbook_recovery_action == "none"
+        assert "snapshot_resync_pending" not in collector.status.warnings
+        assert collector.status.orderbook_persistence_pending_count == 0
+        assert "orderbook_persistence_pending" not in collector.status.blockers
+        with session_factory() as session:
+            assert (
+                session.scalar(select(func.count()).select_from(OrderbookSnapshot))
+                == 1
+            )
+    finally:
+        engine.dispose()
+
+
+def test_collector_clears_pending_orderbook_when_db_writer_drain_times_out() -> None:
+    config = load_config(
+        {
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+        }
+    )
+
+    async def websocket_factory(*_args):
+        raise AssertionError("websocket factory should not be used")
+
+    class TimeoutJoinQueue(asyncio.Queue):
+        async def join(self) -> None:
+            raise TimeoutError
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=None,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector._db_writer_queue = TimeoutJoinQueue()
+    collector.status.orderbook_persistence_pending_count = 1
+    collector.status.orderbook_persistence_pending_since = NOW
+    collector.status.orderbook_persistence_pending_age_ms = 0
+    collector._add_blocker("orderbook_persistence_pending")
+
+    async def stop_writer() -> None:
+        collector._db_writer_task = asyncio.create_task(asyncio.sleep(60))
+        await collector._stop_market_db_writer()
+
+    asyncio.run(stop_writer())
+
+    assert "market_db_writer_drain_timeout" in collector.status.warnings
+    assert collector.status.orderbook_persistence_pending_count == 0
+    assert collector.status.orderbook_persistence_pending_since is None
+    assert collector.status.orderbook_persistence_pending_age_ms is None
+    assert "orderbook_persistence_pending" not in collector.status.blockers
+    assert collector._db_writer_queue is None
+    assert collector._db_writer_task is None
 
 
 def test_collector_resets_orderbook_on_buffer_overflow(tmp_path) -> None:

@@ -13,6 +13,7 @@ from ape.db.models import StorageRetentionRun
 from ape.repositories.inputs import StorageRetentionRunInput
 
 ALLOWED_RETENTION_TABLES = {
+    "kalshi_ws_protocol_events",
     "markets",
     "orderbook_snapshots",
     "public_trades",
