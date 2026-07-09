@@ -542,6 +542,7 @@ class KalshiWsCollector:
         self._db_critical_queue: asyncio.Queue[_DbWriterItem] | None = None
         self._db_diagnostic_queue: asyncio.Queue[_DbWriterItem] | None = None
         self._db_critical_enqueued_at: deque[datetime] = deque()
+        self._db_critical_inflight_at: deque[datetime] = deque()
         self._db_diagnostic_enqueued_at: deque[datetime] = deque()
         self._db_writer_enqueued_at: deque[datetime] = self._db_critical_enqueued_at
         self._db_writer_task: asyncio.Task[None] | None = None
@@ -2320,6 +2321,7 @@ class KalshiWsCollector:
         )
         self._db_writer_queue = self._db_critical_queue
         self._db_critical_enqueued_at.clear()
+        self._db_critical_inflight_at.clear()
         self._db_diagnostic_enqueued_at.clear()
         self._db_writer_enqueued_at = self._db_critical_enqueued_at
         self._pending_orderbook_writes.clear()
@@ -2353,6 +2355,7 @@ class KalshiWsCollector:
         self._db_critical_queue = None
         self._db_diagnostic_queue = None
         self._db_critical_enqueued_at.clear()
+        self._db_critical_inflight_at.clear()
         self._db_diagnostic_enqueued_at.clear()
         self._pending_orderbook_writes.clear()
         self._pending_orderbook_markers.clear()
@@ -2541,8 +2544,12 @@ class KalshiWsCollector:
         if critical_queue is not None:
             try:
                 item = critical_queue.get_nowait()
-                if self._db_critical_enqueued_at:
+                enqueued_at = (
                     self._db_critical_enqueued_at.popleft()
+                    if self._db_critical_enqueued_at
+                    else item.enqueued_at
+                )
+                self._db_critical_inflight_at.append(enqueued_at)
                 return "critical", item
             except asyncio.QueueEmpty:
                 pass
@@ -2576,6 +2583,8 @@ class KalshiWsCollector:
         )
         if queue is not None:
             queue.task_done()
+        if queue_name == "critical" and self._db_critical_inflight_at:
+            self._db_critical_inflight_at.popleft()
 
     def _requeue_failed_critical_item(
         self,
@@ -3030,15 +3039,31 @@ class KalshiWsCollector:
             self.status.protocol_event_oldest_age_ms = None
             self.status.historical_persistence_lag_ms = None
             return
+        critical_oldest_values = [
+            value
+            for value in (
+                self._db_critical_enqueued_at[0]
+                if self._db_critical_enqueued_at
+                else None,
+                self._db_critical_inflight_at[0]
+                if self._db_critical_inflight_at
+                else None,
+            )
+            if value is not None
+        ]
         critical_oldest = (
-            self._db_critical_enqueued_at[0] if self._db_critical_enqueued_at else None
+            min(_as_utc(value) for value in critical_oldest_values)
+            if critical_oldest_values
+            else None
         )
         diagnostic_oldest = (
             self._db_diagnostic_enqueued_at[0]
             if self._db_diagnostic_enqueued_at
             else None
         )
-        self.status.db_writer_critical_queue_depth = critical_queue.qsize()
+        self.status.db_writer_critical_queue_depth = critical_queue.qsize() + len(
+            self._db_critical_inflight_at
+        )
         self.status.db_writer_critical_queue_oldest_age_ms = _age_ms(
             critical_oldest,
             checked_at,

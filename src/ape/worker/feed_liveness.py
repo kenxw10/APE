@@ -231,6 +231,9 @@ def load_market_feed_liveness(
         )
     ):
         orderbook_recovery_action = "request_snapshot"
+    latest_state_persisted_at = _datetime_or_none(
+        (metadata or {}).get("latest_state_persisted_at")
+    )
     return MarketFeedLiveness(
         source=source,
         metadata=metadata,
@@ -328,12 +331,8 @@ def load_market_feed_liveness(
         db_writer_dropped_superseded_count=_int_or_zero(
             (metadata or {}).get("db_writer_dropped_superseded_count")
         ),
-        latest_state_persisted_at=_datetime_or_none(
-            (metadata or {}).get("latest_state_persisted_at")
-        ),
-        latest_state_persisted_age_ms=_int_or_none(
-            (metadata or {}).get("latest_state_persisted_age_ms")
-        ),
+        latest_state_persisted_at=latest_state_persisted_at,
+        latest_state_persisted_age_ms=_age_ms(latest_state_persisted_at, checked_at),
         latest_state_persistence_lag_ms=_int_or_none(
             (metadata or {}).get("latest_state_persistence_lag_ms")
         ),
