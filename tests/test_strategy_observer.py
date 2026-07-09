@@ -135,6 +135,9 @@ def test_strategy_blocks_on_market_protocol_readiness_failures() -> None:
     assert stale_reason({**base_metadata, "db_writer_queue_depth": 600}) == (
         "kalshi_orderbook_db_writer_backpressure"
     )
+    assert stale_reason({**base_metadata, "orderbook_persistence_pending": True}) == (
+        "kalshi_orderbook_db_writer_backpressure"
+    )
     assert stale_reason({**base_metadata, "protocol_event_recent_error_count": 1}) == (
         "kalshi_orderbook_protocol_errors"
     )

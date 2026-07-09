@@ -58,6 +58,10 @@ class MarketFeedLiveness:
     db_writer_queue_oldest_age_ms: int | None
     db_writer_last_flush_ms: int | None
     db_writer_slow_flush_count: int
+    orderbook_persistence_pending: bool
+    orderbook_persistence_pending_count: int
+    orderbook_persistence_pending_since: datetime | None
+    orderbook_persistence_pending_age_ms: int | None
     reconnect_reason: str | None
     close_code: int | None
     close_reason: str | None
@@ -272,6 +276,18 @@ def load_market_feed_liveness(
         ),
         db_writer_slow_flush_count=_int_or_zero(
             (metadata or {}).get("db_writer_slow_flush_count")
+        ),
+        orderbook_persistence_pending=_bool_or_false(
+            (metadata or {}).get("orderbook_persistence_pending")
+        ),
+        orderbook_persistence_pending_count=_int_or_zero(
+            (metadata or {}).get("orderbook_persistence_pending_count")
+        ),
+        orderbook_persistence_pending_since=_datetime_or_none(
+            (metadata or {}).get("orderbook_persistence_pending_since")
+        ),
+        orderbook_persistence_pending_age_ms=_int_or_none(
+            (metadata or {}).get("orderbook_persistence_pending_age_ms")
         ),
         reconnect_reason=_str_or_none((metadata or {}).get("reconnect_reason")),
         close_code=_int_or_none((metadata or {}).get("close_code")),

@@ -3221,6 +3221,70 @@ def test_collector_does_not_sync_insert_when_market_db_queue_is_full(tmp_path) -
         engine.dispose()
 
 
+def test_collector_marks_queued_orderbook_pending_until_writer_commit(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_orderbook_pending.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+
+    async def websocket_factory(*_args):
+        raise AssertionError("websocket factory should not be used")
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector._db_writer_queue = asyncio.Queue(maxsize=10)
+
+    try:
+        persisted = collector._persist_orderbook(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC15M-TEST",
+                received_at=NOW,
+                yes_bid=Decimal("0.61"),
+            )
+        )
+
+        assert persisted is False
+        assert collector.status.orderbook_persistence_pending_count == 1
+        assert collector.status.orderbook_persistence_pending_age_ms == 0
+        assert "orderbook_persistence_pending" in collector.status.blockers
+        with session_factory() as session:
+            assert (
+                session.scalar(select(func.count()).select_from(OrderbookSnapshot))
+                == 0
+            )
+
+        item = collector._db_writer_queue.get_nowait()
+        collector._write_market_db_item(item)
+
+        assert collector.status.orderbook_persistence_pending_count == 0
+        assert collector.status.orderbook_persistence_pending_since is None
+        assert collector.status.orderbook_persistence_pending_age_ms is None
+        assert "orderbook_persistence_pending" not in collector.status.blockers
+        assert collector.status.last_orderbook_at == NOW
+        with session_factory() as session:
+            assert (
+                session.scalar(select(func.count()).select_from(OrderbookSnapshot))
+                == 1
+            )
+    finally:
+        engine.dispose()
+
+
 def test_collector_resets_orderbook_on_buffer_overflow(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_buffer_overflow.sqlite'}"
     config = load_config(

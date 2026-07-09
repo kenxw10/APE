@@ -2576,6 +2576,18 @@ def _measurements(
             orderbook_worker_metadata,
             "db_writer_slow_flush_count",
         ),
+        "orderbook_persistence_pending": _metadata_bool(
+            orderbook_worker_metadata,
+            "orderbook_persistence_pending",
+        ),
+        "orderbook_persistence_pending_count": _metadata_int(
+            orderbook_worker_metadata,
+            "orderbook_persistence_pending_count",
+        ),
+        "orderbook_persistence_pending_age_ms": _metadata_int(
+            orderbook_worker_metadata,
+            "orderbook_persistence_pending_age_ms",
+        ),
         "reconnect_reason": _metadata_text(orderbook_worker_metadata, "reconnect_reason"),
         "close_code": _metadata_int(orderbook_worker_metadata, "close_code"),
         "close_reason": _metadata_text(orderbook_worker_metadata, "close_reason"),
@@ -3425,6 +3437,8 @@ def _market_protocol_unusable_reason(
         if snapshot_age_ms is None or snapshot_age_ms > timeout_ms:
             return "kalshi_orderbook_snapshot_resync_timeout"
     max_queue_depth = max(10, config.kalshi_ws_db_writer_queue_max_size // 2)
+    if _metadata_bool(metadata, "orderbook_persistence_pending"):
+        return "kalshi_orderbook_db_writer_backpressure"
     if (_metadata_int(metadata, "db_writer_queue_depth") or 0) > max_queue_depth:
         return "kalshi_orderbook_db_writer_backpressure"
     if (_metadata_int(metadata, "protocol_event_recent_error_count") or 0) > 0:

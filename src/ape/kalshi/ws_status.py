@@ -54,6 +54,10 @@ class KalshiWsStatusSnapshot:
     db_writer_queue_oldest_age_ms: int | None
     db_writer_last_flush_ms: int | None
     db_writer_slow_flush_count: int
+    orderbook_persistence_pending: bool
+    orderbook_persistence_pending_count: int
+    orderbook_persistence_pending_since: datetime | None
+    orderbook_persistence_pending_age_ms: int | None
     reconnect_reason: str | None
     close_code: int | None
     close_reason: str | None
@@ -143,6 +147,10 @@ def build_kalshi_ws_status(
     db_writer_queue_oldest_age_ms: int | None = None
     db_writer_last_flush_ms: int | None = None
     db_writer_slow_flush_count = 0
+    orderbook_persistence_pending = False
+    orderbook_persistence_pending_count = 0
+    orderbook_persistence_pending_since: datetime | None = None
+    orderbook_persistence_pending_age_ms: int | None = None
     reconnect_reason: str | None = None
     close_code: int | None = None
     close_reason: str | None = None
@@ -240,6 +248,18 @@ def build_kalshi_ws_status(
                     )
                     db_writer_last_flush_ms = liveness.db_writer_last_flush_ms
                     db_writer_slow_flush_count = liveness.db_writer_slow_flush_count
+                    orderbook_persistence_pending = (
+                        liveness.orderbook_persistence_pending
+                    )
+                    orderbook_persistence_pending_count = (
+                        liveness.orderbook_persistence_pending_count
+                    )
+                    orderbook_persistence_pending_since = (
+                        liveness.orderbook_persistence_pending_since
+                    )
+                    orderbook_persistence_pending_age_ms = (
+                        liveness.orderbook_persistence_pending_age_ms
+                    )
                     reconnect_reason = liveness.reconnect_reason
                     close_code = liveness.close_code
                     close_reason = liveness.close_reason
@@ -401,6 +421,10 @@ def build_kalshi_ws_status(
         db_writer_queue_oldest_age_ms=db_writer_queue_oldest_age_ms,
         db_writer_last_flush_ms=db_writer_last_flush_ms,
         db_writer_slow_flush_count=db_writer_slow_flush_count,
+        orderbook_persistence_pending=orderbook_persistence_pending,
+        orderbook_persistence_pending_count=orderbook_persistence_pending_count,
+        orderbook_persistence_pending_since=orderbook_persistence_pending_since,
+        orderbook_persistence_pending_age_ms=orderbook_persistence_pending_age_ms,
         reconnect_reason=reconnect_reason,
         close_code=close_code,
         close_reason=close_reason,

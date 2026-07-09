@@ -88,6 +88,8 @@ class _DbWriterItem:
     kind: str
     payload: Any
     enqueued_at: datetime
+    orderbook_recovery_result: str | None = None
+    clear_orderbook_recovery_warnings: bool = False
 
 
 @dataclass
@@ -121,6 +123,9 @@ class KalshiWsCollectorStatus:
     db_writer_queue_oldest_age_ms: int | None = None
     db_writer_last_flush_ms: int | None = None
     db_writer_slow_flush_count: int = 0
+    orderbook_persistence_pending_count: int = 0
+    orderbook_persistence_pending_since: datetime | None = None
+    orderbook_persistence_pending_age_ms: int | None = None
     reconnect_reason: str | None = None
     close_code: int | None = None
     close_reason: str | None = None
@@ -202,6 +207,18 @@ class KalshiWsCollectorStatus:
             "db_writer_queue_oldest_age_ms": self.db_writer_queue_oldest_age_ms,
             "db_writer_last_flush_ms": self.db_writer_last_flush_ms,
             "db_writer_slow_flush_count": self.db_writer_slow_flush_count,
+            "orderbook_persistence_pending": (
+                self.orderbook_persistence_pending_count > 0
+            ),
+            "orderbook_persistence_pending_count": (
+                self.orderbook_persistence_pending_count
+            ),
+            "orderbook_persistence_pending_since": _isoformat_or_none(
+                self.orderbook_persistence_pending_since
+            ),
+            "orderbook_persistence_pending_age_ms": (
+                self.orderbook_persistence_pending_age_ms
+            ),
             "reconnect_reason": self.reconnect_reason,
             "close_code": self.close_code,
             "close_reason": self.close_reason,
@@ -1230,7 +1247,11 @@ class KalshiWsCollector:
                 raw_payload_hash=message.raw_payload_hash,
                 raw_payload=message.raw_payload,
             )
-            if not self._persist_orderbook(snapshot):
+            if not self._persist_orderbook(
+                snapshot,
+                queued_recovery_result="snapshot_initialized",
+                queued_clear_recovery_warnings=True,
+            ):
                 return None
             self.status.market_snapshot_resync_last_result = "snapshot_initialized"
             self._finish_market_recovery(
@@ -1243,34 +1264,8 @@ class KalshiWsCollector:
                 previous_liveness_status != "live"
                 or previous_liveness_reason is not None
             )
-            warnings_cleared = self._clear_warning_prefixes(
-                "invalid_orderbook_snapshot_"
-            )
-            warnings_cleared = (
-                self._clear_warnings(
-                    "orderbook_delta_before_snapshot",
-                    "orderbook_sequence_gap_reset",
-                    "orderbook_reset_after_buffer_overflow",
-                    "kalshi_websocket_buffer_overflow",
-                    "kalshi_ws_resubscribe_requested",
-                    "snapshot_resync_pending",
-                    "market_roll_reresolve",
-                    "market_roll_resubscribe_pending",
-                    "kalshi_orderbook_subscription_ack_timeout",
-                    "kalshi_orderbook_subscription_recovery_failed",
-                    "orderbook_snapshot_resync_unavailable",
-                    "kalshi_orderbook_snapshot_resync_failed",
-                )
-                or warnings_cleared
-            )
-            blockers_cleared = self._clear_blockers(
-                "kalshi_orderbook_subscription_ack_timeout",
-                "kalshi_orderbook_subscription_recovery_failed",
-                "kalshi_orderbook_snapshot_resync_failed",
-            )
-            if warnings_cleared or liveness_recovered:
-                self.record_market_heartbeat()
-            elif blockers_cleared:
+            recovery_metadata_cleared = self._clear_orderbook_recovery_warnings()
+            if recovery_metadata_cleared or liveness_recovered:
                 self.record_market_heartbeat()
             return None
 
@@ -1516,6 +1511,32 @@ class KalshiWsCollector:
         self.status.orderbook_liveness_status = status
         self.status.orderbook_liveness_reason = reason
         self._refresh_market_feed_state(self.now())
+
+    def _clear_orderbook_recovery_warnings(self) -> bool:
+        warnings_cleared = self._clear_warning_prefixes("invalid_orderbook_snapshot_")
+        warnings_cleared = (
+            self._clear_warnings(
+                "orderbook_delta_before_snapshot",
+                "orderbook_sequence_gap_reset",
+                "orderbook_reset_after_buffer_overflow",
+                "kalshi_websocket_buffer_overflow",
+                "kalshi_ws_resubscribe_requested",
+                "snapshot_resync_pending",
+                "market_roll_reresolve",
+                "market_roll_resubscribe_pending",
+                "kalshi_orderbook_subscription_ack_timeout",
+                "kalshi_orderbook_subscription_recovery_failed",
+                "orderbook_snapshot_resync_unavailable",
+                "kalshi_orderbook_snapshot_resync_failed",
+            )
+            or warnings_cleared
+        )
+        blockers_cleared = self._clear_blockers(
+            "kalshi_orderbook_subscription_ack_timeout",
+            "kalshi_orderbook_subscription_recovery_failed",
+            "kalshi_orderbook_snapshot_resync_failed",
+        )
+        return warnings_cleared or blockers_cleared
 
     def _start_market_recovery(
         self,
@@ -2085,7 +2106,13 @@ class KalshiWsCollector:
             return "LIVE"
         return "BLOCKED_UNRECOVERED"
 
-    def _persist_orderbook(self, snapshot: OrderbookSnapshotInput) -> bool:
+    def _persist_orderbook(
+        self,
+        snapshot: OrderbookSnapshotInput,
+        *,
+        queued_recovery_result: str | None = None,
+        queued_clear_recovery_warnings: bool = False,
+    ) -> bool:
         if self.session_factory is None:
             self._add_warning("database_not_configured_for_orderbook")
             return False
@@ -2093,9 +2120,12 @@ class KalshiWsCollector:
             "orderbook",
             snapshot,
             snapshot.received_at,
+            orderbook_recovery_result=queued_recovery_result,
+            clear_orderbook_recovery_warnings=queued_clear_recovery_warnings,
         )
         if enqueue_result == MARKET_DB_WRITE_QUEUED:
-            return True
+            self._mark_orderbook_persistence_pending(snapshot.received_at)
+            return False
         if enqueue_result == MARKET_DB_WRITE_FULL:
             return False
 
@@ -2197,6 +2227,7 @@ class KalshiWsCollector:
                 if item.kind == "orderbook":
                     self._add_warning("orderbook_persistence_failed")
                     self._add_blocker("orderbook_persistence_failed")
+                    self._finish_orderbook_persistence_pending(self.now())
                 elif item.kind == "trade":
                     self._add_warning("trade_persistence_failed")
                 else:
@@ -2234,15 +2265,61 @@ class KalshiWsCollector:
                 blockers=("orderbook_persistence_failed",),
             )
             self.status.last_orderbook_at = item.payload.received_at
+            matches_current_book = _orderbook_commit_matches_current(
+                item.payload,
+                self.status.orderbook_sequence_number,
+            )
+            if item.orderbook_recovery_result is not None and matches_current_book:
+                self.status.market_snapshot_resync_last_result = (
+                    item.orderbook_recovery_result
+                )
+                self.status.orderbook_recovery_action = "none"
+                self._finish_market_recovery(
+                    result=item.orderbook_recovery_result,
+                    checked_at=item.payload.received_at,
+                )
+            if item.clear_orderbook_recovery_warnings and matches_current_book:
+                self._clear_orderbook_recovery_warnings()
+            self._finish_orderbook_persistence_pending(item.payload.received_at)
         elif item.kind == "trade":
             self._mark_persistence_success(warning="trade_persistence_failed")
             self.status.last_trade_at = item.payload.received_at
+
+    def _mark_orderbook_persistence_pending(self, queued_at: datetime) -> None:
+        if self.status.orderbook_persistence_pending_count == 0:
+            self.status.orderbook_persistence_pending_since = queued_at
+        self.status.orderbook_persistence_pending_count += 1
+        self.status.orderbook_persistence_pending_age_ms = _age_ms(
+            self.status.orderbook_persistence_pending_since,
+            queued_at,
+        )
+        self._add_blocker("orderbook_persistence_pending")
+        self._refresh_market_feed_state(queued_at)
+        self._force_next_heartbeat = True
+
+    def _finish_orderbook_persistence_pending(self, checked_at: datetime) -> None:
+        if self.status.orderbook_persistence_pending_count > 0:
+            self.status.orderbook_persistence_pending_count -= 1
+        if self.status.orderbook_persistence_pending_count == 0:
+            self.status.orderbook_persistence_pending_since = None
+            self.status.orderbook_persistence_pending_age_ms = None
+            self._clear_blockers("orderbook_persistence_pending")
+        else:
+            self.status.orderbook_persistence_pending_age_ms = _age_ms(
+                self.status.orderbook_persistence_pending_since,
+                checked_at,
+            )
+        self._refresh_market_feed_state(checked_at)
+        self._force_next_heartbeat = True
 
     def _enqueue_market_db_write(
         self,
         kind: str,
         payload: Any,
         enqueued_at: datetime,
+        *,
+        orderbook_recovery_result: str | None = None,
+        clear_orderbook_recovery_warnings: bool = False,
     ) -> str:
         queue = self._db_writer_queue
         if queue is None:
@@ -2253,6 +2330,10 @@ class KalshiWsCollector:
                     kind=kind,
                     payload=payload,
                     enqueued_at=enqueued_at,
+                    orderbook_recovery_result=orderbook_recovery_result,
+                    clear_orderbook_recovery_warnings=(
+                        clear_orderbook_recovery_warnings
+                    ),
                 )
             )
         except asyncio.QueueFull:
@@ -2461,6 +2542,10 @@ class KalshiWsCollector:
         self.status.protocol_event_recent_error_count = len(self._protocol_error_events)
 
     def _refresh_db_writer_metrics(self, checked_at: datetime) -> None:
+        self.status.orderbook_persistence_pending_age_ms = _age_ms(
+            self.status.orderbook_persistence_pending_since,
+            checked_at,
+        )
         queue = self._db_writer_queue
         self.status.ws_reader_queue_depth = 0
         self.status.ws_reader_queue_oldest_age_ms = None
@@ -3272,6 +3357,16 @@ def _market_reconnect_result(value: str | None) -> bool:
         "orderbook_reset_after_buffer_overflow",
         "orderbook_sequence_gap_reset",
     }
+
+
+def _orderbook_commit_matches_current(
+    snapshot: OrderbookSnapshotInput,
+    current_sequence_number: int | None,
+) -> bool:
+    return (
+        snapshot.sequence_number is None
+        or snapshot.sequence_number == current_sequence_number
+    )
 
 
 def _reference_tick_valid(value: Any) -> bool:

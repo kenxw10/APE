@@ -122,6 +122,10 @@ class KalshiWsStatusResponse(BaseModel):
     db_writer_queue_oldest_age_ms: int | None
     db_writer_last_flush_ms: int | None
     db_writer_slow_flush_count: int
+    orderbook_persistence_pending: bool
+    orderbook_persistence_pending_count: int
+    orderbook_persistence_pending_since: datetime | None
+    orderbook_persistence_pending_age_ms: int | None
     reconnect_reason: str | None
     close_code: int | None
     close_reason: str | None
