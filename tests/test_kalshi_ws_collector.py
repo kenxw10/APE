@@ -19,6 +19,7 @@ from ape.db.session import create_engine_from_config, create_session_factory
 from ape.kalshi.reference_messages import BRTI_SOURCE
 from ape.kalshi.resolver import ResolverResult, ResolverState
 from ape.kalshi.ws_collector import KalshiWsCollector, _market_reconnect_result
+from ape.kalshi.ws_messages import parse_ws_payload
 from ape.kalshi.ws_status import build_kalshi_ws_status
 from ape.repositories.inputs import MarketInput, OrderbookSnapshotInput, WorkerHeartbeatInput
 from ape.repositories.orderbook import OrderbookRepository
@@ -758,6 +759,50 @@ def test_collector_does_not_count_recovered_already_subscribed_as_protocol_error
         ]
     finally:
         engine.dispose()
+
+
+def test_collector_applies_subscribe_sid_to_acknowledged_channel_only() -> None:
+    config = load_config(
+        {
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+        }
+    )
+
+    async def websocket_factory(*_args):
+        raise AssertionError("websocket factory should not be used")
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=None,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector.status.subscription_request_ids = {"ticker": 2, "trade": 2}
+
+    collector._handle_market_control_message(
+        parse_ws_payload(
+            {
+                "type": "subscribed",
+                "id": 2,
+                "msg": {
+                    "sid": 12,
+                    "channel": "ticker",
+                },
+            },
+            target_market_ticker="KXBTC15M-TEST",
+            received_at=NOW,
+        )
+    )
+
+    assert collector.status.subscription_ids == {"ticker": 12}
+    assert collector.status.subscription_request_ids == {"trade": 2}
+    assert collector.status.ticker_sid_confirmed is True
+    assert collector.status.trade_sid_confirmed is False
 
 
 def test_collector_dedicated_brti_failure_does_not_stop_market_ws(tmp_path) -> None:
@@ -3368,6 +3413,79 @@ def test_collector_marks_queued_orderbook_pending_until_writer_commit(tmp_path) 
         assert collector.status.orderbook_persistence_pending_age_ms is None
         assert "orderbook_persistence_pending" not in collector.status.blockers
         assert collector.status.last_orderbook_at == NOW
+        with session_factory() as session:
+            assert (
+                session.scalar(select(func.count()).select_from(OrderbookSnapshot))
+                == 1
+            )
+    finally:
+        engine.dispose()
+
+
+def test_collector_finishes_queued_snapshot_recovery_after_sequence_advances(
+    tmp_path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_slow_snapshot.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+
+    async def websocket_factory(*_args):
+        raise AssertionError("websocket factory should not be used")
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector.status.active_market_ticker = "KXBTC15M-TEST"
+    collector.status.orderbook_sequence_number = 1
+    collector.status.market_recovery_attempt_in_progress = True
+    collector.status.market_recovery_attempt_started_at = NOW
+    collector.status.orderbook_recovery_action = "request_snapshot"
+    collector.status.market_subscription_recovery_last_reason = "market_data_quiet"
+    collector.status.market_subscription_recovery_last_action = "get_snapshot"
+    collector.status.market_subscription_recovery_last_result = "requested"
+    collector._add_warning("snapshot_resync_pending")
+    collector._db_writer_queue = asyncio.Queue(maxsize=10)
+
+    try:
+        persisted = collector._persist_orderbook(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC15M-TEST",
+                received_at=NOW,
+                sequence_number=1,
+                yes_bid=Decimal("0.61"),
+            ),
+            queued_recovery_result="snapshot_initialized",
+            queued_clear_recovery_warnings=True,
+        )
+
+        assert persisted is False
+        item = collector._db_writer_queue.get_nowait()
+        collector.status.orderbook_sequence_number = 2
+        collector._write_market_db_item(item)
+
+        assert collector.status.market_recovery_attempt_in_progress is False
+        assert collector.status.market_snapshot_resync_last_result == (
+            "snapshot_initialized"
+        )
+        assert collector.status.orderbook_recovery_action == "none"
+        assert "snapshot_resync_pending" not in collector.status.warnings
+        assert collector.status.orderbook_persistence_pending_count == 0
+        assert "orderbook_persistence_pending" not in collector.status.blockers
         with session_factory() as session:
             assert (
                 session.scalar(select(func.count()).select_from(OrderbookSnapshot))

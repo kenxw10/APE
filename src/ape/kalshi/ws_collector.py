@@ -89,6 +89,8 @@ class _DbWriterItem:
     payload: Any
     enqueued_at: datetime
     orderbook_recovery_result: str | None = None
+    orderbook_recovery_reason: str | None = None
+    orderbook_recovery_action: str | None = None
     clear_orderbook_recovery_warnings: bool = False
 
 
@@ -1664,8 +1666,25 @@ class KalshiWsCollector:
         if request_id is None or subscription_id is None:
             return
 
-        for channel, existing_id in list(self.status.subscription_request_ids.items()):
-            if existing_id == request_id:
+        pending_channels = [
+            channel
+            for channel, existing_id in self.status.subscription_request_ids.items()
+            if existing_id == request_id
+        ]
+        acknowledged_channels = set(_message_channels(payload))
+        if acknowledged_channels:
+            channels_to_ack = [
+                channel
+                for channel in pending_channels
+                if channel in acknowledged_channels
+            ]
+        elif len(pending_channels) == 1:
+            channels_to_ack = pending_channels
+        else:
+            channels_to_ack = []
+
+        for channel in channels_to_ack:
+            if channel in self.status.subscription_request_ids:
                 self.status.subscription_ids[channel] = subscription_id
                 del self.status.subscription_request_ids[channel]
                 self._refresh_sid_confirmations()
@@ -2284,11 +2303,18 @@ class KalshiWsCollector:
                 blockers=("orderbook_persistence_failed",),
             )
             self.status.last_orderbook_at = item.payload.received_at
-            matches_current_book = _orderbook_commit_matches_current(
+            matches_active_market = _orderbook_commit_matches_active_market(
                 item.payload,
-                self.status.orderbook_sequence_number,
+                self.status.active_market_ticker,
             )
-            if item.orderbook_recovery_result is not None and matches_current_book:
+            recovery_still_current = self._queued_orderbook_recovery_still_current(
+                item
+            )
+            if (
+                item.orderbook_recovery_result is not None
+                and matches_active_market
+                and recovery_still_current
+            ):
                 self.status.market_snapshot_resync_last_result = (
                     item.orderbook_recovery_result
                 )
@@ -2297,12 +2323,28 @@ class KalshiWsCollector:
                     result=item.orderbook_recovery_result,
                     checked_at=item.payload.received_at,
                 )
-            if item.clear_orderbook_recovery_warnings and matches_current_book:
+            if (
+                item.clear_orderbook_recovery_warnings
+                and matches_active_market
+                and recovery_still_current
+            ):
                 self._clear_orderbook_recovery_warnings()
             self._finish_orderbook_persistence_pending(item.payload.received_at)
         elif item.kind == "trade":
             self._mark_persistence_success(warning="trade_persistence_failed")
             self.status.last_trade_at = item.payload.received_at
+
+    def _queued_orderbook_recovery_still_current(self, item: _DbWriterItem) -> bool:
+        if item.orderbook_recovery_result is None:
+            return False
+        if item.orderbook_recovery_reason is None:
+            return True
+        return (
+            self.status.market_subscription_recovery_last_reason
+            == item.orderbook_recovery_reason
+            and self.status.market_subscription_recovery_last_action
+            == item.orderbook_recovery_action
+        )
 
     def _mark_orderbook_persistence_pending(self, queued_at: datetime) -> None:
         if self.status.orderbook_persistence_pending_count == 0:
@@ -2358,6 +2400,16 @@ class KalshiWsCollector:
                     payload=payload,
                     enqueued_at=enqueued_at,
                     orderbook_recovery_result=orderbook_recovery_result,
+                    orderbook_recovery_reason=(
+                        self.status.market_subscription_recovery_last_reason
+                        if orderbook_recovery_result is not None
+                        else None
+                    ),
+                    orderbook_recovery_action=(
+                        self.status.market_subscription_recovery_last_action
+                        if orderbook_recovery_result is not None
+                        else None
+                    ),
                     clear_orderbook_recovery_warnings=(
                         clear_orderbook_recovery_warnings
                     ),
@@ -3406,6 +3458,13 @@ def _orderbook_commit_matches_current(
     )
 
 
+def _orderbook_commit_matches_active_market(
+    snapshot: OrderbookSnapshotInput,
+    active_market_ticker: str | None,
+) -> bool:
+    return active_market_ticker is None or snapshot.market_ticker == active_market_ticker
+
+
 def _reference_tick_valid(value: Any) -> bool:
     return (
         getattr(value, "parse_status", None) == "valid"
@@ -3600,6 +3659,13 @@ def _message_sid(payload: dict[str, Any]) -> int | None:
     if not isinstance(message, dict):
         return None
     return _int_or_none(message.get("sid"))
+
+
+def _message_channels(payload: dict[str, Any]) -> list[str]:
+    message = payload.get("msg")
+    if not isinstance(message, dict):
+        return []
+    return _subscription_entry_channels(message)
 
 
 def _list_subscription_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
