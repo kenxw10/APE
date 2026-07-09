@@ -2806,6 +2806,8 @@ class KalshiWsCollector:
     def _should_persist_protocol_event(self, event: KalshiWsProtocolEventInput) -> bool:
         if _protocol_event_is_critical(event.event_type):
             return True
+        if event.event_type not in ROUTINE_PROTOCOL_EVENTS:
+            return True
         rate = (
             self.config.market_protocol_event_error_sample_rate
             if _protocol_event_counts_as_error(

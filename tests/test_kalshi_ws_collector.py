@@ -3470,6 +3470,79 @@ def test_collector_diagnostic_queue_backpressure_does_not_block_market(
         engine.dispose()
 
 
+def test_collector_persists_control_protocol_events_without_sampling(
+    tmp_path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_protocol_sampling.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "MARKET_PROTOCOL_EVENT_SAMPLE_RATE": "0.02",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+
+    async def websocket_factory(*_args):
+        raise AssertionError("websocket factory should not be used")
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector._db_critical_queue = asyncio.Queue(maxsize=10)
+    collector._db_writer_queue = collector._db_critical_queue
+    collector._db_diagnostic_queue = asyncio.Queue(maxsize=10)
+
+    try:
+        for command_id, channel in enumerate(
+            ("orderbook_delta", "ticker", "trade"),
+            start=1,
+        ):
+            collector._record_protocol_event(
+                "subscribe_sent",
+                channel=channel,
+                command_id=command_id,
+                command_type="subscribe",
+            )
+        for _ in range(3):
+            collector._record_protocol_event("ticker_received", channel="ticker")
+
+        assert collector.status.protocol_events_sampled_out == 2
+        assert collector._db_diagnostic_queue.qsize() == 4
+
+        _flush_queued_market_db_writes(collector)
+
+        with session_factory() as session:
+            events = list(
+                session.scalars(
+                    select(KalshiWsProtocolEvent).order_by(KalshiWsProtocolEvent.id)
+                )
+            )
+            assert [event.event_type for event in events] == [
+                "subscribe_sent",
+                "subscribe_sent",
+                "subscribe_sent",
+                "ticker_received",
+            ]
+            assert [event.channel for event in events[:3]] == [
+                "orderbook_delta",
+                "ticker",
+                "trade",
+            ]
+    finally:
+        engine.dispose()
+
+
 def test_collector_marks_queued_orderbook_pending_until_writer_commit(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_orderbook_pending.sqlite'}"
     config = load_config(
