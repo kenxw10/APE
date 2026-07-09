@@ -2490,7 +2490,186 @@ def test_collector_waits_for_confirmed_orderbook_sid_before_snapshot_resync(
         assert requested is False
         assert websocket.sent == []
         assert collector.status.orderbook_recovery_action == "wait_for_subscription_ack"
+        assert collector.status.market_recovery_attempt_in_progress is True
+        assert (
+            collector.status.market_subscription_recovery_last_reason
+            == "orderbook_sid_pending"
+        )
         assert "orderbook_snapshot_resync_unavailable" not in collector.status.warnings
+    finally:
+        engine.dispose()
+
+
+def test_collector_reconnects_when_orderbook_sid_ack_times_out(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_sid_timeout.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_HEARTBEAT_TIMEOUT_SECONDS": "1",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket([])
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=lambda *_args: websocket,
+        resolver=_resolved_market,
+        now=lambda: NOW + timedelta(seconds=2),
+    )
+    collector.status.subscription_request_ids = {"orderbook_delta": 1}
+    collector._last_market_subscribe_requested_at = NOW
+
+    try:
+        requested = asyncio.run(
+            collector._request_orderbook_snapshot(
+                websocket,
+                market_ticker="KXBTC15M-TEST",
+                checked_at=NOW + timedelta(seconds=2),
+                reason="market_data_quiet",
+            )
+        )
+
+        assert requested is False
+        assert websocket.sent == []
+        assert collector.status.orderbook_recovery_action == "reconnect"
+        assert (
+            collector.status.orderbook_liveness_reason
+            == "kalshi_orderbook_subscription_ack_timeout"
+        )
+        assert "kalshi_orderbook_subscription_ack_timeout" in collector.status.blockers
+        assert collector.status.market_recovery_attempt_in_progress is False
+        assert collector.status.market_unrecovered_blocker_count == 1
+        assert (
+            collector.status.market_subscription_recovery_last_result
+            == "failed"
+        )
+    finally:
+        engine.dispose()
+
+
+def test_collector_reconnects_after_market_subscription_error(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_subscription_error.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+            "KALSHI_WS_RECONNECT_SECONDS": "0.01",
+            "KALSHI_WS_MAX_RECONNECT_SECONDS": "0.01",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    websocket = FakeWebSocket(
+        [
+            {
+                "type": "error",
+                "id": 1,
+                "msg": {"code": 400, "msg": "subscription failed"},
+            }
+        ]
+    )
+
+    async def websocket_factory(*_args):
+        return websocket
+
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=websocket_factory,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+
+    try:
+        asyncio.run(collector.run(stop_event=threading.Event(), max_cycles=1))
+
+        with session_factory() as session:
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                "ape-worker"
+            )
+
+            assert heartbeat is not None
+            ws_metadata = heartbeat.metadata_["ws"]
+            assert collector.status.connection_state == "reconnect_pending"
+            assert collector.status.reconnect_count == 1
+            assert (
+                ws_metadata["market_subscription_recovery_last_reason"]
+                == "kalshi_orderbook_subscription_recovery_failed"
+            )
+            assert ws_metadata["market_subscription_recovery_last_action"] == "reconnect"
+            assert ws_metadata["market_subscription_recovery_last_result"] == "failed"
+            assert ws_metadata["market_recovery_attempt_in_progress"] is False
+            assert ws_metadata["market_unrecovered_blocker_count"] == 1
+            assert (
+                "kalshi_orderbook_subscription_recovery_failed"
+                in ws_metadata["blockers"]
+            )
+    finally:
+        engine.dispose()
+
+
+def test_collector_records_failed_snapshot_resync_result(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_ws_snapshot_send_failed.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "KALSHI_API_KEY_ID": "key-id",
+            "KALSHI_PRIVATE_KEY": _test_private_key_pem(),
+            "KALSHI_WS_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+
+    class FailingSendWebSocket(FakeWebSocket):
+        async def send(self, message: str) -> None:
+            del message
+            raise RuntimeError("snapshot send failed")
+
+    websocket = FailingSendWebSocket([])
+    collector = KalshiWsCollector(
+        config=config,
+        safety=assess_startup_safety(config),
+        session_factory=session_factory,
+        started_at=NOW,
+        websocket_factory=lambda *_args: websocket,
+        resolver=_resolved_market,
+        now=lambda: NOW,
+    )
+    collector.status.subscription_ids = {"orderbook_delta": 11}
+
+    try:
+        requested = asyncio.run(
+            collector._request_orderbook_snapshot(
+                websocket,
+                market_ticker="KXBTC15M-TEST",
+                checked_at=NOW,
+                reason="market_data_quiet",
+            )
+        )
+
+        assert requested is False
+        assert collector.status.orderbook_recovery_action == "reconnect"
+        assert collector.status.market_snapshot_resync_last_result == "failed"
+        assert collector.status.market_recovery_attempt_in_progress is False
+        assert collector.status.orderbook_liveness_reason == (
+            "kalshi_orderbook_snapshot_resync_failed"
+        )
+        assert "kalshi_orderbook_snapshot_resync_failed" in collector.status.blockers
     finally:
         engine.dispose()
 

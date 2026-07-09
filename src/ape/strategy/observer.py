@@ -200,6 +200,19 @@ class StrategyStatusSnapshot:
     market_feed_sequence_state: str | None
     market_data_quiet: bool | None
     orderbook_recovery_action: str | None
+    market_feed_state: str | None
+    market_subscription_recovery_count: int | None
+    market_subscription_recovery_last_reason: str | None
+    market_subscription_recovery_last_action: str | None
+    market_subscription_recovery_last_result: str | None
+    market_subscription_recovery_last_at: str | None
+    market_snapshot_resync_count: int | None
+    market_snapshot_resync_last_result: str | None
+    market_rollover_recovery_count: int | None
+    market_transport_reconnect_count: int | None
+    market_unrecovered_blocker_count: int | None
+    market_recovery_attempt_in_progress: bool | None
+    market_recovery_attempt_age_ms: int | None
     gate_results_summary: JsonPayload | None
     decision_age_seconds: float | None
     stale: bool
@@ -2129,6 +2142,58 @@ def _status_snapshot(
             latest_measurements_summary,
             "orderbook_recovery_action",
         ),
+        market_feed_state=_summary_text(
+            latest_measurements_summary,
+            "market_feed_state",
+        ),
+        market_subscription_recovery_count=_summary_int(
+            latest_measurements_summary,
+            "market_subscription_recovery_count",
+        ),
+        market_subscription_recovery_last_reason=_summary_text(
+            latest_measurements_summary,
+            "market_subscription_recovery_last_reason",
+        ),
+        market_subscription_recovery_last_action=_summary_text(
+            latest_measurements_summary,
+            "market_subscription_recovery_last_action",
+        ),
+        market_subscription_recovery_last_result=_summary_text(
+            latest_measurements_summary,
+            "market_subscription_recovery_last_result",
+        ),
+        market_subscription_recovery_last_at=_summary_text(
+            latest_measurements_summary,
+            "market_subscription_recovery_last_at",
+        ),
+        market_snapshot_resync_count=_summary_int(
+            latest_measurements_summary,
+            "market_snapshot_resync_count",
+        ),
+        market_snapshot_resync_last_result=_summary_text(
+            latest_measurements_summary,
+            "market_snapshot_resync_last_result",
+        ),
+        market_rollover_recovery_count=_summary_int(
+            latest_measurements_summary,
+            "market_rollover_recovery_count",
+        ),
+        market_transport_reconnect_count=_summary_int(
+            latest_measurements_summary,
+            "market_transport_reconnect_count",
+        ),
+        market_unrecovered_blocker_count=_summary_int(
+            latest_measurements_summary,
+            "market_unrecovered_blocker_count",
+        ),
+        market_recovery_attempt_in_progress=_summary_bool(
+            latest_measurements_summary,
+            "market_recovery_attempt_in_progress",
+        ),
+        market_recovery_attempt_age_ms=_summary_int(
+            latest_measurements_summary,
+            "market_recovery_attempt_age_ms",
+        ),
         gate_results_summary=gate_results_summary,
         decision_age_seconds=decision_age_seconds,
         stale=stale,
@@ -2464,6 +2529,58 @@ def _measurements(
         "market_data_quiet_age_ms": market_data_quiet_age_ms,
         "orderbook_snapshot_age_ms": orderbook_snapshot_age_ms,
         "orderbook_recovery_action": orderbook_recovery_action,
+        "market_feed_state": _metadata_text(
+            orderbook_worker_metadata,
+            "market_feed_state",
+        ),
+        "market_subscription_recovery_count": _metadata_int(
+            orderbook_worker_metadata,
+            "market_subscription_recovery_count",
+        ),
+        "market_subscription_recovery_last_reason": _metadata_text(
+            orderbook_worker_metadata,
+            "market_subscription_recovery_last_reason",
+        ),
+        "market_subscription_recovery_last_action": _metadata_text(
+            orderbook_worker_metadata,
+            "market_subscription_recovery_last_action",
+        ),
+        "market_subscription_recovery_last_result": _metadata_text(
+            orderbook_worker_metadata,
+            "market_subscription_recovery_last_result",
+        ),
+        "market_subscription_recovery_last_at": _metadata_text(
+            orderbook_worker_metadata,
+            "market_subscription_recovery_last_at",
+        ),
+        "market_snapshot_resync_count": _metadata_int(
+            orderbook_worker_metadata,
+            "market_snapshot_resync_count",
+        ),
+        "market_snapshot_resync_last_result": _metadata_text(
+            orderbook_worker_metadata,
+            "market_snapshot_resync_last_result",
+        ),
+        "market_rollover_recovery_count": _metadata_int(
+            orderbook_worker_metadata,
+            "market_rollover_recovery_count",
+        ),
+        "market_transport_reconnect_count": _metadata_int(
+            orderbook_worker_metadata,
+            "market_transport_reconnect_count",
+        ),
+        "market_unrecovered_blocker_count": _metadata_int(
+            orderbook_worker_metadata,
+            "market_unrecovered_blocker_count",
+        ),
+        "market_recovery_attempt_in_progress": _metadata_bool(
+            orderbook_worker_metadata,
+            "market_recovery_attempt_in_progress",
+        ),
+        "market_recovery_attempt_age_ms": _metadata_int(
+            orderbook_worker_metadata,
+            "market_recovery_attempt_age_ms",
+        ),
         "orderbook_carry_forward_allowed": orderbook_carry_forward_allowed,
         "orderbook_carry_forward_age_ms": orderbook_carry_forward_age_ms,
         "orderbook_carry_forward_max_age_ms": (
@@ -2668,6 +2785,19 @@ def _measurement_summary(measurements: Any) -> JsonPayload | None:
         "market_data_quiet_age_ms",
         "orderbook_snapshot_age_ms",
         "orderbook_recovery_action",
+        "market_feed_state",
+        "market_subscription_recovery_count",
+        "market_subscription_recovery_last_reason",
+        "market_subscription_recovery_last_action",
+        "market_subscription_recovery_last_result",
+        "market_subscription_recovery_last_at",
+        "market_snapshot_resync_count",
+        "market_snapshot_resync_last_result",
+        "market_rollover_recovery_count",
+        "market_transport_reconnect_count",
+        "market_unrecovered_blocker_count",
+        "market_recovery_attempt_in_progress",
+        "market_recovery_attempt_age_ms",
         "orderbook_carry_forward_allowed",
         "orderbook_carry_forward_age_ms",
         "orderbook_liveness_reason",
@@ -3119,6 +3249,9 @@ def _strategy_orderbook_stale_reason(
     if enforce_stream_live:
         if stream_live_reason is not None:
             return stream_live_reason
+        recovery_reason = _market_recovery_stale_reason(orderbook_worker_metadata)
+        if recovery_reason is not None:
+            return recovery_reason
         if market_feed_transport_state == "stale":
             return "kalshi_orderbook_transport_stale"
         if market_feed_subscription_state != "subscribed":
@@ -3166,6 +3299,9 @@ def _orderbook_stream_unusable_reason(
 ) -> str | None:
     if not isinstance(metadata, dict):
         return "kalshi_orderbook_age_exceeds_limit"
+    recovery_reason = _market_recovery_stale_reason(metadata)
+    if recovery_reason is not None:
+        return recovery_reason
     if connection_state != "subscribed":
         return "kalshi_orderbook_subscription_inactive"
     if active_market_ticker is not None and active_market_ticker != market_ticker:
@@ -3198,6 +3334,53 @@ def _orderbook_stream_unusable_reason(
     if blockers:
         return "kalshi_orderbook_transport_stale"
     del stream_age_ms
+    return None
+
+
+def _market_recovery_stale_reason(metadata: dict[str, Any] | None) -> str | None:
+    if not isinstance(metadata, dict):
+        return None
+    feed_state = _metadata_text(metadata, "market_feed_state")
+    last_reason = _metadata_text(metadata, "market_subscription_recovery_last_reason")
+    last_action = _metadata_text(metadata, "market_subscription_recovery_last_action")
+    last_result = _metadata_text(metadata, "market_subscription_recovery_last_result")
+    in_progress = _metadata_bool(metadata, "market_recovery_attempt_in_progress")
+
+    if feed_state == "ROLLING_MARKET" or last_reason in {
+        "market_roll_reresolve",
+        "market_roll_resubscribe_pending",
+        "market_roll_snapshot_pending",
+    }:
+        return "kalshi_orderbook_market_roll_snapshot_pending"
+
+    if in_progress:
+        if last_action in {"subscribe", "resubscribe", "wait_for_subscription_ack"}:
+            return "kalshi_orderbook_subscription_recovery_pending"
+        if last_action == "get_snapshot":
+            snapshot_state = _metadata_text(metadata, "market_feed_snapshot_state")
+            snapshot_source = _metadata_text(metadata, "orderbook_snapshot_source")
+            liveness_status = _metadata_text(metadata, "orderbook_liveness_status")
+            if (
+                snapshot_state == "initialized"
+                and snapshot_source != "blocked"
+                and liveness_status != "resync_pending"
+            ):
+                return None
+            return "kalshi_orderbook_snapshot_resync_pending"
+        if last_action == "reconnect":
+            return "kalshi_orderbook_transport_stale"
+
+    if last_result == "failed":
+        if last_reason in {
+            "kalshi_orderbook_subscription_ack_timeout",
+            "kalshi_orderbook_subscription_recovery_failed",
+            "orderbook_sid_missing",
+        }:
+            return "kalshi_orderbook_subscription_recovery_failed"
+        if last_reason == "kalshi_orderbook_snapshot_resync_failed":
+            return "kalshi_orderbook_snapshot_resync_failed"
+        if last_reason == "kalshi_orderbook_transport_stale":
+            return "kalshi_orderbook_transport_stale"
     return None
 
 

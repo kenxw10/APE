@@ -506,6 +506,44 @@ def test_strategy_carries_forward_old_orderbook_when_stream_is_live(session) -> 
     )
 
 
+def test_strategy_keeps_background_snapshot_refresh_warning_only(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        latest_orderbook_received_at=now - timedelta(seconds=5),
+    )
+    _record_feed_heartbeat(
+        session,
+        now=now,
+        orderbook_stream_last_message_at=now - timedelta(seconds=5),
+        orderbook_snapshot_source="carried_forward",
+        orderbook_recovery_action="request_snapshot",
+        market_recovery_attempt_in_progress=True,
+        market_subscription_recovery_last_reason="market_data_quiet",
+        market_subscription_recovery_last_action="get_snapshot",
+        market_subscription_recovery_last_result="requested",
+        market_recovery_attempt_age_ms=500,
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state != STATE_KALSHI_STALE
+    assert "kalshi_orderbook_data_quiet_carried_forward" in decision.warnings
+    assert decision.primary_reason != "kalshi_orderbook_snapshot_resync_pending"
+    assert decision.measurements["orderbook_carry_forward_allowed"] is True
+    assert decision.measurements["orderbook_snapshot_source"] == "carried_forward"
+    assert decision.measurements["market_recovery_attempt_in_progress"] is True
+    assert decision.measurements["gate_results"]["book"]["status"] == "warn"
+
+
 def test_strategy_carries_forward_with_legacy_fresh_stream_heartbeat(session) -> None:
     now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
     config = load_config({"STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000"})
@@ -564,6 +602,77 @@ def test_strategy_blocks_old_orderbook_when_stream_is_stale(session) -> None:
     assert decision.primary_reason == "kalshi_orderbook_transport_stale"
     assert decision.measurements["gate_results"]["book"]["status"] == "block"
     assert decision.measurements["gate_results"]["book"]["transport_state"] == "stale"
+
+
+def test_strategy_reports_subscription_recovery_pending(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        latest_orderbook_received_at=now - timedelta(seconds=5),
+    )
+    _record_feed_heartbeat(
+        session,
+        now=now,
+        orderbook_connection_state="connecting",
+        orderbook_initialized=False,
+        market_feed_state="RECOVERING_SUBSCRIPTION",
+        market_recovery_attempt_in_progress=True,
+        market_subscription_recovery_last_reason="orderbook_sid_pending",
+        market_subscription_recovery_last_action="wait_for_subscription_ack",
+        market_subscription_recovery_last_result="waiting",
+        market_recovery_attempt_age_ms=500,
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_KALSHI_STALE
+    assert decision.primary_reason == "kalshi_orderbook_subscription_recovery_pending"
+    assert decision.measurements["market_feed_state"] == "RECOVERING_SUBSCRIPTION"
+    assert decision.measurements["market_recovery_attempt_in_progress"] is True
+    assert decision.measurements["market_recovery_attempt_age_ms"] == 500
+
+
+def test_strategy_reports_subscription_recovery_failed(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"STRATEGY_KALSHI_BOOK_MAX_AGE_MS": "2000"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(
+        session,
+        now=now,
+        latest_orderbook_received_at=now - timedelta(seconds=5),
+    )
+    _record_feed_heartbeat(
+        session,
+        now=now,
+        orderbook_connection_state="reconnect_pending",
+        orderbook_initialized=False,
+        market_feed_state="BLOCKED_UNRECOVERED",
+        market_subscription_recovery_last_reason=(
+            "kalshi_orderbook_subscription_ack_timeout"
+        ),
+        market_subscription_recovery_last_action="reconnect",
+        market_subscription_recovery_last_result="failed",
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_KALSHI_STALE
+    assert decision.primary_reason == "kalshi_orderbook_subscription_recovery_failed"
+    assert decision.measurements["market_feed_state"] == "BLOCKED_UNRECOVERED"
+    assert decision.measurements["market_unrecovered_blocker_count"] == 1
 
 
 def test_strategy_allows_fresh_orderbook_when_stream_live_requirement_disabled(
@@ -1896,6 +2005,14 @@ def _record_feed_heartbeat(
     orderbook_transport_alive: bool = True,
     orderbook_transport_last_pong_at: datetime | None = None,
     orderbook_transport_state: str = "healthy",
+    market_feed_state: str = "LIVE",
+    orderbook_snapshot_source: str = "fresh_update",
+    orderbook_recovery_action: str = "none",
+    market_recovery_attempt_in_progress: bool = False,
+    market_subscription_recovery_last_reason: str | None = None,
+    market_subscription_recovery_last_action: str | None = None,
+    market_subscription_recovery_last_result: str | None = None,
+    market_recovery_attempt_age_ms: int | None = None,
     brti_last_valid_message_at: datetime | None = None,
     brti_last_valid_message_source_ts: datetime | None = None,
     brti_last_valid_message_value: str | None = "62110",
@@ -1937,8 +2054,33 @@ def _record_feed_heartbeat(
             if int((now - stream_at).total_seconds() * 1000) > 3000
             else None
         ),
-        "orderbook_snapshot_source": "fresh_update",
-        "orderbook_recovery_action": "none",
+        "orderbook_snapshot_source": orderbook_snapshot_source,
+        "orderbook_recovery_action": orderbook_recovery_action,
+        "market_feed_state": market_feed_state,
+        "market_subscription_recovery_count": 0,
+        "market_subscription_recovery_last_reason": (
+            market_subscription_recovery_last_reason
+        ),
+        "market_subscription_recovery_last_action": (
+            market_subscription_recovery_last_action
+        ),
+        "market_subscription_recovery_last_result": (
+            market_subscription_recovery_last_result
+        ),
+        "market_subscription_recovery_last_at": (
+            stream_at.isoformat()
+            if market_subscription_recovery_last_reason is not None
+            else None
+        ),
+        "market_snapshot_resync_count": 0,
+        "market_snapshot_resync_last_result": None,
+        "market_rollover_recovery_count": 0,
+        "market_transport_reconnect_count": 0,
+        "market_unrecovered_blocker_count": (
+            1 if market_subscription_recovery_last_result == "failed" else 0
+        ),
+        "market_recovery_attempt_in_progress": market_recovery_attempt_in_progress,
+        "market_recovery_attempt_age_ms": market_recovery_attempt_age_ms,
         "last_ticker_at": stream_at.isoformat(),
         "last_trade_at": stream_at.isoformat(),
         "last_orderbook_at": (now - timedelta(seconds=5)).isoformat(),

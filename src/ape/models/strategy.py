@@ -78,6 +78,19 @@ class StrategyStatusResponse(BaseModel):
     market_feed_sequence_state: str | None
     market_data_quiet: bool | None
     orderbook_recovery_action: str | None
+    market_feed_state: str | None
+    market_subscription_recovery_count: int | None
+    market_subscription_recovery_last_reason: str | None
+    market_subscription_recovery_last_action: str | None
+    market_subscription_recovery_last_result: str | None
+    market_subscription_recovery_last_at: str | None
+    market_snapshot_resync_count: int | None
+    market_snapshot_resync_last_result: str | None
+    market_rollover_recovery_count: int | None
+    market_transport_reconnect_count: int | None
+    market_unrecovered_blocker_count: int | None
+    market_recovery_attempt_in_progress: bool | None
+    market_recovery_attempt_age_ms: int | None
     gate_results_summary: JsonPayload | None
     decision_age_seconds: float | None
     stale: bool

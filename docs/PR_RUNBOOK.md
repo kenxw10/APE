@@ -272,3 +272,46 @@ PR 9d post-merge checkpoint:
 - Confirm this PR did not tune strategy thresholds and did not add paper/live,
   order, fill, private-channel, account, executor, or dashboard control
   behavior.
+
+PR 9e post-merge checkpoint:
+
+- Keep `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`,
+  `STRATEGY_DRY_RUN_ENABLED=true`, `TRADING_ENABLED=false`, and `EXECUTE=false`
+  on the Railway worker only.
+- Redeploy the Railway worker and validate `/ws/status`, `/strategy/status`,
+  `/strategy/decisions/latest`, `/strategy/decisions/recent`,
+  `/strategy/gates/recent`, `/reference/brti/status`, `/storage/status`,
+  `/health`, `/safety`, `/db/status`, and `/ready`.
+- Confirm `/ws/status` and strategy decision measurements expose
+  `market_feed_state`, `market_subscription_recovery_count`,
+  `market_subscription_recovery_last_reason`,
+  `market_subscription_recovery_last_action`,
+  `market_subscription_recovery_last_result`,
+  `market_subscription_recovery_last_at`, `market_snapshot_resync_count`,
+  `market_snapshot_resync_last_result`, `market_rollover_recovery_count`,
+  `market_transport_reconnect_count`, `market_unrecovered_blocker_count`,
+  `market_recovery_attempt_in_progress`, and
+  `market_recovery_attempt_age_ms`.
+- Confirm transient `kalshi_orderbook_subscription_inactive` conditions become
+  bounded recovery states such as
+  `kalshi_orderbook_subscription_recovery_pending` or
+  `kalshi_orderbook_snapshot_resync_pending` before they become hard blockers.
+- Confirm failed subscribe ACK waits, failed snapshot resync sends, or repeated
+  unrecovered subscription errors escalate to market WebSocket reconnects and
+  explicit blockers such as `kalshi_orderbook_subscription_recovery_failed`.
+- Confirm market rollover records a rollover recovery state, clears the old
+  runtime book, and requires a fresh or resynced snapshot for the new BTC15
+  ticker before the strategy reuses the orderbook.
+- PowerShell validation loops must use `${field}` when a variable is followed
+  by a colon. Use this form:
+
+```powershell
+foreach ($field in $requiredWsFields) {
+  $finalWsField = $finalWs.$field
+  Write-Host "final_ws_field_${field}: $finalWsField"
+}
+```
+
+- Confirm this PR did not tune strategy thresholds and did not add paper/live,
+  order, fill, private-channel, account, executor, credential, or dashboard
+  control behavior.

@@ -61,6 +61,19 @@ class MarketFeedLiveness:
     orderbook_snapshot_age_ms: int | None
     orderbook_snapshot_source: str | None
     orderbook_recovery_action: str | None
+    market_feed_state: str | None
+    market_subscription_recovery_count: int
+    market_subscription_recovery_last_reason: str | None
+    market_subscription_recovery_last_action: str | None
+    market_subscription_recovery_last_result: str | None
+    market_subscription_recovery_last_at: datetime | None
+    market_snapshot_resync_count: int
+    market_snapshot_resync_last_result: str | None
+    market_rollover_recovery_count: int
+    market_transport_reconnect_count: int
+    market_unrecovered_blocker_count: int
+    market_recovery_attempt_in_progress: bool
+    market_recovery_attempt_age_ms: int | None
 
 
 @dataclass(frozen=True)
@@ -238,6 +251,43 @@ def load_market_feed_liveness(
             (metadata or {}).get("orderbook_snapshot_source")
         ),
         orderbook_recovery_action=orderbook_recovery_action,
+        market_feed_state=_str_or_none((metadata or {}).get("market_feed_state")),
+        market_subscription_recovery_count=_int_or_zero(
+            (metadata or {}).get("market_subscription_recovery_count")
+        ),
+        market_subscription_recovery_last_reason=_str_or_none(
+            (metadata or {}).get("market_subscription_recovery_last_reason")
+        ),
+        market_subscription_recovery_last_action=_str_or_none(
+            (metadata or {}).get("market_subscription_recovery_last_action")
+        ),
+        market_subscription_recovery_last_result=_str_or_none(
+            (metadata or {}).get("market_subscription_recovery_last_result")
+        ),
+        market_subscription_recovery_last_at=_datetime_or_none(
+            (metadata or {}).get("market_subscription_recovery_last_at")
+        ),
+        market_snapshot_resync_count=_int_or_zero(
+            (metadata or {}).get("market_snapshot_resync_count")
+        ),
+        market_snapshot_resync_last_result=_str_or_none(
+            (metadata or {}).get("market_snapshot_resync_last_result")
+        ),
+        market_rollover_recovery_count=_int_or_zero(
+            (metadata or {}).get("market_rollover_recovery_count")
+        ),
+        market_transport_reconnect_count=_int_or_zero(
+            (metadata or {}).get("market_transport_reconnect_count")
+        ),
+        market_unrecovered_blocker_count=_int_or_zero(
+            (metadata or {}).get("market_unrecovered_blocker_count")
+        ),
+        market_recovery_attempt_in_progress=_bool_or_false(
+            (metadata or {}).get("market_recovery_attempt_in_progress")
+        ),
+        market_recovery_attempt_age_ms=_int_or_none(
+            (metadata or {}).get("market_recovery_attempt_age_ms")
+        ),
     )
 
 
@@ -399,6 +449,11 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _int_or_zero(value: Any) -> int:
+    parsed = _int_or_none(value)
+    return parsed if parsed is not None else 0
 
 
 def _metadata_state(
