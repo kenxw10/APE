@@ -45,6 +45,22 @@ class MarketFeedLiveness:
     latest_trade_received_at: datetime | None
     stream_last_message_at: datetime | None
     stream_age_ms: int | None
+    transport_alive: bool
+    transport_last_pong_at: datetime | None
+    transport_age_ms: int | None
+    transport_liveness_reason: str | None
+    last_market_data_message_at: datetime | None
+    market_data_message_age_ms: int | None
+    market_feed_transport_state: str
+    market_feed_subscription_state: str
+    market_feed_snapshot_state: str
+    market_feed_active_ticker_state: str
+    market_feed_sequence_state: str
+    market_data_quiet: bool
+    market_data_quiet_age_ms: int | None
+    orderbook_snapshot_age_ms: int | None
+    orderbook_snapshot_source: str | None
+    orderbook_recovery_action: str | None
 
 
 @dataclass(frozen=True)
@@ -103,6 +119,56 @@ def load_market_feed_liveness(
         _datetime_or_none((metadata or {}).get("last_trade_at")),
         _datetime_or_none((metadata or {}).get("last_orderbook_at")),
     )
+    last_market_data_message_at = _latest_datetime(
+        _datetime_or_none((metadata or {}).get("last_market_data_message_at")),
+        _datetime_or_none((metadata or {}).get("last_ticker_at")),
+        _datetime_or_none((metadata or {}).get("last_trade_at")),
+        _datetime_or_none((metadata or {}).get("last_orderbook_at")),
+    )
+    transport_last_pong_at = _datetime_or_none(
+        (metadata or {}).get("transport_last_pong_at")
+    )
+    transport_age_ms = _age_ms(transport_last_pong_at, checked_at)
+    transport_state = _transport_state(
+        alive=_bool_or_false((metadata or {}).get("transport_alive")),
+        transport_age_ms=transport_age_ms,
+        timeout_ms=int(config.kalshi_ws_heartbeat_timeout_seconds * 1000),
+    )
+    stored_transport_state = _str_or_none(
+        (metadata or {}).get("market_feed_transport_state")
+    )
+    if transport_state == "unknown" and stored_transport_state == "stale":
+        transport_state = "stale"
+    orderbook_snapshot_age_ms = _age_ms(
+        _as_utc(latest_orderbook.received_at) if latest_orderbook else None,
+        checked_at,
+    )
+    active_ticker_state = _active_ticker_state(
+        expected=active_market_ticker,
+        observed=_str_or_none((metadata or {}).get("active_market_ticker")),
+    )
+    market_data_age_ms = _age_ms(last_market_data_message_at, checked_at)
+    market_data_quiet = _bool_or_false((metadata or {}).get("market_data_quiet")) or (
+        market_data_age_ms is not None
+        and market_data_age_ms > config.strategy_kalshi_book_stream_max_age_ms
+    )
+    market_data_quiet_age_ms = _int_or_none(
+        (metadata or {}).get("market_data_quiet_age_ms")
+    ) or (market_data_age_ms if market_data_quiet else None)
+    orderbook_recovery_action = _str_or_none(
+        (metadata or {}).get("orderbook_recovery_action")
+    )
+    if orderbook_recovery_action == "none":
+        orderbook_recovery_action = None
+    if orderbook_recovery_action is None and (
+        market_data_quiet
+        or (
+            orderbook_snapshot_age_ms is not None
+            and orderbook_snapshot_age_ms
+            > config.strategy_kalshi_book_carry_forward_max_age_ms
+        )
+    ):
+        orderbook_recovery_action = "request_snapshot"
     return MarketFeedLiveness(
         source=source,
         metadata=metadata,
@@ -130,6 +196,48 @@ def load_market_feed_liveness(
         ),
         stream_last_message_at=stream_last_message_at,
         stream_age_ms=_age_ms(stream_last_message_at, checked_at),
+        transport_alive=_bool_or_false((metadata or {}).get("transport_alive")),
+        transport_last_pong_at=transport_last_pong_at,
+        transport_age_ms=transport_age_ms,
+        transport_liveness_reason=_str_or_none(
+            (metadata or {}).get("transport_liveness_reason")
+        ),
+        last_market_data_message_at=last_market_data_message_at,
+        market_data_message_age_ms=market_data_age_ms,
+        market_feed_transport_state=transport_state,
+        market_feed_subscription_state=_metadata_state(
+            metadata,
+            "market_feed_subscription_state",
+            _subscription_state(_str_or_none((metadata or {}).get("connection_state"))),
+        ),
+        market_feed_snapshot_state=_metadata_state(
+            metadata,
+            "market_feed_snapshot_state",
+            _snapshot_state(
+                initialized=_bool_or_false((metadata or {}).get("orderbook_initialized")),
+                orderbook_snapshot_age_ms=orderbook_snapshot_age_ms,
+                carry_forward_max_age_ms=(
+                    config.strategy_kalshi_book_carry_forward_max_age_ms
+                ),
+            ),
+        ),
+        market_feed_active_ticker_state=_metadata_state(
+            metadata,
+            "market_feed_active_ticker_state",
+            active_ticker_state,
+        ),
+        market_feed_sequence_state=_metadata_state(
+            metadata,
+            "market_feed_sequence_state",
+            _sequence_state(metadata),
+        ),
+        market_data_quiet=market_data_quiet,
+        market_data_quiet_age_ms=market_data_quiet_age_ms,
+        orderbook_snapshot_age_ms=orderbook_snapshot_age_ms,
+        orderbook_snapshot_source=_str_or_none(
+            (metadata or {}).get("orderbook_snapshot_source")
+        ),
+        orderbook_recovery_action=orderbook_recovery_action,
     )
 
 
@@ -274,3 +382,97 @@ def _str_or_none(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _bool_or_false(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _metadata_state(
+    metadata: dict[str, Any] | None,
+    key: str,
+    fallback: str,
+) -> str:
+    return _str_or_none((metadata or {}).get(key)) or fallback
+
+
+def _transport_state(
+    *,
+    alive: bool,
+    transport_age_ms: int | None,
+    timeout_ms: int,
+) -> str:
+    if transport_age_ms is None:
+        return "unknown"
+    return "healthy" if alive and transport_age_ms <= timeout_ms else "stale"
+
+
+def _subscription_state(connection_state: str | None) -> str:
+    if connection_state == "subscribed":
+        return "subscribed"
+    if connection_state == "error":
+        return "error"
+    if connection_state in {"disabled", "not_configured"}:
+        return "unsubscribed"
+    return "unknown"
+
+
+def _snapshot_state(
+    *,
+    initialized: bool,
+    orderbook_snapshot_age_ms: int | None,
+    carry_forward_max_age_ms: int,
+) -> str:
+    if not initialized:
+        return "missing"
+    if (
+        orderbook_snapshot_age_ms is not None
+        and orderbook_snapshot_age_ms > carry_forward_max_age_ms
+    ):
+        return "stale_cap_exceeded"
+    return "initialized"
+
+
+def _active_ticker_state(*, expected: str | None, observed: str | None) -> str:
+    if expected is None and observed is None:
+        return "missing"
+    if expected is not None and observed is not None and expected != observed:
+        return "mismatch"
+    return "match"
+
+
+def _sequence_state(metadata: dict[str, Any] | None) -> str:
+    warnings = _string_list((metadata or {}).get("warnings"))
+    blockers = _string_list((metadata or {}).get("blockers"))
+    reasons = set(warnings + blockers)
+    if reasons.intersection(
+        {
+            "orderbook_sequence_gap_reset",
+            "orderbook_reset_after_buffer_overflow",
+            "kalshi_websocket_buffer_overflow",
+            "kalshi_orderbook_sequence_gap_or_reset",
+        }
+    ):
+        return "gap"
+    if _bool_or_false((metadata or {}).get("orderbook_initialized")):
+        return "clean"
+    return "unknown"
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if item is not None]

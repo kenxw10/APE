@@ -73,6 +73,10 @@ class BrtiReferenceStatusResponse(BaseModel):
     time_since_last_message_ms: int | None
     time_since_last_persisted_ms: int | None
     time_since_last_valid_tick_ms: int | None
+    brti_reference_transport_alive: bool
+    brti_reference_last_valid_message_age_ms: int | None
+    brti_reference_no_valid_tick_timeout: bool
+    brti_reference_reconnect_requested: bool
     last_error_type: str | None
     last_error_message: str | None
     reconnect_count: int

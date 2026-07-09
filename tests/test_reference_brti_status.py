@@ -859,6 +859,9 @@ def test_brti_status_marks_worker_timeout_stale_with_fresh_messages(tmp_path) ->
         assert body["status_category"] == "stale_transport"
         assert body["stale_reason"] == "brti_reference_no_valid_tick_timeout"
         assert body["stale_since"] == _isoformat_z(stale_since)
+        assert body["brti_reference_no_valid_tick_timeout"] is True
+        assert body["brti_reference_reconnect_requested"] is True
+        assert body["brti_reference_transport_alive"] is False
     finally:
         engine.dispose()
 
