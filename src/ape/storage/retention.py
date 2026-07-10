@@ -6,6 +6,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from math import isfinite
 from time import monotonic, sleep
 from typing import Any
 from uuid import uuid4
@@ -162,6 +163,7 @@ class StorageRetentionResult:
 @dataclass
 class StorageRetentionRuntimeStatus:
     enabled: bool
+    interval_seconds: float | None = None
     connection_state: str = "disabled"
     last_run_id: str | None = None
     last_started_at: datetime | None = None
@@ -192,6 +194,7 @@ class StorageRetentionRuntimeStatus:
     def as_metadata(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
+            "interval_seconds": self.interval_seconds,
             "worker_role": STORAGE_WORKER_ROLE_MAINTENANCE,
             "connection_state": self.connection_state,
             "last_run_id": self.last_run_id,
@@ -301,7 +304,8 @@ class StorageRetentionWorker:
         self.started_at = started_at
         self.now = now or (lambda: datetime.now(UTC))
         self.status = StorageRetentionRuntimeStatus(
-            enabled=config.storage_retention_enabled
+            enabled=config.storage_retention_enabled,
+            interval_seconds=config.storage_retention_interval_seconds,
         )
         self._last_storage_heartbeat_at: datetime | None = None
 
@@ -424,6 +428,7 @@ def run_storage_retention_once(
 
     deleted_rows = _zero_counts()
     raw_payload_stripped_rows = _zero_counts()
+    mutated_rows_by_table = _zero_counts()
     table_row_counts_before: dict[str, int | None] = {}
     table_row_counts_after: dict[str, int | None] = {}
     table_sizes_before: dict[str, dict[str, int | None]] = {}
@@ -478,6 +483,7 @@ def run_storage_retention_once(
                     repository=repository,
                     policies=selected_policies,
                     deleted_rows=deleted_rows,
+                    mutated_rows_by_table=mutated_rows_by_table,
                     started_at=started_at,
                     started_monotonic=started_monotonic,
                     warnings=warnings,
@@ -488,6 +494,7 @@ def run_storage_retention_once(
                     repository=repository,
                     policies=selected_policies,
                     raw_payload_stripped_rows=raw_payload_stripped_rows,
+                    mutated_rows_by_table=mutated_rows_by_table,
                     started_at=started_at,
                     started_monotonic=started_monotonic,
                     warnings=warnings,
@@ -679,6 +686,7 @@ def _apply_row_retention(
     repository: StorageRetentionRepository,
     policies: tuple[RetentionPolicy, ...],
     deleted_rows: dict[str, int],
+    mutated_rows_by_table: dict[str, int],
     started_at: datetime,
     started_monotonic: float,
     warnings: list[str],
@@ -698,9 +706,11 @@ def _apply_row_retention(
             _sleep_between_retention_tables(config, table_index, policies)
             continue
 
-        table_deleted_rows = 0
         while not _max_run_seconds_reached(config, started_monotonic, warnings):
-            batch_size = _retention_batch_size(config, table_deleted_rows)
+            batch_size = _retention_batch_size(
+                config,
+                mutated_rows_by_table[policy.table_name],
+            )
             if batch_size <= 0:
                 break
             deleted = repository.delete_batch(
@@ -712,7 +722,7 @@ def _apply_row_retention(
             if deleted <= 0:
                 break
             deleted_rows[policy.table_name] += deleted
-            table_deleted_rows += deleted
+            mutated_rows_by_table[policy.table_name] += deleted
             repository.session.commit()
             _retention_sleep_ms(config.storage_retention_batch_sleep_ms)
         _mark_row_cap_exhausted_if_needed(
@@ -721,7 +731,7 @@ def _apply_row_retention(
             policy=policy,
             condition_sql=policy.delete_condition_sql,
             parameters={"cutoff": cutoff},
-            rows_processed=table_deleted_rows,
+            rows_processed=mutated_rows_by_table[policy.table_name],
             warnings=warnings,
         )
         _sleep_between_retention_tables(config, table_index, policies)
@@ -733,6 +743,7 @@ def _apply_raw_payload_retention(
     repository: StorageRetentionRepository,
     policies: tuple[RetentionPolicy, ...],
     raw_payload_stripped_rows: dict[str, int],
+    mutated_rows_by_table: dict[str, int],
     started_at: datetime,
     started_monotonic: float,
     warnings: list[str],
@@ -760,9 +771,11 @@ def _apply_raw_payload_retention(
             _sleep_between_retention_tables(config, table_index, policies)
             continue
 
-        table_stripped_rows = 0
         while not _max_run_seconds_reached(config, started_monotonic, warnings):
-            batch_size = _retention_batch_size(config, table_stripped_rows)
+            batch_size = _retention_batch_size(
+                config,
+                mutated_rows_by_table[policy.table_name],
+            )
             if batch_size <= 0:
                 break
             updated = repository.strip_raw_payload_batch(
@@ -774,7 +787,7 @@ def _apply_raw_payload_retention(
             if updated <= 0:
                 break
             raw_payload_stripped_rows[policy.table_name] += updated
-            table_stripped_rows += updated
+            mutated_rows_by_table[policy.table_name] += updated
             repository.session.commit()
             _retention_sleep_ms(config.storage_retention_batch_sleep_ms)
         _mark_row_cap_exhausted_if_needed(
@@ -783,7 +796,7 @@ def _apply_raw_payload_retention(
             policy=policy,
             condition_sql=policy.raw_payload_condition_sql,
             parameters={"cutoff": cutoff},
-            rows_processed=table_stripped_rows,
+            rows_processed=mutated_rows_by_table[policy.table_name],
             warnings=warnings,
         )
         _sleep_between_retention_tables(config, table_index, policies)
@@ -819,7 +832,10 @@ def _storage_status_snapshot(
         enabled=enabled and database_configured,
         heartbeat_at=liveness.heartbeat_at,
         checked_at=checked_at,
-        stale_after_seconds=max(config.storage_retention_interval_seconds * 2, 1.0),
+        stale_after_seconds=_worker_heartbeat_stale_after_seconds(
+            config,
+            worker_metadata,
+        ),
     )
     if worker_heartbeat_stale:
         warnings.append("storage_retention_worker_heartbeat_stale")
@@ -1049,6 +1065,25 @@ def _is_storage_worker_heartbeat_stale(
     if heartbeat_at is None:
         return True
     return (_as_utc(checked_at) - _as_utc(heartbeat_at)).total_seconds() > stale_after_seconds
+
+
+def _worker_heartbeat_stale_after_seconds(
+    config: AppConfig,
+    worker_metadata: dict[str, Any] | None,
+) -> float:
+    worker_interval_seconds = _positive_seconds_or_none(
+        (worker_metadata or {}).get("interval_seconds")
+    )
+    interval_seconds = worker_interval_seconds or config.storage_retention_interval_seconds
+    return max(interval_seconds * 2, 1.0)
+
+
+def _positive_seconds_or_none(value: Any) -> float | None:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if isfinite(seconds) and seconds > 0 else None
 
 
 def _latest_tables_processed(latest_run: StorageRetentionRun | None) -> list[str]:

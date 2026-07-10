@@ -347,6 +347,55 @@ def test_storage_status_reports_stale_maintenance_heartbeat(tmp_path) -> None:
     assert "storage_retention_worker_heartbeat_stale" in snapshot.warnings
 
 
+def test_storage_status_uses_worker_reported_interval_for_heartbeat_staleness(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_storage_worker_interval.sqlite'}"
+    checked_at = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    heartbeat_at = checked_at - timedelta(seconds=180)
+    engine = create_engine_from_config(load_config({"DATABASE_URL": database_url}))
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        with session_factory() as session:
+            WorkerHeartbeatRepository(session).record_heartbeat(
+                WorkerHeartbeatInput(
+                    service_name="ape-worker.maintenance",
+                    started_at=heartbeat_at,
+                    heartbeat_at=heartbeat_at,
+                    app_mode="OBSERVER",
+                    is_safe=True,
+                    metadata={
+                        "mode": "storage_retention",
+                        "storage": {
+                            "retention": {
+                                "enabled": True,
+                                "interval_seconds": 300,
+                                "worker_role": "maintenance",
+                                "connection_state": "idle",
+                                "warnings": [],
+                                "blockers": [],
+                            }
+                        },
+                    },
+                )
+            )
+            session.commit()
+    finally:
+        engine.dispose()
+
+    snapshot = retention_module.build_storage_status(
+        load_config(
+            {
+                "DATABASE_URL": database_url,
+                "STORAGE_RETENTION_INTERVAL_SECONDS": "60",
+            }
+        ),
+        now=checked_at,
+    )
+
+    assert snapshot.worker_heartbeat_stale is False
+    assert "storage_retention_worker_heartbeat_stale" not in snapshot.warnings
+
+
 def test_storage_status_warn_and_critical_thresholds(tmp_path, monkeypatch) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_storage_threshold.sqlite'}"
     engine = create_engine_from_config(load_config({"DATABASE_URL": database_url}))

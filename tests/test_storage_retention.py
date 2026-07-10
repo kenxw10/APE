@@ -364,6 +364,7 @@ def test_storage_retention_caps_delete_rows_per_table(retention_db) -> None:
     result = run_storage_retention_once(config, session_factory, now=lambda: now)
 
     assert result.deleted_rows["orderbook_snapshots"] == 1
+    assert result.raw_payload_stripped_rows["orderbook_snapshots"] == 0
     assert result.status == RETENTION_SUCCESS_PARTIAL
     assert result.budget_exhausted is True
     assert "storage_retention_max_delete_rows_per_table_reached" in result.warnings
@@ -427,6 +428,46 @@ def test_storage_retention_raw_payload_cap_marks_remaining_backlog_partial(reten
     assert result.status == RETENTION_SUCCESS_PARTIAL
     assert result.budget_exhausted is True
     assert "storage_retention_max_delete_rows_per_table_reached" in result.warnings
+
+
+def test_storage_retention_shares_row_cap_with_raw_payload_stripping(retention_db) -> None:
+    database_url, session_factory = retention_db
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    config = _retention_config(
+        database_url,
+        row_seconds=60,
+        raw_seconds=30,
+        max_delete_rows_per_table=2,
+    )
+
+    with session_factory() as session:
+        OrderbookRepository(session).insert_snapshot(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC15M-DELETE",
+                received_at=now - timedelta(seconds=120),
+                raw_payload={"book": "old"},
+            )
+        )
+        for index in range(2):
+            OrderbookRepository(session).insert_snapshot(
+                OrderbookSnapshotInput(
+                    market_ticker=f"KXBTC15M-RAW-{index}",
+                    received_at=now - timedelta(seconds=45),
+                    raw_payload={"book": "old"},
+                )
+            )
+        session.commit()
+
+    result = run_storage_retention_once(config, session_factory, now=lambda: now)
+
+    assert result.deleted_rows["orderbook_snapshots"] == 1
+    assert result.raw_payload_stripped_rows["orderbook_snapshots"] == 1
+    assert result.status == RETENTION_SUCCESS_PARTIAL
+    assert result.budget_exhausted is True
+    with session_factory() as session:
+        remaining = session.scalars(select(OrderbookSnapshot)).all()
+        assert len(remaining) == 2
+        assert sum(row.raw_payload is None for row in remaining) == 1
 
 
 def test_storage_retention_uses_configured_smoothing_sleeps(
@@ -537,6 +578,10 @@ def test_storage_retention_worker_records_heartbeat_metadata(retention_db) -> No
         assert component is not None
         assert component.metadata_["mode"] == "storage_retention"
         assert component.metadata_["storage"]["retention"]["enabled"] is True
+        assert (
+            component.metadata_["storage"]["retention"]["interval_seconds"]
+            == config.storage_retention_interval_seconds
+        )
 
 
 def test_storage_retention_worker_offloads_run_from_event_loop(
