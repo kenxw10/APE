@@ -104,6 +104,8 @@ def test_strategy_blocks_on_market_protocol_readiness_failures() -> None:
     }
 
     def stale_reason(metadata):
+        metadata_warnings = metadata.get("warnings", [])
+        metadata_blockers = metadata.get("blockers", [])
         return observer_module._strategy_orderbook_stale_reason(
             config=config,
             orderbook=object(),
@@ -112,8 +114,12 @@ def test_strategy_blocks_on_market_protocol_readiness_failures() -> None:
             orderbook_stream_age_ms=100,
             orderbook_stream_connection_state="subscribed",
             orderbook_stream_active_market_ticker="KXBTC15M-TEST",
-            orderbook_stream_warnings=[],
-            orderbook_stream_blockers=[],
+            orderbook_stream_warnings=(
+                metadata_warnings if isinstance(metadata_warnings, list) else []
+            ),
+            orderbook_stream_blockers=(
+                metadata_blockers if isinstance(metadata_blockers, list) else []
+            ),
             market_feed_transport_state="healthy",
             market_feed_subscription_state="subscribed",
             market_feed_snapshot_state="initialized",
@@ -140,6 +146,16 @@ def test_strategy_blocks_on_market_protocol_readiness_failures() -> None:
     )
     assert stale_reason(
         {**base_metadata, "db_writer_critical_queue_oldest_age_ms": 10_000}
+    ) == (
+        "kalshi_orderbook_db_writer_backpressure"
+    )
+    assert stale_reason(
+        {**base_metadata, "blockers": ["market_critical_persistence_failed"]}
+    ) == (
+        "kalshi_orderbook_db_writer_backpressure"
+    )
+    assert stale_reason(
+        {**base_metadata, "blockers": ["market_critical_persistence_backpressure"]}
     ) == (
         "kalshi_orderbook_db_writer_backpressure"
     )

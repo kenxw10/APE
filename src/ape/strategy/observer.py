@@ -3414,6 +3414,8 @@ def _orderbook_stream_unusable_reason(
         for reason in reported_reasons
     ):
         return "kalshi_orderbook_invalid_update"
+    if _has_market_critical_persistence_blocker(blockers):
+        return "kalshi_orderbook_db_writer_backpressure"
     if blockers:
         return "kalshi_orderbook_transport_stale"
     del stream_age_ms
@@ -3437,9 +3439,7 @@ def _market_protocol_unusable_reason(
         if snapshot_age_ms is None or snapshot_age_ms > timeout_ms:
             return "kalshi_orderbook_snapshot_resync_timeout"
     blockers = _metadata_string_list(metadata, "blockers")
-    if "market_critical_persistence_failed" in blockers:
-        return "kalshi_orderbook_db_writer_backpressure"
-    if "market_critical_persistence_backpressure" in blockers:
+    if _has_market_critical_persistence_blocker(blockers):
         return "kalshi_orderbook_db_writer_backpressure"
     critical_depth = _metadata_int(metadata, "db_writer_critical_queue_depth")
     if critical_depth is None:
@@ -3454,6 +3454,16 @@ def _market_protocol_unusable_reason(
     if (_metadata_int(metadata, "protocol_event_recent_error_count") or 0) > 0:
         return "kalshi_orderbook_protocol_errors"
     return None
+
+
+def _has_market_critical_persistence_blocker(blockers: list[str]) -> bool:
+    return any(
+        blocker in blockers
+        for blocker in {
+            "market_critical_persistence_failed",
+            "market_critical_persistence_backpressure",
+        }
+    )
 
 
 def _market_recovery_stale_reason(metadata: dict[str, Any] | None) -> str | None:
