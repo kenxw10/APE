@@ -25,10 +25,24 @@ class StorageTableStatsResponse(BaseModel):
 
 class StorageStatusResponse(BaseModel):
     enabled: bool
+    configured_enabled: bool
     worker_observed_enabled: bool | None
+    effective_enabled: bool
+    dry_run: bool
     connection_state: str
     checked_at: datetime
     database_configured: bool
+    liveness_source: str
+    worker_role: str | None
+    worker_heartbeat_at: datetime | None
+    worker_heartbeat_age_ms: int | None
+    worker_started_at: datetime | None
+    component_heartbeat_at: datetime | None
+    component_heartbeat_age_ms: int | None
+    latest_component_heartbeat_mode: str | None
+    latest_aggregate_heartbeat_mode: str | None
+    liveness_source_mismatch: bool
+    worker_heartbeat_stale: bool
     retention_config: dict[str, Any]
     latest_run_found: bool
     latest_run_id: str | None
@@ -38,6 +52,14 @@ class StorageStatusResponse(BaseModel):
     latest_run_duration_ms: int | None
     latest_deleted_rows: dict[str, int]
     latest_raw_payload_stripped_rows: dict[str, int]
+    latest_run_budget_exhausted: bool
+    latest_tables_processed: list[str]
+    latest_tables_skipped: list[str]
+    latest_total_deleted_rows: int
+    latest_total_raw_payload_stripped_rows: int
+    latest_db_statement_timeout_count: int
+    latest_db_lock_timeout_count: int
+    latest_db_error_count: int
     latest_warnings: list[str]
     latest_blockers: list[str]
     table_stats: list[StorageTableStatsResponse]

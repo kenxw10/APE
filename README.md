@@ -34,6 +34,8 @@ PR 9f splits the production worker into explicit roles and adds a read-only Kals
 
 PR 9g hardens the dedicated market worker persistence path after PR 9f proved the WebSocket was live but the single DB writer queue could saturate. The market worker now prioritizes critical latest market state over noncritical protocol diagnostics, coalesces high-frequency orderbook state, batches DB writes, and samples routine protocol events under load. Diagnostic backlog may warn, but only critical persistence backlog/failure should block readiness. No live trading, paper trading, orders, private channels, account reads, dashboard trading controls, or strategy tuning is added.
 
+PR 9h hardens only the maintenance/storage path. `/storage/status` now reports maintenance component liveness from `ape-worker.maintenance`, effective retention enablement from worker metadata, latest run totals, budget/partial-run details, and DB timeout/error counters. Retention also adds small configurable sleeps and optional per-run caps so cleanup work can progress incrementally without hammering Railway Postgres. No strategy thresholds, trading states, Kalshi orders, private channels, account reads, credentials, or dashboard trading controls are added.
+
 ## Safety Defaults
 
 The default configuration is intentionally non-trading:
@@ -141,7 +143,7 @@ When `STRATEGY_OBSERVER_ENABLED=false`, `/strategy/status` should report `connec
 
 When `STRATEGY_DRY_RUN_ENABLED=false`, `/strategy/dry-run/status` should report `enabled` as `False` and `open_position_count` as `0`.
 
-When `STORAGE_RETENTION_ENABLED=false`, `/storage/status` should report retention as disabled while still returning read-only table stats if `DATABASE_URL` is configured.
+When `STORAGE_RETENTION_ENABLED=false`, `/storage/status` should report retention as disabled while still returning read-only table stats if `DATABASE_URL` is configured. When a dedicated maintenance worker enables retention, the API may still have `STORAGE_RETENTION_ENABLED=false`; `/storage/status.enabled` and `retention_config.enabled` then follow `worker_observed_enabled` from the `ape-worker.maintenance` heartbeat.
 
 ## Kalshi REST Resolver
 
@@ -328,6 +330,11 @@ STORAGE_RETENTION_INTERVAL_SECONDS=300
 STORAGE_RETENTION_BATCH_SIZE=5000
 STORAGE_RETENTION_MAX_RUN_SECONDS=20
 STORAGE_RETENTION_DRY_RUN=false
+STORAGE_RETENTION_INTER_TABLE_SLEEP_MS=100
+STORAGE_RETENTION_BATCH_SLEEP_MS=50
+# Optional caps for smoothing heavy catch-up runs:
+# STORAGE_RETENTION_MAX_TABLES_PER_RUN=
+# STORAGE_RETENTION_MAX_DELETE_ROWS_PER_TABLE=
 STORAGE_RETENTION_ORDERBOOK_SECONDS=7200
 STORAGE_RETENTION_PUBLIC_TRADES_SECONDS=86400
 STORAGE_RETENTION_REFERENCE_TICKS_SECONDS=86400
@@ -352,7 +359,9 @@ The read-only endpoint is:
 /storage/status
 ```
 
-It returns aggregate table stats, latest retention-run audit information, warning/critical database-size status, and retention config summary. It does not expose raw payload contents, secrets, or any delete controls.
+It returns aggregate table stats, latest retention-run audit information, maintenance liveness fields (`liveness_source`, `worker_role`, heartbeat timestamps/ages, component/aggregate modes, `worker_heartbeat_stale`), warning/critical database-size status, and retention config summary. A healthy dedicated maintenance worker should show `liveness_source=component`, `worker_role=maintenance`, `latest_component_heartbeat_mode=storage_retention`, `worker_heartbeat_stale=false`, and latest run status `success` or `success_partial` with no blockers. It does not expose raw payload contents, secrets, or any delete controls.
+
+`success_partial` means the worker reached a configured time/table budget and stopped cleanly so the next interval can continue. Treat that as acceptable incremental progress unless it repeats with no row-count movement, DB timeouts, or blockers.
 
 Postgres deletes do not immediately shrink physical disk usage. Normal autovacuum should make freed table space reusable. A manual `VACUUM FULL` can shrink files but locks tables and is intentionally out of scope; APE never runs `VACUUM FULL` automatically.
 
