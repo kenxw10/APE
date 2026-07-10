@@ -145,6 +145,10 @@ class AppConfig:
     storage_retention_batch_size: int = 5000
     storage_retention_max_run_seconds: float = 20.0
     storage_retention_dry_run: bool = False
+    storage_retention_inter_table_sleep_ms: int = 100
+    storage_retention_batch_sleep_ms: int = 50
+    storage_retention_max_tables_per_run: int | None = None
+    storage_retention_max_delete_rows_per_table: int | None = None
     storage_retention_orderbook_seconds: int = 7200
     storage_retention_public_trades_seconds: int = 86400
     storage_retention_reference_ticks_seconds: int = 86400
@@ -601,6 +605,22 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
             "STORAGE_RETENTION_DRY_RUN",
             _get(source, "STORAGE_RETENTION_DRY_RUN", "false"),
         ),
+        storage_retention_inter_table_sleep_ms=_parse_non_negative_int(
+            "STORAGE_RETENTION_INTER_TABLE_SLEEP_MS",
+            _get(source, "STORAGE_RETENTION_INTER_TABLE_SLEEP_MS", "100"),
+        ),
+        storage_retention_batch_sleep_ms=_parse_non_negative_int(
+            "STORAGE_RETENTION_BATCH_SLEEP_MS",
+            _get(source, "STORAGE_RETENTION_BATCH_SLEEP_MS", "50"),
+        ),
+        storage_retention_max_tables_per_run=_parse_optional_positive_int(
+            "STORAGE_RETENTION_MAX_TABLES_PER_RUN",
+            source.get("STORAGE_RETENTION_MAX_TABLES_PER_RUN"),
+        ),
+        storage_retention_max_delete_rows_per_table=_parse_optional_positive_int(
+            "STORAGE_RETENTION_MAX_DELETE_ROWS_PER_TABLE",
+            source.get("STORAGE_RETENTION_MAX_DELETE_ROWS_PER_TABLE"),
+        ),
         storage_retention_orderbook_seconds=_parse_int(
             "STORAGE_RETENTION_ORDERBOOK_SECONDS",
             _get(source, "STORAGE_RETENTION_ORDERBOOK_SECONDS", "7200"),
@@ -771,6 +791,12 @@ def _parse_non_negative_int(name: str, raw_value: str) -> int:
     if value < 0:
         raise ConfigError(f"{name} must be greater than or equal to 0.")
     return value
+
+
+def _parse_optional_positive_int(name: str, raw_value: str | None) -> int | None:
+    if raw_value is None or raw_value.strip() == "":
+        return None
+    return _parse_int(name, raw_value)
 
 
 def _parse_required_text(name: str, raw_value: str) -> str:

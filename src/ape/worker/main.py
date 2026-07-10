@@ -212,6 +212,7 @@ def _record_idle_heartbeat(
                 "storage": {
                     "retention": {
                         "enabled": config.storage_retention_enabled,
+                        "worker_role": WORKER_ROLE_MAINTENANCE,
                         "connection_state": "disabled",
                         "last_run_id": None,
                         "last_started_at": None,
@@ -219,6 +220,9 @@ def _record_idle_heartbeat(
                         "last_status": None,
                         "last_deleted_rows": {},
                         "last_raw_payload_stripped_rows": {},
+                        "last_budget_exhausted": False,
+                        "last_tables_processed": [],
+                        "last_tables_skipped": [],
                         "warnings": ["storage_retention_disabled"],
                         "blockers": [],
                     }

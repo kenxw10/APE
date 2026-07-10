@@ -6,7 +6,8 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from time import monotonic
+from math import isfinite
+from time import monotonic, sleep
 from typing import Any
 from uuid import uuid4
 
@@ -14,7 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from ape.config import AppConfig
-from ape.db.models import StorageRetentionRun
+from ape.db.models import StorageRetentionRun, WorkerHeartbeat
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.repositories.inputs import StorageRetentionRunInput, WorkerHeartbeatInput
 from ape.repositories.storage_retention import StorageRetentionRepository
@@ -23,14 +24,23 @@ from ape.safety import SafetyAssessment
 from ape.worker.services import (
     WORKER_SERVICE_AGGREGATE,
     WORKER_SERVICE_STORAGE_RETENTION,
+    WORKER_SERVICE_STORAGE_RETENTION_LEGACY,
 )
 
 LOGGER = logging.getLogger(__name__)
 
 RETENTION_SUCCESS = "success"
+RETENTION_SUCCESS_PARTIAL = "success_partial"
 RETENTION_FAILED = "failed"
 RETENTION_RUNNING = "running"
 RETENTION_TIMED_OUT = "timed_out"
+RETENTION_SUCCESS_STATES = {RETENTION_SUCCESS, RETENTION_SUCCESS_PARTIAL}
+RETENTION_ROW_CAP_REACHED_WARNING = "storage_retention_max_delete_rows_per_table_reached"
+STORAGE_LIVENESS_SOURCE_COMPONENT = "component"
+STORAGE_LIVENESS_SOURCE_LEGACY_FALLBACK = "legacy_aggregate_fallback"
+STORAGE_LIVENESS_SOURCE_MISSING = "missing"
+STORAGE_LIVENESS_LEGACY_FALLBACK_WARNING = "feed_liveness_legacy_aggregate_fallback"
+STORAGE_WORKER_ROLE_MAINTENANCE = "maintenance"
 
 
 @dataclass(frozen=True)
@@ -130,6 +140,9 @@ class StorageRetentionResult:
     blockers: list[str]
     error_type: str | None = None
     error_message: str | None = None
+    budget_exhausted: bool = False
+    tables_processed: list[str] = field(default_factory=list)
+    tables_skipped: list[str] = field(default_factory=list)
 
     def as_metadata(self) -> dict[str, Any]:
         return {
@@ -139,6 +152,9 @@ class StorageRetentionResult:
             "last_status": self.status,
             "last_deleted_rows": self.deleted_rows,
             "last_raw_payload_stripped_rows": self.raw_payload_stripped_rows,
+            "last_budget_exhausted": self.budget_exhausted,
+            "last_tables_processed": self.tables_processed,
+            "last_tables_skipped": self.tables_skipped,
             "warnings": self.warnings,
             "blockers": self.blockers,
         }
@@ -147,6 +163,7 @@ class StorageRetentionResult:
 @dataclass
 class StorageRetentionRuntimeStatus:
     enabled: bool
+    interval_seconds: float | None = None
     connection_state: str = "disabled"
     last_run_id: str | None = None
     last_started_at: datetime | None = None
@@ -154,23 +171,31 @@ class StorageRetentionRuntimeStatus:
     last_status: str | None = None
     last_deleted_rows: dict[str, int] = field(default_factory=dict)
     last_raw_payload_stripped_rows: dict[str, int] = field(default_factory=dict)
+    last_budget_exhausted: bool = False
+    last_tables_processed: list[str] = field(default_factory=list)
+    last_tables_skipped: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
 
     def apply_result(self, result: StorageRetentionResult) -> None:
-        self.connection_state = "idle" if result.status == RETENTION_SUCCESS else "error"
+        self.connection_state = "idle" if result.status in RETENTION_SUCCESS_STATES else "error"
         self.last_run_id = result.run_id
         self.last_started_at = result.started_at
         self.last_finished_at = result.finished_at
         self.last_status = result.status
         self.last_deleted_rows = result.deleted_rows
         self.last_raw_payload_stripped_rows = result.raw_payload_stripped_rows
+        self.last_budget_exhausted = result.budget_exhausted
+        self.last_tables_processed = result.tables_processed
+        self.last_tables_skipped = result.tables_skipped
         self.warnings = result.warnings
         self.blockers = result.blockers
 
     def as_metadata(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
+            "interval_seconds": self.interval_seconds,
+            "worker_role": STORAGE_WORKER_ROLE_MAINTENANCE,
             "connection_state": self.connection_state,
             "last_run_id": self.last_run_id,
             "last_started_at": _isoformat_or_none(self.last_started_at),
@@ -178,6 +203,9 @@ class StorageRetentionRuntimeStatus:
             "last_status": self.last_status,
             "last_deleted_rows": self.last_deleted_rows,
             "last_raw_payload_stripped_rows": self.last_raw_payload_stripped_rows,
+            "last_budget_exhausted": self.last_budget_exhausted,
+            "last_tables_processed": self.last_tables_processed,
+            "last_tables_skipped": self.last_tables_skipped,
             "warnings": self.warnings,
             "blockers": self.blockers,
         }
@@ -200,12 +228,42 @@ class StorageTableStats:
 
 
 @dataclass(frozen=True)
+class StorageRetentionLiveness:
+    source: str
+    metadata: dict[str, Any] | None
+    heartbeat_at: datetime | None
+    heartbeat_age_ms: int | None
+    started_at: datetime | None
+    component_heartbeat_at: datetime | None
+    component_heartbeat_age_ms: int | None
+    latest_component_heartbeat_mode: str | None
+    latest_aggregate_heartbeat_mode: str | None
+    liveness_source_mismatch: bool
+    warnings: list[str]
+    worker_role: str | None
+
+
+@dataclass(frozen=True)
 class StorageStatusSnapshot:
     enabled: bool
+    configured_enabled: bool
     worker_observed_enabled: bool | None
+    effective_enabled: bool
+    dry_run: bool
     connection_state: str
     checked_at: datetime
     database_configured: bool
+    liveness_source: str
+    worker_role: str | None
+    worker_heartbeat_at: datetime | None
+    worker_heartbeat_age_ms: int | None
+    worker_started_at: datetime | None
+    component_heartbeat_at: datetime | None
+    component_heartbeat_age_ms: int | None
+    latest_component_heartbeat_mode: str | None
+    latest_aggregate_heartbeat_mode: str | None
+    liveness_source_mismatch: bool
+    worker_heartbeat_stale: bool
     retention_config: dict[str, Any]
     latest_run_found: bool
     latest_run_id: str | None
@@ -215,6 +273,14 @@ class StorageStatusSnapshot:
     latest_run_duration_ms: int | None
     latest_deleted_rows: dict[str, int]
     latest_raw_payload_stripped_rows: dict[str, int]
+    latest_run_budget_exhausted: bool
+    latest_tables_processed: list[str]
+    latest_tables_skipped: list[str]
+    latest_total_deleted_rows: int
+    latest_total_raw_payload_stripped_rows: int
+    latest_db_statement_timeout_count: int
+    latest_db_lock_timeout_count: int
+    latest_db_error_count: int
     latest_warnings: list[str]
     latest_blockers: list[str]
     table_stats: list[StorageTableStats]
@@ -238,7 +304,8 @@ class StorageRetentionWorker:
         self.started_at = started_at
         self.now = now or (lambda: datetime.now(UTC))
         self.status = StorageRetentionRuntimeStatus(
-            enabled=config.storage_retention_enabled
+            enabled=config.storage_retention_enabled,
+            interval_seconds=config.storage_retention_interval_seconds,
         )
         self._last_storage_heartbeat_at: datetime | None = None
 
@@ -354,10 +421,14 @@ def run_storage_retention_once(
             blockers=["database_not_configured_for_storage_retention"],
             error_type="DatabaseNotConfigured",
             error_message="DATABASE_URL is not configured.",
+            budget_exhausted=False,
+            tables_processed=[],
+            tables_skipped=list(RETENTION_TABLE_NAMES),
         )
 
     deleted_rows = _zero_counts()
     raw_payload_stripped_rows = _zero_counts()
+    mutated_rows_by_table = _zero_counts()
     table_row_counts_before: dict[str, int | None] = {}
     table_row_counts_after: dict[str, int | None] = {}
     table_sizes_before: dict[str, dict[str, int | None]] = {}
@@ -365,6 +436,8 @@ def run_storage_retention_once(
     warnings: list[str] = []
     blockers: list[str] = []
     started_monotonic = monotonic()
+    selected_policies: tuple[RetentionPolicy, ...] = ()
+    processed_table_names: list[str] = []
 
     try:
         with session_factory() as session:
@@ -376,6 +449,12 @@ def run_storage_retention_once(
             )
             if timed_out:
                 warnings.append("stale_running_retention_runs_marked_timed_out")
+            previous_run = repository.get_latest_run()
+            selected_policies, _ = _selected_retention_policies(
+                config=config,
+                warnings=warnings,
+                previous_run=previous_run,
+            )
             repository.start_run(
                 StorageRetentionRunInput(
                     run_id=run_id,
@@ -391,32 +470,50 @@ def run_storage_retention_once(
             session.commit()
 
             try:
-                table_row_counts_before = repository.row_counts(RETENTION_TABLE_NAMES)
-                table_sizes_before = repository.table_sizes(RETENTION_TABLE_NAMES)
+                def record_policy_started(policy: RetentionPolicy) -> None:
+                    table_name = policy.table_name
+                    if table_name in processed_table_names:
+                        return
+                    table_row_counts_before.update(repository.row_counts((table_name,)))
+                    table_sizes_before.update(repository.table_sizes((table_name,)))
+                    processed_table_names.append(table_name)
+
                 _apply_row_retention(
                     config=config,
                     repository=repository,
+                    policies=selected_policies,
                     deleted_rows=deleted_rows,
+                    mutated_rows_by_table=mutated_rows_by_table,
                     started_at=started_at,
                     started_monotonic=started_monotonic,
                     warnings=warnings,
+                    on_policy_started=record_policy_started,
                 )
                 _apply_raw_payload_retention(
                     config=config,
                     repository=repository,
+                    policies=selected_policies,
                     raw_payload_stripped_rows=raw_payload_stripped_rows,
+                    mutated_rows_by_table=mutated_rows_by_table,
                     started_at=started_at,
                     started_monotonic=started_monotonic,
                     warnings=warnings,
+                    on_policy_started=record_policy_started,
                 )
-                table_row_counts_after = repository.row_counts(RETENTION_TABLE_NAMES)
-                table_sizes_after = repository.table_sizes(RETENTION_TABLE_NAMES)
+                processed_table_names_tuple = tuple(processed_table_names)
+                table_row_counts_after = repository.row_counts(processed_table_names_tuple)
+                table_sizes_after = repository.table_sizes(processed_table_names_tuple)
                 finished_at = _as_utc(clock())
+                budget_exhausted = _retention_budget_exhausted(warnings)
                 result = StorageRetentionResult(
                     run_id=run_id,
                     started_at=started_at,
                     finished_at=finished_at,
-                    status=RETENTION_SUCCESS,
+                    status=(
+                        RETENTION_SUCCESS_PARTIAL
+                        if budget_exhausted
+                        else RETENTION_SUCCESS
+                    ),
                     dry_run=config.storage_retention_dry_run,
                     duration_ms=_duration_ms(started_at, finished_at),
                     deleted_rows=deleted_rows,
@@ -427,6 +524,9 @@ def run_storage_retention_once(
                     table_sizes_after=table_sizes_after,
                     warnings=_unique_strings(warnings),
                     blockers=blockers,
+                    budget_exhausted=budget_exhausted,
+                    tables_processed=list(processed_table_names),
+                    tables_skipped=_retention_tables_skipped(processed_table_names),
                 )
             except Exception as exc:
                 session.rollback()
@@ -448,6 +548,9 @@ def run_storage_retention_once(
                     blockers=["storage_retention_run_failed"],
                     error_type=exc.__class__.__name__,
                     error_message=_safe_error_message(exc),
+                    budget_exhausted=_retention_budget_exhausted(warnings),
+                    tables_processed=list(processed_table_names),
+                    tables_skipped=_retention_tables_skipped(processed_table_names),
                 )
 
             repository.finish_run(run_id, _result_to_input(result))
@@ -473,6 +576,9 @@ def run_storage_retention_once(
             blockers=["storage_retention_audit_persistence_failed"],
             error_type=exc.__class__.__name__,
             error_message=_safe_error_message(exc),
+            budget_exhausted=_retention_budget_exhausted(warnings),
+            tables_processed=list(processed_table_names),
+            tables_skipped=_retention_tables_skipped(processed_table_names),
         )
 
 
@@ -486,7 +592,7 @@ def build_storage_status(
     warnings: list[str] = []
     blockers: list[str] = []
     latest_run: StorageRetentionRun | None = None
-    worker_metadata: dict[str, Any] | None = None
+    liveness = _empty_storage_liveness(checked_at)
     table_stats: list[StorageTableStats] = []
     database_total_bytes: int | None = None
 
@@ -497,7 +603,7 @@ def build_storage_status(
             database_configured=False,
             retention_config=retention_config,
             latest_run=None,
-            worker_metadata=None,
+            liveness=liveness,
             table_stats=[],
             database_total_bytes=None,
             warnings=warnings,
@@ -511,21 +617,11 @@ def build_storage_status(
             with session_factory() as session:
                 retention_repository = StorageRetentionRepository(session)
                 heartbeat_repository = WorkerHeartbeatRepository(session)
-                heartbeat = heartbeat_repository.get_latest_heartbeat(
-                    WORKER_SERVICE_STORAGE_RETENTION
+                liveness = _load_storage_liveness(
+                    heartbeat_repository,
+                    checked_at=checked_at,
                 )
-                worker_metadata = _storage_worker_metadata(
-                    heartbeat.metadata_ if heartbeat else None
-                )
-                if worker_metadata is None:
-                    heartbeat = heartbeat_repository.get_latest_heartbeat(
-                        WORKER_SERVICE_AGGREGATE
-                    )
-                    worker_metadata = _storage_worker_metadata(
-                        heartbeat.metadata_ if heartbeat else None
-                    )
-                    if worker_metadata is not None:
-                        warnings.append("feed_liveness_legacy_aggregate_fallback")
+                warnings.extend(liveness.warnings)
                 latest_run = retention_repository.get_latest_run()
                 table_stats = [
                     _table_stats_for_policy(
@@ -548,7 +644,7 @@ def build_storage_status(
         database_configured=True,
         retention_config=retention_config,
         latest_run=latest_run,
-        worker_metadata=worker_metadata,
+        liveness=liveness,
         table_stats=table_stats,
         database_total_bytes=database_total_bytes,
         warnings=warnings,
@@ -559,10 +655,17 @@ def build_storage_status(
 def storage_retention_config_summary(config: AppConfig) -> dict[str, Any]:
     return {
         "enabled": config.storage_retention_enabled,
+        "configured_enabled": config.storage_retention_enabled,
+        "worker_observed_enabled": None,
+        "effective_enabled": config.storage_retention_enabled,
         "interval_seconds": config.storage_retention_interval_seconds,
         "batch_size": config.storage_retention_batch_size,
         "max_run_seconds": config.storage_retention_max_run_seconds,
         "dry_run": config.storage_retention_dry_run,
+        "inter_table_sleep_ms": config.storage_retention_inter_table_sleep_ms,
+        "batch_sleep_ms": config.storage_retention_batch_sleep_ms,
+        "max_tables_per_run": config.storage_retention_max_tables_per_run,
+        "max_delete_rows_per_table": config.storage_retention_max_delete_rows_per_table,
         "retention_seconds": {
             policy.table_name: _policy_retention_seconds(config, policy)
             for policy in RETENTION_POLICIES
@@ -581,14 +684,18 @@ def _apply_row_retention(
     *,
     config: AppConfig,
     repository: StorageRetentionRepository,
+    policies: tuple[RetentionPolicy, ...],
     deleted_rows: dict[str, int],
+    mutated_rows_by_table: dict[str, int],
     started_at: datetime,
     started_monotonic: float,
     warnings: list[str],
+    on_policy_started: Callable[[RetentionPolicy], None],
 ) -> None:
-    for policy in RETENTION_POLICIES:
+    for table_index, policy in enumerate(policies):
         if _max_run_seconds_reached(config, started_monotonic, warnings):
             return
+        on_policy_started(policy)
         cutoff = started_at - timedelta(seconds=_policy_retention_seconds(config, policy))
         if config.storage_retention_dry_run:
             deleted_rows[policy.table_name] = repository.count_matching(
@@ -596,38 +703,62 @@ def _apply_row_retention(
                 condition_sql=policy.delete_condition_sql,
                 parameters={"cutoff": cutoff},
             )
+            _sleep_between_retention_tables(config, table_index, policies)
             continue
 
         while not _max_run_seconds_reached(config, started_monotonic, warnings):
+            batch_size = _retention_batch_size(
+                config,
+                mutated_rows_by_table[policy.table_name],
+            )
+            if batch_size <= 0:
+                break
             deleted = repository.delete_batch(
                 table_name=policy.table_name,
                 condition_sql=policy.delete_condition_sql,
                 parameters={"cutoff": cutoff},
-                batch_size=config.storage_retention_batch_size,
+                batch_size=batch_size,
             )
             if deleted <= 0:
                 break
             deleted_rows[policy.table_name] += deleted
+            mutated_rows_by_table[policy.table_name] += deleted
             repository.session.commit()
+            _retention_sleep_ms(config.storage_retention_batch_sleep_ms)
+        _mark_row_cap_exhausted_if_needed(
+            config=config,
+            repository=repository,
+            policy=policy,
+            condition_sql=policy.delete_condition_sql,
+            parameters={"cutoff": cutoff},
+            rows_processed=mutated_rows_by_table[policy.table_name],
+            warnings=warnings,
+        )
+        _sleep_between_retention_tables(config, table_index, policies)
 
 
 def _apply_raw_payload_retention(
     *,
     config: AppConfig,
     repository: StorageRetentionRepository,
+    policies: tuple[RetentionPolicy, ...],
     raw_payload_stripped_rows: dict[str, int],
+    mutated_rows_by_table: dict[str, int],
     started_at: datetime,
     started_monotonic: float,
     warnings: list[str],
+    on_policy_started: Callable[[RetentionPolicy], None],
 ) -> None:
-    for policy in RETENTION_POLICIES:
+    for table_index, policy in enumerate(policies):
         if (
             policy.raw_payload_retention_config_key is None
             or policy.raw_payload_condition_sql is None
         ):
+            _sleep_between_retention_tables(config, table_index, policies)
             continue
         if _max_run_seconds_reached(config, started_monotonic, warnings):
             return
+        on_policy_started(policy)
         cutoff = started_at - timedelta(
             seconds=_policy_raw_payload_retention_seconds(config, policy) or 0
         )
@@ -637,19 +768,38 @@ def _apply_raw_payload_retention(
                 condition_sql=policy.raw_payload_condition_sql,
                 parameters={"cutoff": cutoff},
             )
+            _sleep_between_retention_tables(config, table_index, policies)
             continue
 
         while not _max_run_seconds_reached(config, started_monotonic, warnings):
+            batch_size = _retention_batch_size(
+                config,
+                mutated_rows_by_table[policy.table_name],
+            )
+            if batch_size <= 0:
+                break
             updated = repository.strip_raw_payload_batch(
                 table_name=policy.table_name,
                 condition_sql=policy.raw_payload_condition_sql,
                 parameters={"cutoff": cutoff},
-                batch_size=config.storage_retention_batch_size,
+                batch_size=batch_size,
             )
             if updated <= 0:
                 break
             raw_payload_stripped_rows[policy.table_name] += updated
+            mutated_rows_by_table[policy.table_name] += updated
             repository.session.commit()
+            _retention_sleep_ms(config.storage_retention_batch_sleep_ms)
+        _mark_row_cap_exhausted_if_needed(
+            config=config,
+            repository=repository,
+            policy=policy,
+            condition_sql=policy.raw_payload_condition_sql,
+            parameters={"cutoff": cutoff},
+            rows_processed=mutated_rows_by_table[policy.table_name],
+            warnings=warnings,
+        )
+        _sleep_between_retention_tables(config, table_index, policies)
 
 
 def _storage_status_snapshot(
@@ -659,12 +809,13 @@ def _storage_status_snapshot(
     database_configured: bool,
     retention_config: dict[str, Any],
     latest_run: StorageRetentionRun | None,
-    worker_metadata: dict[str, Any] | None,
+    liveness: StorageRetentionLiveness,
     table_stats: list[StorageTableStats],
     database_total_bytes: int | None,
     warnings: list[str],
     blockers: list[str],
 ) -> StorageStatusSnapshot:
+    worker_metadata = liveness.metadata
     worker_observed_enabled = (
         None if worker_metadata is None else bool(worker_metadata.get("enabled"))
     )
@@ -677,6 +828,17 @@ def _storage_status_snapshot(
     worker_blockers = _string_list(worker_metadata.get("blockers") if worker_metadata else [])
     warnings = [*warnings, *worker_warnings]
     blockers = [*blockers, *worker_blockers]
+    worker_heartbeat_stale = _is_storage_worker_heartbeat_stale(
+        enabled=enabled and database_configured,
+        heartbeat_at=liveness.heartbeat_at,
+        checked_at=checked_at,
+        stale_after_seconds=_worker_heartbeat_stale_after_seconds(
+            config,
+            worker_metadata,
+        ),
+    )
+    if worker_heartbeat_stale:
+        warnings.append("storage_retention_worker_heartbeat_stale")
 
     if worker_metadata is not None:
         connection_state = str(worker_metadata.get("connection_state") or "unknown")
@@ -718,30 +880,266 @@ def _storage_status_snapshot(
 
     latest_warnings = _string_list(latest_run.warnings if latest_run else [])
     latest_blockers = _string_list(latest_run.blockers if latest_run else [])
+    latest_deleted_rows = _int_dict(latest_run.deleted_rows if latest_run else None)
+    latest_raw_payload_stripped_rows = _int_dict(
+        latest_run.raw_payload_stripped_rows if latest_run else None
+    )
+    latest_tables_processed = _latest_tables_processed(latest_run)
+    latest_tables_skipped = _latest_tables_skipped(latest_tables_processed)
+    latest_run_budget_exhausted = _latest_run_budget_exhausted(
+        latest_run,
+        latest_warnings,
+    )
+    timeout_counts = _latest_db_timeout_counts(latest_run)
+    effective_retention_config = {
+        **retention_config,
+        "enabled": enabled,
+        "configured_enabled": config.storage_retention_enabled,
+        "worker_observed_enabled": worker_observed_enabled,
+        "effective_enabled": enabled,
+    }
 
     return StorageStatusSnapshot(
         enabled=enabled,
+        configured_enabled=config.storage_retention_enabled,
         worker_observed_enabled=worker_observed_enabled,
+        effective_enabled=enabled,
+        dry_run=config.storage_retention_dry_run,
         connection_state=connection_state,
         checked_at=checked_at,
         database_configured=database_configured,
-        retention_config=retention_config,
+        liveness_source=liveness.source,
+        worker_role=liveness.worker_role,
+        worker_heartbeat_at=liveness.heartbeat_at,
+        worker_heartbeat_age_ms=liveness.heartbeat_age_ms,
+        worker_started_at=liveness.started_at,
+        component_heartbeat_at=liveness.component_heartbeat_at,
+        component_heartbeat_age_ms=liveness.component_heartbeat_age_ms,
+        latest_component_heartbeat_mode=liveness.latest_component_heartbeat_mode,
+        latest_aggregate_heartbeat_mode=liveness.latest_aggregate_heartbeat_mode,
+        liveness_source_mismatch=liveness.liveness_source_mismatch,
+        worker_heartbeat_stale=worker_heartbeat_stale,
+        retention_config=effective_retention_config,
         latest_run_found=latest_run is not None,
         latest_run_id=latest_run.run_id if latest_run else None,
         latest_run_status=latest_run.status if latest_run else None,
         latest_run_started_at=latest_run.started_at if latest_run else None,
         latest_run_finished_at=latest_run.finished_at if latest_run else None,
         latest_run_duration_ms=latest_run.duration_ms if latest_run else None,
-        latest_deleted_rows=_int_dict(latest_run.deleted_rows if latest_run else None),
-        latest_raw_payload_stripped_rows=_int_dict(
-            latest_run.raw_payload_stripped_rows if latest_run else None
+        latest_deleted_rows=latest_deleted_rows,
+        latest_raw_payload_stripped_rows=latest_raw_payload_stripped_rows,
+        latest_run_budget_exhausted=latest_run_budget_exhausted,
+        latest_tables_processed=latest_tables_processed,
+        latest_tables_skipped=latest_tables_skipped,
+        latest_total_deleted_rows=sum(latest_deleted_rows.values()),
+        latest_total_raw_payload_stripped_rows=sum(
+            latest_raw_payload_stripped_rows.values()
         ),
+        latest_db_statement_timeout_count=timeout_counts["statement_timeout"],
+        latest_db_lock_timeout_count=timeout_counts["lock_timeout"],
+        latest_db_error_count=timeout_counts["db_error"],
         latest_warnings=latest_warnings,
         latest_blockers=latest_blockers,
         table_stats=table_stats,
         warnings=_unique_strings(warnings),
         blockers=_unique_strings(blockers),
     )
+
+
+def _empty_storage_liveness(checked_at: datetime) -> StorageRetentionLiveness:
+    del checked_at
+    return StorageRetentionLiveness(
+        source=STORAGE_LIVENESS_SOURCE_MISSING,
+        metadata=None,
+        heartbeat_at=None,
+        heartbeat_age_ms=None,
+        started_at=None,
+        component_heartbeat_at=None,
+        component_heartbeat_age_ms=None,
+        latest_component_heartbeat_mode=None,
+        latest_aggregate_heartbeat_mode=None,
+        liveness_source_mismatch=False,
+        warnings=[],
+        worker_role=None,
+    )
+
+
+def _load_storage_liveness(
+    repository: WorkerHeartbeatRepository,
+    *,
+    checked_at: datetime,
+) -> StorageRetentionLiveness:
+    component = repository.get_latest_heartbeat(WORKER_SERVICE_STORAGE_RETENTION)
+    component_metadata = _storage_worker_metadata(
+        component.metadata_ if component else None
+    )
+    if component_metadata is None:
+        legacy_component = repository.get_latest_heartbeat(
+            WORKER_SERVICE_STORAGE_RETENTION_LEGACY
+        )
+        legacy_component_metadata = _storage_worker_metadata(
+            legacy_component.metadata_ if legacy_component else None
+        )
+        if legacy_component_metadata is not None:
+            component = legacy_component
+            component_metadata = legacy_component_metadata
+
+    aggregate = repository.get_latest_heartbeat(WORKER_SERVICE_AGGREGATE)
+    aggregate_metadata = _storage_worker_metadata(
+        aggregate.metadata_ if aggregate else None
+    )
+    selected, metadata, source, warnings = _select_storage_liveness(
+        component=component,
+        component_metadata=component_metadata,
+        aggregate=aggregate,
+        aggregate_metadata=aggregate_metadata,
+    )
+    component_heartbeat_at = _heartbeat_at(component) if component_metadata else None
+    heartbeat_at = _heartbeat_at(selected)
+    return StorageRetentionLiveness(
+        source=source,
+        metadata=metadata,
+        heartbeat_at=heartbeat_at,
+        heartbeat_age_ms=_age_ms(heartbeat_at, checked_at),
+        started_at=_started_at(selected),
+        component_heartbeat_at=component_heartbeat_at,
+        component_heartbeat_age_ms=_age_ms(component_heartbeat_at, checked_at),
+        latest_component_heartbeat_mode=_metadata_mode(component),
+        latest_aggregate_heartbeat_mode=_metadata_mode(aggregate),
+        liveness_source_mismatch=source == STORAGE_LIVENESS_SOURCE_LEGACY_FALLBACK,
+        warnings=warnings,
+        worker_role=_str_or_none((metadata or {}).get("worker_role")),
+    )
+
+
+def _select_storage_liveness(
+    *,
+    component: WorkerHeartbeat | None,
+    component_metadata: dict[str, Any] | None,
+    aggregate: WorkerHeartbeat | None,
+    aggregate_metadata: dict[str, Any] | None,
+) -> tuple[WorkerHeartbeat | None, dict[str, Any] | None, str, list[str]]:
+    if component is not None and component_metadata is not None:
+        return component, component_metadata, STORAGE_LIVENESS_SOURCE_COMPONENT, []
+    if aggregate_metadata is not None:
+        return (
+            aggregate,
+            aggregate_metadata,
+            STORAGE_LIVENESS_SOURCE_LEGACY_FALLBACK,
+            [STORAGE_LIVENESS_LEGACY_FALLBACK_WARNING],
+        )
+    return None, None, STORAGE_LIVENESS_SOURCE_MISSING, []
+
+
+def _heartbeat_at(heartbeat: WorkerHeartbeat | None) -> datetime | None:
+    return _as_utc(heartbeat.heartbeat_at) if heartbeat is not None else None
+
+
+def _started_at(heartbeat: WorkerHeartbeat | None) -> datetime | None:
+    if heartbeat is None or heartbeat.started_at is None:
+        return None
+    return _as_utc(heartbeat.started_at)
+
+
+def _metadata_mode(heartbeat: WorkerHeartbeat | None) -> str | None:
+    if heartbeat is None or not isinstance(heartbeat.metadata_, dict):
+        return None
+    return _str_or_none(heartbeat.metadata_.get("mode"))
+
+
+def _age_ms(value_at: datetime | None, checked_at: datetime) -> int | None:
+    if value_at is None:
+        return None
+    return max(0, int((_as_utc(checked_at) - _as_utc(value_at)).total_seconds() * 1000))
+
+
+def _is_storage_worker_heartbeat_stale(
+    *,
+    enabled: bool,
+    heartbeat_at: datetime | None,
+    checked_at: datetime,
+    stale_after_seconds: float,
+) -> bool:
+    if not enabled:
+        return False
+    if heartbeat_at is None:
+        return True
+    return (_as_utc(checked_at) - _as_utc(heartbeat_at)).total_seconds() > stale_after_seconds
+
+
+def _worker_heartbeat_stale_after_seconds(
+    config: AppConfig,
+    worker_metadata: dict[str, Any] | None,
+) -> float:
+    worker_interval_seconds = _positive_seconds_or_none(
+        (worker_metadata or {}).get("interval_seconds")
+    )
+    interval_seconds = worker_interval_seconds or config.storage_retention_interval_seconds
+    return max(interval_seconds * 2, 1.0)
+
+
+def _positive_seconds_or_none(value: Any) -> float | None:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if isfinite(seconds) and seconds > 0 else None
+
+
+def _latest_tables_processed(latest_run: StorageRetentionRun | None) -> list[str]:
+    if latest_run is None:
+        return []
+    table_names = _string_dict_keys(latest_run.table_row_counts_before)
+    if table_names:
+        return table_names
+    return [name for name, value in _int_dict(latest_run.deleted_rows).items() if value > 0]
+
+
+def _latest_tables_skipped(latest_tables_processed: list[str]) -> list[str]:
+    return _retention_tables_skipped(latest_tables_processed)
+
+
+def _retention_tables_skipped(processed_table_names: list[str]) -> list[str]:
+    processed = set(processed_table_names)
+    return [table_name for table_name in RETENTION_TABLE_NAMES if table_name not in processed]
+
+
+def _latest_run_budget_exhausted(
+    latest_run: StorageRetentionRun | None,
+    latest_warnings: list[str],
+) -> bool:
+    if latest_run is None:
+        return False
+    return (
+        latest_run.status == RETENTION_SUCCESS_PARTIAL
+        or "storage_retention_max_run_seconds_reached" in latest_warnings
+        or "storage_retention_max_tables_per_run_reached" in latest_warnings
+        or RETENTION_ROW_CAP_REACHED_WARNING in latest_warnings
+    )
+
+
+def _latest_db_timeout_counts(latest_run: StorageRetentionRun | None) -> dict[str, int]:
+    if latest_run is None:
+        return {"statement_timeout": 0, "lock_timeout": 0, "db_error": 0}
+    error_text = " ".join(
+        str(value or "")
+        for value in (
+            latest_run.error_type,
+            latest_run.error_message,
+        )
+    ).lower()
+    has_db_error = latest_run.status in {RETENTION_FAILED, RETENTION_TIMED_OUT}
+    return {
+        "statement_timeout": 1 if "statement timeout" in error_text else 0,
+        "lock_timeout": 1 if "lock timeout" in error_text else 0,
+        "db_error": 1 if has_db_error and latest_run.error_type else 0,
+    }
+
+
+def _string_dict_keys(value: Any) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+    return [str(key) for key in value if str(key) in RETENTION_TABLE_NAMES]
 
 
 def _table_stats_for_policy(
@@ -799,6 +1197,90 @@ def _policy_raw_payload_retention_seconds(
     if policy.raw_payload_retention_config_key is None:
         return None
     return int(getattr(config, policy.raw_payload_retention_config_key))
+
+
+def _selected_retention_policies(
+    *,
+    config: AppConfig,
+    warnings: list[str],
+    previous_run: StorageRetentionRun | None,
+) -> tuple[tuple[RetentionPolicy, ...], tuple[RetentionPolicy, ...]]:
+    max_tables = config.storage_retention_max_tables_per_run
+    if max_tables is None or max_tables >= len(RETENTION_POLICIES):
+        return RETENTION_POLICIES, ()
+
+    if "storage_retention_max_tables_per_run_reached" not in warnings:
+        warnings.append("storage_retention_max_tables_per_run_reached")
+    start_index = _next_retention_policy_index(previous_run)
+    ordered_policies = (
+        RETENTION_POLICIES[start_index:] + RETENTION_POLICIES[:start_index]
+    )
+    return ordered_policies[:max_tables], ordered_policies[max_tables:]
+
+
+def _next_retention_policy_index(previous_run: StorageRetentionRun | None) -> int:
+    if previous_run is None or previous_run.status not in RETENTION_SUCCESS_STATES:
+        return 0
+    processed_table_names = _latest_tables_processed(previous_run)
+    if not processed_table_names:
+        return 0
+    try:
+        last_index = RETENTION_TABLE_NAMES.index(processed_table_names[-1])
+    except ValueError:
+        return 0
+    return (last_index + 1) % len(RETENTION_POLICIES)
+
+
+def _retention_batch_size(config: AppConfig, rows_processed_for_table: int) -> int:
+    max_rows = config.storage_retention_max_delete_rows_per_table
+    if max_rows is None:
+        return config.storage_retention_batch_size
+
+    remaining = max_rows - rows_processed_for_table
+    return max(0, min(config.storage_retention_batch_size, remaining))
+
+
+def _mark_row_cap_exhausted_if_needed(
+    *,
+    config: AppConfig,
+    repository: StorageRetentionRepository,
+    policy: RetentionPolicy,
+    condition_sql: str,
+    parameters: dict[str, Any],
+    rows_processed: int,
+    warnings: list[str],
+) -> None:
+    max_rows = config.storage_retention_max_delete_rows_per_table
+    if max_rows is None or rows_processed < max_rows:
+        return
+    if repository.has_matching(
+        table_name=policy.table_name,
+        condition_sql=condition_sql,
+        parameters=parameters,
+    ) and RETENTION_ROW_CAP_REACHED_WARNING not in warnings:
+        warnings.append(RETENTION_ROW_CAP_REACHED_WARNING)
+
+
+def _sleep_between_retention_tables(
+    config: AppConfig,
+    table_index: int,
+    policies: tuple[RetentionPolicy, ...],
+) -> None:
+    if table_index < len(policies) - 1:
+        _retention_sleep_ms(config.storage_retention_inter_table_sleep_ms)
+
+
+def _retention_sleep_ms(duration_ms: int) -> None:
+    if duration_ms > 0:
+        sleep(duration_ms / 1000)
+
+
+def _retention_budget_exhausted(warnings: list[str]) -> bool:
+    return (
+        "storage_retention_max_run_seconds_reached" in warnings
+        or "storage_retention_max_tables_per_run_reached" in warnings
+        or RETENTION_ROW_CAP_REACHED_WARNING in warnings
+    )
 
 
 def _max_run_seconds_reached(
@@ -925,6 +1407,13 @@ def _pretty_bytes(value: int | None) -> str | None:
 def _safe_error_message(exc: Exception) -> str:
     message = str(exc).replace("\n", " ").strip()
     return message[:500]
+
+
+def _str_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 async def _sleep_or_stop(stop_event: threading.Event, seconds: float) -> None:

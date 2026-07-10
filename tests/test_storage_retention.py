@@ -44,7 +44,9 @@ from ape.safety import assess_startup_safety
 from ape.storage import retention as retention_module
 from ape.storage.retention import (
     RETENTION_SUCCESS,
+    RETENTION_SUCCESS_PARTIAL,
     StorageRetentionWorker,
+    build_storage_status,
     run_storage_retention_once,
 )
 
@@ -233,9 +235,270 @@ def test_storage_retention_max_duration_stops_before_chunks(
 
     result = run_storage_retention_once(config, session_factory, now=lambda: now)
 
+    assert result.status == RETENTION_SUCCESS_PARTIAL
+    assert result.budget_exhausted is True
+    assert result.tables_processed == []
+    assert "orderbook_snapshots" in result.tables_skipped
     assert "storage_retention_max_run_seconds_reached" in result.warnings
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(OrderbookSnapshot)) == 1
+
+
+def test_storage_retention_limits_tables_per_run(retention_db) -> None:
+    database_url, session_factory = retention_db
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    config = _retention_config(database_url, max_tables_per_run=1)
+
+    with session_factory() as session:
+        _insert_all_retained_tables(session, now)
+        session.commit()
+
+    result = run_storage_retention_once(config, session_factory, now=lambda: now)
+
+    assert result.status == RETENTION_SUCCESS_PARTIAL
+    assert result.tables_processed == ["orderbook_snapshots"]
+    assert "public_trades" in result.tables_skipped
+    assert "storage_retention_max_tables_per_run_reached" in result.warnings
+    with session_factory() as session:
+        latest = StorageRetentionRepository(session).get_latest_run()
+        assert latest is not None
+        assert list(latest.table_row_counts_before.keys()) == ["orderbook_snapshots"]
+    status = build_storage_status(config, now=now)
+    assert status.latest_tables_processed == ["orderbook_snapshots"]
+    assert "public_trades" in status.latest_tables_skipped
+
+
+def test_storage_retention_rotates_capped_tables_between_runs(retention_db) -> None:
+    database_url, session_factory = retention_db
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    config = _retention_config(database_url, max_tables_per_run=2)
+
+    first = run_storage_retention_once(config, session_factory, now=lambda: now)
+    second = run_storage_retention_once(
+        config,
+        session_factory,
+        now=lambda: now + timedelta(seconds=1),
+    )
+    third = run_storage_retention_once(
+        config,
+        session_factory,
+        now=lambda: now + timedelta(seconds=2),
+    )
+    fourth = run_storage_retention_once(
+        config,
+        session_factory,
+        now=lambda: now + timedelta(seconds=3),
+    )
+    fifth = run_storage_retention_once(
+        config,
+        session_factory,
+        now=lambda: now + timedelta(seconds=4),
+    )
+
+    assert first.tables_processed == ["orderbook_snapshots", "public_trades"]
+    assert second.tables_processed == ["reference_ticks", "worker_heartbeats"]
+    assert third.tables_processed == ["strategy_decisions", "kalshi_ws_protocol_events"]
+    assert fourth.tables_processed == [
+        "strategy_dry_run_positions",
+        "strategy_dry_run_events",
+    ]
+    assert fifth.tables_processed == ["markets", "orderbook_snapshots"]
+    assert "orderbook_snapshots" in second.tables_skipped
+    assert "strategy_decisions" in second.tables_skipped
+
+
+def test_storage_retention_reports_only_tables_reached_before_time_budget(
+    retention_db,
+    monkeypatch,
+) -> None:
+    database_url, session_factory = retention_db
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    config = _retention_config(database_url, max_run_seconds=1)
+    monotonic_values = iter([0.0, 0.0, 0.0, 2.0, 2.0, 2.0])
+    monkeypatch.setattr(retention_module, "monotonic", lambda: next(monotonic_values))
+
+    with session_factory() as session:
+        OrderbookRepository(session).insert_snapshot(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC15M-OLD",
+                received_at=now - timedelta(seconds=120),
+            )
+        )
+        session.commit()
+
+    result = run_storage_retention_once(config, session_factory, now=lambda: now)
+
+    assert result.status == RETENTION_SUCCESS_PARTIAL
+    assert result.tables_processed == ["orderbook_snapshots"]
+    assert "public_trades" in result.tables_skipped
+    with session_factory() as session:
+        latest = StorageRetentionRepository(session).get_latest_run()
+        assert latest is not None
+        assert list(latest.table_row_counts_before.keys()) == ["orderbook_snapshots"]
+    status = build_storage_status(config, now=now)
+    assert status.latest_tables_processed == ["orderbook_snapshots"]
+    assert "public_trades" in status.latest_tables_skipped
+
+
+def test_storage_retention_caps_delete_rows_per_table(retention_db) -> None:
+    database_url, session_factory = retention_db
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    config = _retention_config(
+        database_url,
+        batch_size=5,
+        max_delete_rows_per_table=1,
+        raw_seconds=1,
+    )
+
+    with session_factory() as session:
+        for index in range(3):
+            OrderbookRepository(session).insert_snapshot(
+                OrderbookSnapshotInput(
+                    market_ticker=f"KXBTC15M-OLD-{index}",
+                    received_at=now - timedelta(seconds=120),
+                    raw_payload={"book": "old"},
+                )
+            )
+        session.commit()
+
+    result = run_storage_retention_once(config, session_factory, now=lambda: now)
+
+    assert result.deleted_rows["orderbook_snapshots"] == 1
+    assert result.raw_payload_stripped_rows["orderbook_snapshots"] == 0
+    assert result.status == RETENTION_SUCCESS_PARTIAL
+    assert result.budget_exhausted is True
+    assert "storage_retention_max_delete_rows_per_table_reached" in result.warnings
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(OrderbookSnapshot)) == 2
+    status = build_storage_status(config, now=now)
+    assert status.latest_run_status == RETENTION_SUCCESS_PARTIAL
+    assert status.latest_run_budget_exhausted is True
+
+
+def test_storage_retention_row_cap_is_not_partial_when_table_is_drained(retention_db) -> None:
+    database_url, session_factory = retention_db
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    config = _retention_config(
+        database_url,
+        max_delete_rows_per_table=1,
+        raw_seconds=1,
+    )
+
+    with session_factory() as session:
+        OrderbookRepository(session).insert_snapshot(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC15M-OLD",
+                received_at=now - timedelta(seconds=120),
+            )
+        )
+        session.commit()
+
+    result = run_storage_retention_once(config, session_factory, now=lambda: now)
+
+    assert result.status == RETENTION_SUCCESS
+    assert result.budget_exhausted is False
+    assert "storage_retention_max_delete_rows_per_table_reached" not in result.warnings
+
+
+def test_storage_retention_raw_payload_cap_marks_remaining_backlog_partial(retention_db) -> None:
+    database_url, session_factory = retention_db
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    config = _retention_config(
+        database_url,
+        row_seconds=3600,
+        raw_seconds=60,
+        max_delete_rows_per_table=1,
+    )
+
+    with session_factory() as session:
+        for index in range(2):
+            OrderbookRepository(session).insert_snapshot(
+                OrderbookSnapshotInput(
+                    market_ticker=f"KXBTC15M-RAW-{index}",
+                    received_at=now - timedelta(seconds=120),
+                    raw_payload={"book": "old"},
+                )
+            )
+        session.commit()
+
+    result = run_storage_retention_once(config, session_factory, now=lambda: now)
+
+    assert result.deleted_rows["orderbook_snapshots"] == 0
+    assert result.raw_payload_stripped_rows["orderbook_snapshots"] == 1
+    assert result.status == RETENTION_SUCCESS_PARTIAL
+    assert result.budget_exhausted is True
+    assert "storage_retention_max_delete_rows_per_table_reached" in result.warnings
+
+
+def test_storage_retention_shares_row_cap_with_raw_payload_stripping(retention_db) -> None:
+    database_url, session_factory = retention_db
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    config = _retention_config(
+        database_url,
+        row_seconds=60,
+        raw_seconds=30,
+        max_delete_rows_per_table=2,
+    )
+
+    with session_factory() as session:
+        OrderbookRepository(session).insert_snapshot(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC15M-DELETE",
+                received_at=now - timedelta(seconds=120),
+                raw_payload={"book": "old"},
+            )
+        )
+        for index in range(2):
+            OrderbookRepository(session).insert_snapshot(
+                OrderbookSnapshotInput(
+                    market_ticker=f"KXBTC15M-RAW-{index}",
+                    received_at=now - timedelta(seconds=45),
+                    raw_payload={"book": "old"},
+                )
+            )
+        session.commit()
+
+    result = run_storage_retention_once(config, session_factory, now=lambda: now)
+
+    assert result.deleted_rows["orderbook_snapshots"] == 1
+    assert result.raw_payload_stripped_rows["orderbook_snapshots"] == 1
+    assert result.status == RETENTION_SUCCESS_PARTIAL
+    assert result.budget_exhausted is True
+    with session_factory() as session:
+        remaining = session.scalars(select(OrderbookSnapshot)).all()
+        assert len(remaining) == 2
+        assert sum(row.raw_payload is None for row in remaining) == 1
+
+
+def test_storage_retention_uses_configured_smoothing_sleeps(
+    retention_db,
+    monkeypatch,
+) -> None:
+    database_url, session_factory = retention_db
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    config = _retention_config(
+        database_url,
+        batch_size=1,
+        inter_table_sleep_ms=20,
+        batch_sleep_ms=10,
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(retention_module, "sleep", lambda seconds: sleeps.append(seconds))
+
+    with session_factory() as session:
+        OrderbookRepository(session).insert_snapshot(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC15M-OLD",
+                received_at=now - timedelta(seconds=120),
+            )
+        )
+        session.commit()
+
+    result = run_storage_retention_once(config, session_factory, now=lambda: now)
+
+    assert result.status == RETENTION_SUCCESS
+    assert 0.01 in sleeps
+    assert 0.02 in sleeps
 
 
 def test_failed_storage_retention_run_records_safe_error(
@@ -307,7 +570,18 @@ def test_storage_retention_worker_records_heartbeat_metadata(retention_db) -> No
         heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
         assert heartbeat is not None
         assert heartbeat.metadata_["storage"]["retention"]["enabled"] is True
+        assert heartbeat.metadata_["storage"]["retention"]["worker_role"] == "maintenance"
         assert heartbeat.metadata_["storage"]["retention"]["last_status"] == "success"
+        component = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+            "ape-worker.maintenance"
+        )
+        assert component is not None
+        assert component.metadata_["mode"] == "storage_retention"
+        assert component.metadata_["storage"]["retention"]["enabled"] is True
+        assert (
+            component.metadata_["storage"]["retention"]["interval_seconds"]
+            == config.storage_retention_interval_seconds
+        )
 
 
 def test_storage_retention_worker_offloads_run_from_event_loop(
@@ -472,28 +746,39 @@ def _retention_config(
     raw_seconds: int = 30,
     dry_run: bool = False,
     max_run_seconds: int = 20,
+    inter_table_sleep_ms: int = 0,
+    batch_sleep_ms: int = 0,
+    max_tables_per_run: int | None = None,
+    max_delete_rows_per_table: int | None = None,
 ):
-    return load_config(
-        {
-            "DATABASE_URL": database_url,
-            "STORAGE_RETENTION_ENABLED": "true",
-            "STORAGE_RETENTION_BATCH_SIZE": str(batch_size),
-            "STORAGE_RETENTION_MAX_RUN_SECONDS": str(max_run_seconds),
-            "STORAGE_RETENTION_DRY_RUN": str(dry_run).lower(),
-            "STORAGE_RETENTION_ORDERBOOK_SECONDS": str(row_seconds),
-            "STORAGE_RETENTION_PUBLIC_TRADES_SECONDS": str(row_seconds),
-            "STORAGE_RETENTION_REFERENCE_TICKS_SECONDS": str(row_seconds),
-            "STORAGE_RETENTION_WORKER_HEARTBEATS_SECONDS": str(row_seconds),
-            "STORAGE_RETENTION_STRATEGY_DECISIONS_SECONDS": str(row_seconds),
-            "STORAGE_RETENTION_KALSHI_WS_PROTOCOL_EVENTS_SECONDS": str(row_seconds),
-            "STORAGE_RETENTION_DRY_RUN_POSITIONS_SECONDS": str(row_seconds),
-            "STORAGE_RETENTION_DRY_RUN_EVENTS_SECONDS": str(row_seconds),
-            "STORAGE_RETENTION_MARKETS_SECONDS": str(row_seconds),
-            "STORAGE_RETENTION_RAW_PAYLOAD_ORDERBOOK_SECONDS": str(raw_seconds),
-            "STORAGE_RETENTION_RAW_PAYLOAD_PUBLIC_TRADES_SECONDS": str(raw_seconds),
-            "STORAGE_RETENTION_RAW_PAYLOAD_REFERENCE_TICKS_SECONDS": str(raw_seconds),
-        }
-    )
+    env = {
+        "DATABASE_URL": database_url,
+        "STORAGE_RETENTION_ENABLED": "true",
+        "STORAGE_RETENTION_BATCH_SIZE": str(batch_size),
+        "STORAGE_RETENTION_MAX_RUN_SECONDS": str(max_run_seconds),
+        "STORAGE_RETENTION_DRY_RUN": str(dry_run).lower(),
+        "STORAGE_RETENTION_INTER_TABLE_SLEEP_MS": str(inter_table_sleep_ms),
+        "STORAGE_RETENTION_BATCH_SLEEP_MS": str(batch_sleep_ms),
+        "STORAGE_RETENTION_ORDERBOOK_SECONDS": str(row_seconds),
+        "STORAGE_RETENTION_PUBLIC_TRADES_SECONDS": str(row_seconds),
+        "STORAGE_RETENTION_REFERENCE_TICKS_SECONDS": str(row_seconds),
+        "STORAGE_RETENTION_WORKER_HEARTBEATS_SECONDS": str(row_seconds),
+        "STORAGE_RETENTION_STRATEGY_DECISIONS_SECONDS": str(row_seconds),
+        "STORAGE_RETENTION_KALSHI_WS_PROTOCOL_EVENTS_SECONDS": str(row_seconds),
+        "STORAGE_RETENTION_DRY_RUN_POSITIONS_SECONDS": str(row_seconds),
+        "STORAGE_RETENTION_DRY_RUN_EVENTS_SECONDS": str(row_seconds),
+        "STORAGE_RETENTION_MARKETS_SECONDS": str(row_seconds),
+        "STORAGE_RETENTION_RAW_PAYLOAD_ORDERBOOK_SECONDS": str(raw_seconds),
+        "STORAGE_RETENTION_RAW_PAYLOAD_PUBLIC_TRADES_SECONDS": str(raw_seconds),
+        "STORAGE_RETENTION_RAW_PAYLOAD_REFERENCE_TICKS_SECONDS": str(raw_seconds),
+    }
+    if max_tables_per_run is not None:
+        env["STORAGE_RETENTION_MAX_TABLES_PER_RUN"] = str(max_tables_per_run)
+    if max_delete_rows_per_table is not None:
+        env["STORAGE_RETENTION_MAX_DELETE_ROWS_PER_TABLE"] = str(
+            max_delete_rows_per_table
+        )
+    return load_config(env)
 
 
 def threading_event():

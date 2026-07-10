@@ -107,6 +107,20 @@ class StorageRetentionRepository:
         )
         return int(row_count or 0)
 
+    def has_matching(
+        self,
+        *,
+        table_name: str,
+        condition_sql: str,
+        parameters: dict[str, Any],
+    ) -> bool:
+        _validate_table_name(table_name)
+        value = self.session.scalar(
+            text(f"SELECT 1 FROM {table_name} WHERE {condition_sql} LIMIT 1"),
+            parameters,
+        )
+        return value is not None
+
     def delete_batch(
         self,
         *,

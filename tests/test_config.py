@@ -116,6 +116,10 @@ def test_default_config_is_observer_only() -> None:
     assert config.storage_retention_batch_size == 5000
     assert config.storage_retention_max_run_seconds == 20
     assert config.storage_retention_dry_run is False
+    assert config.storage_retention_inter_table_sleep_ms == 100
+    assert config.storage_retention_batch_sleep_ms == 50
+    assert config.storage_retention_max_tables_per_run is None
+    assert config.storage_retention_max_delete_rows_per_table is None
     assert config.storage_retention_orderbook_seconds == 7200
     assert config.storage_retention_public_trades_seconds == 86400
     assert config.storage_retention_reference_ticks_seconds == 86400
@@ -409,6 +413,10 @@ def test_storage_retention_env_vars_parse_safely() -> None:
             "STORAGE_RETENTION_BATCH_SIZE": "123",
             "STORAGE_RETENTION_MAX_RUN_SECONDS": "21",
             "STORAGE_RETENTION_DRY_RUN": "true",
+            "STORAGE_RETENTION_INTER_TABLE_SLEEP_MS": "302",
+            "STORAGE_RETENTION_BATCH_SLEEP_MS": "51",
+            "STORAGE_RETENTION_MAX_TABLES_PER_RUN": "4",
+            "STORAGE_RETENTION_MAX_DELETE_ROWS_PER_TABLE": "456",
             "STORAGE_RETENTION_ORDERBOOK_SECONDS": "7201",
             "STORAGE_RETENTION_PUBLIC_TRADES_SECONDS": "86401",
             "STORAGE_RETENTION_REFERENCE_TICKS_SECONDS": "86402",
@@ -431,6 +439,10 @@ def test_storage_retention_env_vars_parse_safely() -> None:
     assert config.storage_retention_batch_size == 123
     assert config.storage_retention_max_run_seconds == 21
     assert config.storage_retention_dry_run is True
+    assert config.storage_retention_inter_table_sleep_ms == 302
+    assert config.storage_retention_batch_sleep_ms == 51
+    assert config.storage_retention_max_tables_per_run == 4
+    assert config.storage_retention_max_delete_rows_per_table == 456
     assert config.storage_retention_orderbook_seconds == 7201
     assert config.storage_retention_public_trades_seconds == 86401
     assert config.storage_retention_reference_ticks_seconds == 86402

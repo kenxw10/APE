@@ -43,7 +43,7 @@ After PR 7a merges, BRTI / CF Benchmarks intake is still disabled by default. En
 
 After PR 8 merges, the strategy observer ledger is still disabled by default. Enable it only on the Railway worker service with `STRATEGY_OBSERVER_ENABLED=true` after market WebSocket and BRTI intake are healthy. This records observer-only decisions in the database and does not add paper trading, live trading, orders, fills, private channels, or execution.
 
-After PR 8a merges, storage retention is still disabled by default. Enable it only on the Railway worker service with `STORAGE_RETENTION_ENABLED=true` after `/storage/status` and migrations are validated. Retention deletes old observer data in bounded batches, strips old raw payload JSON, writes audit rows, and does not add public delete controls or automatic `VACUUM FULL`.
+After PR 8a merges, storage retention is still disabled by default. Enable it only on the Railway worker service with `STORAGE_RETENTION_ENABLED=true` after `/storage/status` and migrations are validated. Retention deletes old observer data in bounded batches, strips old raw payload JSON, writes audit rows, and does not add public delete controls or automatic `VACUUM FULL`. After PR 9h, `/storage/status` should use the dedicated `ape-worker.maintenance` heartbeat as the source of truth and may show retention enabled even when the API service keeps `STORAGE_RETENTION_ENABLED=false`.
 
 After PR 9 merges, dry-run remains disabled by default. Enable it only on the Railway worker service with `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`, `STRATEGY_DRY_RUN_ENABLED=true`, `TRADING_ENABLED=false`, and `EXECUTE=false` after market WebSocket, BRTI, strategy observer, and storage retention are healthy. Dry-run writes hypothetical simulated positions/events only; it does not place orders, paper trade, live trade, read balances, or use private/user channels.
 
@@ -158,6 +158,8 @@ After PR 9e, market feed recovery adds bounded subscription and rollover diagnos
 After PR 9f, the market worker also records raw Kalshi WebSocket protocol evidence in `kalshi_ws_protocol_events`. `/ws/status` exposes worker role, connection ID, subscription reconciliation, confirmed SIDs, list-subscription results, in-flight snapshot state, market DB writer queue metrics, recent protocol error count, reconnect reason, and close details. `/ws/protocol/recent` and `/ws/protocol/summary` expose read-only subscribe/update/list/ping/pong/close/error evidence for production validation.
 
 After PR 9g, the market worker persistence path is split into critical market state and noncritical diagnostic/protocol queues. Critical latest market state, orderbook snapshots, public trades, rollover state, and heartbeats are prioritized; routine protocol events are sampled/rate-limited and may be dropped under diagnostic backpressure. `/ws/status` separates critical queue health from diagnostic queue health and reports coalesced orderbook writes, dropped diagnostic events, sampled protocol events, and latest state persistence age/lag. No env change is required before PR 9g unless the optional defaults below need tuning.
+
+After PR 9h, the maintenance worker exposes component liveness and load-smoothed retention progress through `/storage/status`. Healthy maintenance status should show `liveness_source=component`, `worker_role=maintenance`, `latest_component_heartbeat_mode=storage_retention`, `worker_heartbeat_stale=false`, `retention_config.effective_enabled=true`, and latest run status `success` or `success_partial` with no blockers. The default smoothing values are `STORAGE_RETENTION_INTER_TABLE_SLEEP_MS=100` and `STORAGE_RETENTION_BATCH_SLEEP_MS=50`; optional `STORAGE_RETENTION_MAX_TABLES_PER_RUN` and `STORAGE_RETENTION_MAX_DELETE_ROWS_PER_TABLE` can be left unset unless catch-up runs need stricter pacing.
 
 For `/ws/status`, `last_error_type` and `last_error_message` describe a current unresolved worker error. A successful current orderbook or trade database write clears old recovered errors so stale startup failures do not keep the status page red.
 
@@ -566,7 +568,7 @@ KALSHI_CFBENCHMARKS_INDEX_IDS=BRTI
 STRATEGY_OBSERVER_ENABLED=true
 ```
 
-The API service may keep `STORAGE_RETENTION_ENABLED=false`; `/storage/status` reads audit rows, table stats, and worker heartbeat metadata. Do not add storage retention env vars, database credentials, Kalshi credentials, WebSocket settings, BRTI env vars, or strategy observer env vars to Vercel.
+The API service may keep `STORAGE_RETENTION_ENABLED=false`; `/storage/status` reads audit rows, table stats, and worker heartbeat metadata. After PR 9h, `enabled` and `retention_config.enabled` are the effective worker-observed value when a maintenance heartbeat exists, while `configured_enabled` preserves the API process config. Do not add storage retention env vars, database credentials, Kalshi credentials, WebSocket settings, BRTI env vars, or strategy observer env vars to Vercel.
 
 After enabling storage retention on the worker, redeploy the worker and validate:
 
@@ -584,11 +586,15 @@ Invoke-RestMethod https://ape-api-production.up.railway.app/ready
 Expected behavior:
 
 - `/storage/status` shows `enabled=true` from worker metadata after the worker has recorded a heartbeat.
-- `latest_run_status` becomes `success` after the first retention pass.
+- `/storage/status` shows `liveness_source=component`, `worker_role=maintenance`, `latest_component_heartbeat_mode=storage_retention`, and `worker_heartbeat_stale=false`.
+- `latest_run_status` becomes `success` or `success_partial` after the first retention pass.
+- `success_partial` is acceptable when the worker stopped at a configured time, table, or per-table row budget with no blockers and the next interval can continue cleanup.
+- `latest_total_deleted_rows`, `latest_total_raw_payload_stripped_rows`, `latest_run_budget_exhausted`, `latest_tables_processed`, `latest_tables_skipped`, and DB timeout/error counters are visible for audit.
 - `table_stats` reports aggregate table counts/sizes without row contents or raw payloads.
 - `storage_retention_runs` receives audit rows for retention attempts.
 - Old `raw_payload` JSON is stripped before normalized rows expire.
 - Old high-frequency rows are deleted in bounded batches.
+- Default smoothing is `STORAGE_RETENTION_INTER_TABLE_SLEEP_MS=100` and `STORAGE_RETENTION_BATCH_SLEEP_MS=50`. Leave optional `STORAGE_RETENTION_MAX_TABLES_PER_RUN` and `STORAGE_RETENTION_MAX_DELETE_ROWS_PER_TABLE` unset unless production catch-up needs tighter pacing.
 - No endpoint can trigger deletion on request.
 - No `VACUUM FULL` runs automatically. Postgres deletes free space for reuse, but physical disk size may not shrink immediately. Manual `VACUUM FULL` can lock tables and is outside this PR.
 

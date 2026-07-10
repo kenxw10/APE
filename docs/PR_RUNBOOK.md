@@ -133,13 +133,27 @@ PR 8a post-merge checkpoint:
 - Validate worker logs, `/storage/status`, `/ws/status`,
   `/reference/brti/status`, `/strategy/status`, `/health`, `/safety`,
   `/db/status`, and `/ready`.
+- Confirm `/storage/status` reports `liveness_source=component`,
+  `worker_role=maintenance`, `latest_component_heartbeat_mode=storage_retention`,
+  `worker_heartbeat_stale=false`, `retention_config.effective_enabled=true`, and
+  `retention_config.configured_enabled` matching the API process config.
 - Confirm `storage_retention_runs` rows are written and latest status becomes
-  `success`.
+  `success` or `success_partial` with no blockers.
+- Treat `success_partial` as acceptable incremental progress only when it is
+  caused by the configured time, table, or per-table row budget and row totals continue moving on
+  later runs.
+- Confirm latest totals, processed/skipped tables, budget-exhausted flag, and
+  DB timeout/error counters are present in `/storage/status`.
 - Confirm `/storage/status` returns aggregate table stats and no row contents,
   raw payloads, credentials, signatures, private keys, headers, or delete
   controls.
 - Confirm old raw payload JSON is stripped before normalized rows expire.
 - Confirm old high-frequency rows are deleted in bounded batches.
+- Keep default smoothing unless production catch-up needs stricter pacing:
+  `STORAGE_RETENTION_INTER_TABLE_SLEEP_MS=100`,
+  `STORAGE_RETENTION_BATCH_SLEEP_MS=50`, and optional unset caps for
+  `STORAGE_RETENTION_MAX_TABLES_PER_RUN` and
+  `STORAGE_RETENTION_MAX_DELETE_ROWS_PER_TABLE`.
 - Do not run automatic `VACUUM FULL`. PostgreSQL deletes make space reusable
   but may not immediately reduce Railway physical disk usage; manual
   `VACUUM FULL` can lock tables and is outside PR 8a.
@@ -450,6 +464,12 @@ $summary
 - Diagnostic queue backlog, `protocol_events_sampled_out`, and
   `protocol_events_dropped_backpressure` may increase under load, but they must
   not produce readiness blockers.
+- `QUIET_CARRY_FORWARD` is acceptable when transport is healthy, the active
+  subscription is reconciled, there is no unrecovered blocker, and the snapshot
+  remains inside the hard carry-forward cap.
+- `BLOCKED_UNRECOVERED`, stale market transport, stale BRTI transport, or
+  `/reference/brti/status.status_category=stale_transport` are hard
+  regressions.
 - `protocol_event_recent_error_count` should stay low unless actual close,
   websocket error, subscription error, list-subscriptions error,
   update-subscription error, get-snapshot error, or reconnect failure events
@@ -465,3 +485,43 @@ $summary
 - Confirm this PR did not tune strategy thresholds and did not add paper/live,
   order, fill, private-channel, account, executor, credential, or dashboard
   control behavior.
+
+PR 9h post-merge checkpoint:
+
+- Keep API, `ape-market-worker`, `ape-reference-worker`, and
+  `ape-maintenance-worker` running. Do not deploy or enable strategy until
+  market, reference, and maintenance validation are clean.
+- Use the maintenance worker command:
+
+```text
+python -m ape.worker --role maintenance
+```
+
+- Keep the maintenance worker environment maintenance-only:
+  `APE_WORKER_ROLE=maintenance`, `APP_MODE=OBSERVER`, `TRADING_ENABLED=false`,
+  `EXECUTE=false`, database vars, and `STORAGE_RETENTION_ENABLED=true`. Do not
+  add Kalshi WebSocket, BRTI, strategy, private-channel, account, order, or
+  execution variables.
+- Validate:
+
+```powershell
+$storage = Invoke-RestMethod https://ape-api-production.up.railway.app/storage/status
+$ws = Invoke-RestMethod https://ape-api-production.up.railway.app/ws/status
+$brti = Invoke-RestMethod https://ape-api-production.up.railway.app/reference/brti/status
+$safety = Invoke-RestMethod https://ape-api-production.up.railway.app/safety
+$storage
+$ws
+$brti
+$safety
+```
+
+- Pass criteria: `/storage/status.liveness_source=component`,
+  `worker_role=maintenance`, `latest_component_heartbeat_mode=storage_retention`,
+  `worker_heartbeat_stale=false`, `retention_config.effective_enabled=true`,
+  latest run `success` or `success_partial`, no blockers, and no DB statement,
+  lock, or generic DB error count.
+- Confirm market status remains live or acceptable `QUIET_CARRY_FORWARD` under
+  healthy transport/subscription conditions. `BLOCKED_UNRECOVERED`, stale
+  market transport, and BRTI `stale_transport` remain hard regressions.
+- Confirm `/safety` still reports `trading_enabled=false`, `execute=false`, and
+  no unsafe live/paper behavior.
