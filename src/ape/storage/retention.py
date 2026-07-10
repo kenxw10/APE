@@ -1020,7 +1020,9 @@ def _heartbeat_at(heartbeat: WorkerHeartbeat | None) -> datetime | None:
 
 
 def _started_at(heartbeat: WorkerHeartbeat | None) -> datetime | None:
-    return _as_utc(heartbeat.started_at) if heartbeat is not None else None
+    if heartbeat is None or heartbeat.started_at is None:
+        return None
+    return _as_utc(heartbeat.started_at)
 
 
 def _metadata_mode(heartbeat: WorkerHeartbeat | None) -> str | None:

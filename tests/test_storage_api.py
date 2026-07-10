@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 
 from ape.api.main import create_app
@@ -198,6 +199,59 @@ def test_storage_status_uses_worker_observed_enabled(tmp_path) -> None:
     assert body["retention_config"]["configured_enabled"] is False
     assert body["retention_config"]["worker_observed_enabled"] is True
     assert body["retention_config"]["effective_enabled"] is True
+
+
+@pytest.mark.parametrize(
+    ("service_name", "expected_liveness_source"),
+    [
+        ("ape-worker.maintenance", "component"),
+        ("ape-worker", "legacy_aggregate_fallback"),
+    ],
+)
+def test_storage_status_handles_heartbeat_without_started_at(
+    tmp_path,
+    service_name: str,
+    expected_liveness_source: str,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / f'ape_storage_{service_name}.sqlite'}"
+    now = datetime.now(UTC)
+    engine = create_engine_from_config(load_config({"DATABASE_URL": database_url}))
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        with session_factory() as session:
+            WorkerHeartbeatRepository(session).record_heartbeat(
+                WorkerHeartbeatInput(
+                    service_name=service_name,
+                    heartbeat_at=now,
+                    app_mode="OBSERVER",
+                    is_safe=True,
+                    metadata={
+                        "mode": "storage_retention",
+                        "storage": {
+                            "retention": {
+                                "enabled": True,
+                                "worker_role": "maintenance",
+                                "connection_state": "idle",
+                                "warnings": [],
+                                "blockers": [],
+                            }
+                        },
+                    },
+                )
+            )
+            session.commit()
+    finally:
+        engine.dispose()
+
+    app = create_app(load_config({"DATABASE_URL": database_url}))
+    with TestClient(app) as client:
+        response = client.get("/storage/status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["liveness_source"] == expected_liveness_source
+    assert body["worker_started_at"] is None
 
 
 def test_storage_status_falls_back_to_legacy_aggregate_liveness(tmp_path) -> None:
