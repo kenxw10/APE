@@ -8,7 +8,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from inspect import isawaitable
 from typing import Any
@@ -20,6 +20,13 @@ from ape.config import AppConfig
 from ape.kalshi.client import KalshiRestClient
 from ape.kalshi.diagnostics import build_kalshi_config_diagnostic
 from ape.kalshi.errors import KalshiError
+from ape.kalshi.protocol_events import (
+    PROTOCOL_ERROR_EVENTS,
+    PROTOCOL_RECOVERY_EVENTS,
+)
+from ape.kalshi.protocol_events import (
+    protocol_event_counts_as_error as _protocol_event_counts_as_error,
+)
 from ape.kalshi.reference_messages import (
     BRTI_SOURCE,
     ParsedReferenceMessage,
@@ -62,19 +69,28 @@ MIN_HEARTBEAT_INTERVAL_SECONDS = 1.0
 MAX_DIAGNOSTIC_SAMPLES = 3
 MAX_DIAGNOSTIC_KEYS = 20
 PROTOCOL_ERROR_WINDOW_SECONDS = 1800
-PROTOCOL_ERROR_EVENTS = {
-    "websocket_error",
-    "update_subscription_error",
-    "reconnect_failed",
+CRITICAL_PROTOCOL_EVENTS = PROTOCOL_ERROR_EVENTS | PROTOCOL_RECOVERY_EVENTS | {
+    "websocket_open",
+    "websocket_close",
+    "subscribed_received",
+    "reconnect_started",
+    "reconnect_scheduled",
+}
+ROUTINE_PROTOCOL_EVENTS = {
+    "orderbook_delta_received",
+    "ticker_received",
+    "trade_received",
+    "client_ping_sent",
+    "client_pong_received",
+    "server_ping_received",
+    "server_pong_sent",
     "db_write_slow",
     "queue_backpressure",
-}
-PROTOCOL_RECOVERY_EVENTS = {
-    "reconnect_completed",
 }
 MARKET_DB_WRITE_DISABLED = "disabled"
 MARKET_DB_WRITE_QUEUED = "queued"
 MARKET_DB_WRITE_FULL = "full"
+MARKET_DB_WRITE_COALESCED = "coalesced"
 
 WebSocketFactory = Callable[
     [str, dict[str, str], float, float],
@@ -93,6 +109,7 @@ class _DbWriterItem:
     orderbook_recovery_action: str | None = None
     clear_orderbook_recovery_warnings: bool = False
     clear_orderbook_delta_warnings: bool = False
+    retry_count: int = 0
 
 
 @dataclass
@@ -124,8 +141,29 @@ class KalshiWsCollectorStatus:
     ws_reader_queue_oldest_age_ms: int | None = None
     db_writer_queue_depth: int = 0
     db_writer_queue_oldest_age_ms: int | None = None
+    db_writer_critical_queue_depth: int = 0
+    db_writer_critical_queue_oldest_age_ms: int | None = None
+    db_writer_diagnostic_queue_depth: int = 0
+    db_writer_diagnostic_queue_oldest_age_ms: int | None = None
     db_writer_last_flush_ms: int | None = None
+    db_writer_last_critical_flush_ms: int | None = None
+    db_writer_last_diagnostic_flush_ms: int | None = None
     db_writer_slow_flush_count: int = 0
+    db_writer_dropped_diagnostic_count: int = 0
+    db_writer_coalesced_orderbook_count: int = 0
+    db_writer_coalesced_trade_count: int = 0
+    db_writer_dropped_superseded_count: int = 0
+    latest_state_persisted_at: datetime | None = None
+    latest_state_persisted_age_ms: int | None = None
+    latest_state_persistence_lag_ms: int | None = None
+    historical_persistence_lag_ms: int | None = None
+    protocol_events_enqueued: int = 0
+    protocol_events_persisted: int = 0
+    protocol_events_sampled_out: int = 0
+    protocol_events_dropped_backpressure: int = 0
+    protocol_errors_persisted: int = 0
+    protocol_event_queue_depth: int = 0
+    protocol_event_oldest_age_ms: int | None = None
     orderbook_persistence_pending_count: int = 0
     orderbook_persistence_pending_since: datetime | None = None
     orderbook_persistence_pending_age_ms: int | None = None
@@ -208,8 +246,45 @@ class KalshiWsCollectorStatus:
             "ws_reader_queue_oldest_age_ms": self.ws_reader_queue_oldest_age_ms,
             "db_writer_queue_depth": self.db_writer_queue_depth,
             "db_writer_queue_oldest_age_ms": self.db_writer_queue_oldest_age_ms,
+            "db_writer_critical_queue_depth": self.db_writer_critical_queue_depth,
+            "db_writer_critical_queue_oldest_age_ms": (
+                self.db_writer_critical_queue_oldest_age_ms
+            ),
+            "db_writer_diagnostic_queue_depth": self.db_writer_diagnostic_queue_depth,
+            "db_writer_diagnostic_queue_oldest_age_ms": (
+                self.db_writer_diagnostic_queue_oldest_age_ms
+            ),
             "db_writer_last_flush_ms": self.db_writer_last_flush_ms,
+            "db_writer_last_critical_flush_ms": self.db_writer_last_critical_flush_ms,
+            "db_writer_last_diagnostic_flush_ms": (
+                self.db_writer_last_diagnostic_flush_ms
+            ),
             "db_writer_slow_flush_count": self.db_writer_slow_flush_count,
+            "db_writer_dropped_diagnostic_count": (
+                self.db_writer_dropped_diagnostic_count
+            ),
+            "db_writer_coalesced_orderbook_count": (
+                self.db_writer_coalesced_orderbook_count
+            ),
+            "db_writer_coalesced_trade_count": self.db_writer_coalesced_trade_count,
+            "db_writer_dropped_superseded_count": (
+                self.db_writer_dropped_superseded_count
+            ),
+            "latest_state_persisted_at": _isoformat_or_none(
+                self.latest_state_persisted_at
+            ),
+            "latest_state_persisted_age_ms": self.latest_state_persisted_age_ms,
+            "latest_state_persistence_lag_ms": self.latest_state_persistence_lag_ms,
+            "historical_persistence_lag_ms": self.historical_persistence_lag_ms,
+            "protocol_events_enqueued": self.protocol_events_enqueued,
+            "protocol_events_persisted": self.protocol_events_persisted,
+            "protocol_events_sampled_out": self.protocol_events_sampled_out,
+            "protocol_events_dropped_backpressure": (
+                self.protocol_events_dropped_backpressure
+            ),
+            "protocol_errors_persisted": self.protocol_errors_persisted,
+            "protocol_event_queue_depth": self.protocol_event_queue_depth,
+            "protocol_event_oldest_age_ms": self.protocol_event_oldest_age_ms,
             "orderbook_persistence_pending": (
                 self.orderbook_persistence_pending_count > 0
             ),
@@ -460,8 +535,16 @@ class KalshiWsCollector:
         self._connection_sequence = 0
         self._market_reconnect_completion_pending_reason: str | None = None
         self._db_writer_queue: asyncio.Queue[_DbWriterItem] | None = None
-        self._db_writer_enqueued_at: deque[datetime] = deque()
+        self._db_critical_queue: asyncio.Queue[_DbWriterItem] | None = None
+        self._db_diagnostic_queue: asyncio.Queue[_DbWriterItem] | None = None
+        self._db_critical_enqueued_at: deque[datetime] = deque()
+        self._db_critical_inflight_at: deque[datetime] = deque()
+        self._db_diagnostic_enqueued_at: deque[datetime] = deque()
+        self._db_writer_enqueued_at: deque[datetime] = self._db_critical_enqueued_at
         self._db_writer_task: asyncio.Task[None] | None = None
+        self._pending_orderbook_writes: dict[str, _DbWriterItem] = {}
+        self._pending_orderbook_markers: set[str] = set()
+        self._protocol_event_sequence: dict[str, int] = {}
         self._protocol_error_events: deque[datetime] = deque()
         self._protocol_error_reset_at: datetime | None = None
 
@@ -2172,6 +2255,8 @@ class KalshiWsCollector:
         if enqueue_result == MARKET_DB_WRITE_QUEUED:
             self._mark_orderbook_persistence_pending(snapshot.received_at)
             return False
+        if enqueue_result == MARKET_DB_WRITE_COALESCED:
+            return False
         if enqueue_result == MARKET_DB_WRITE_FULL:
             return False
 
@@ -2222,23 +2307,33 @@ class KalshiWsCollector:
         return True
 
     async def _start_market_db_writer(self) -> None:
-        if self._db_writer_queue is not None:
+        if self._db_critical_queue is not None or self._db_diagnostic_queue is not None:
             return
-        self._db_writer_queue = asyncio.Queue(
-            maxsize=self.config.kalshi_ws_db_writer_queue_max_size
+        self._db_critical_queue = asyncio.Queue(
+            maxsize=self.config.market_db_writer_critical_queue_max_size
         )
-        self._db_writer_enqueued_at.clear()
+        self._db_diagnostic_queue = asyncio.Queue(
+            maxsize=self.config.market_db_writer_diagnostic_queue_max_size
+        )
+        self._db_writer_queue = self._db_critical_queue
+        self._db_critical_enqueued_at.clear()
+        self._db_critical_inflight_at.clear()
+        self._db_diagnostic_enqueued_at.clear()
+        self._db_writer_enqueued_at = self._db_critical_enqueued_at
+        self._pending_orderbook_writes.clear()
+        self._pending_orderbook_markers.clear()
         self._db_writer_task = asyncio.create_task(self._market_db_writer_loop())
         self._refresh_db_writer_metrics(self.now())
 
     async def _stop_market_db_writer(self) -> None:
-        queue = self._db_writer_queue
+        critical_queue = self._db_critical_queue or self._db_writer_queue
+        diagnostic_queue = self._db_diagnostic_queue
         task = self._db_writer_task
-        if queue is None or task is None:
+        if critical_queue is None or task is None:
             return
         try:
             await asyncio.wait_for(
-                queue.join(),
+                self._join_market_db_queues(critical_queue, diagnostic_queue),
                 timeout=max(1.0, self.config.kalshi_ws_heartbeat_timeout_seconds),
             )
         except TimeoutError:
@@ -2253,65 +2348,130 @@ class KalshiWsCollector:
             pass
         self._db_writer_task = None
         self._db_writer_queue = None
-        self._db_writer_enqueued_at.clear()
+        self._db_critical_queue = None
+        self._db_diagnostic_queue = None
+        self._db_critical_enqueued_at.clear()
+        self._db_critical_inflight_at.clear()
+        self._db_diagnostic_enqueued_at.clear()
+        self._pending_orderbook_writes.clear()
+        self._pending_orderbook_markers.clear()
         self._refresh_db_writer_metrics(self.now())
+
+    async def _join_market_db_queues(
+        self,
+        critical_queue: asyncio.Queue[_DbWriterItem],
+        diagnostic_queue: asyncio.Queue[_DbWriterItem] | None,
+    ) -> None:
+        await critical_queue.join()
+        if diagnostic_queue is not None:
+            await diagnostic_queue.join()
 
     async def _market_db_writer_loop(self) -> None:
         while True:
-            queue = self._db_writer_queue
-            if queue is None:
-                await asyncio.sleep(0)
+            batch = self._next_market_db_batch()
+            if not batch:
+                await asyncio.sleep(self.config.market_db_writer_flush_interval_ms / 1000)
                 continue
-            item = await queue.get()
-            if self._db_writer_enqueued_at:
-                self._db_writer_enqueued_at.popleft()
             started = time.perf_counter()
             try:
-                await asyncio.to_thread(self._write_market_db_item, item)
+                await asyncio.to_thread(
+                    self._write_market_db_batch,
+                    [item for _, _, item in batch],
+                )
             except SQLAlchemyError as exc:
                 LOGGER.warning("Kalshi market DB writer failed.", exc_info=True)
                 self._set_error(exc.__class__.__name__, exc)
-                if item.kind == "orderbook":
-                    self._add_warning("orderbook_persistence_failed")
-                    self._add_blocker("orderbook_persistence_failed")
-                    self._finish_orderbook_persistence_pending(self.now())
-                elif item.kind == "trade":
-                    self._add_warning("trade_persistence_failed")
-                else:
-                    self._add_warning("protocol_event_persistence_failed")
+                for _, _, item in batch:
+                    if self._requeue_failed_critical_item(item, self.now()):
+                        continue
+                    if item.kind == "orderbook":
+                        self._add_warning("orderbook_persistence_failed")
+                        self._add_blocker("market_critical_persistence_failed")
+                        self._finish_orderbook_persistence_pending(self.now())
+                    elif item.kind == "trade":
+                        self._add_warning("trade_persistence_failed")
+                        self._add_blocker("market_critical_persistence_failed")
+                    else:
+                        self._add_warning("protocol_event_persistence_failed")
             finally:
                 flush_ms = max(0, int((time.perf_counter() - started) * 1000))
                 self.status.db_writer_last_flush_ms = flush_ms
+                if any(queue_name == "critical" for queue_name, _, _ in batch):
+                    self.status.db_writer_last_critical_flush_ms = flush_ms
+                if any(queue_name == "diagnostic" for queue_name, _, _ in batch):
+                    self.status.db_writer_last_diagnostic_flush_ms = flush_ms
                 if flush_ms >= self.config.kalshi_ws_db_slow_write_ms:
                     self.status.db_writer_slow_flush_count += 1
-                    if item.kind != "protocol":
-                        self._record_protocol_event(
-                            "db_write_slow",
-                            event_subtype=item.kind,
-                            latency_ms=flush_ms,
-                        )
-                queue.task_done()
+                    self._record_protocol_event(
+                        "db_write_slow",
+                        event_subtype="batch",
+                        latency_ms=flush_ms,
+                    )
+                for queue_name, raw_item, _ in batch:
+                    self._market_db_queue_task_done(queue_name, raw_item)
                 self._refresh_db_writer_metrics(self.now())
+                if any(
+                    item.kind in {"orderbook", "trade"} for _, _, item in batch
+                ) or self._consume_force_next_heartbeat():
+                    self.record_market_heartbeat()
+                else:
+                    self.record_market_heartbeat(force=False)
+                await asyncio.sleep(
+                    max(
+                        self.config.market_db_writer_flush_interval_ms,
+                        self.config.market_orderbook_snapshot_min_interval_ms,
+                    )
+                    / 1000
+                )
 
     def _write_market_db_item(self, item: _DbWriterItem) -> None:
+        self._write_market_db_batch([item])
+
+    def _write_market_db_batch(self, items: list[_DbWriterItem]) -> None:
         if self.session_factory is None:
             return
         with self.session_factory() as session:
-            if item.kind == "orderbook":
-                OrderbookRepository(session).insert_snapshot(item.payload)
-            elif item.kind == "trade":
-                PublicTradesRepository(session).insert_trade(item.payload)
-            elif item.kind == "protocol":
-                KalshiWsProtocolEventRepository(session).insert_event(item.payload)
-            else:
-                raise ValueError(f"Unsupported market DB writer item kind: {item.kind}")
+            orderbooks = [item.payload for item in items if item.kind == "orderbook"]
+            trades = [item.payload for item in items if item.kind == "trade"]
+            protocols = [item.payload for item in items if item.kind == "protocol"]
+            unsupported = [
+                item.kind
+                for item in items
+                if item.kind not in {"orderbook", "trade", "protocol"}
+            ]
+            if unsupported:
+                raise ValueError(f"Unsupported market DB writer item kind: {unsupported[0]}")
+            OrderbookRepository(session).insert_snapshots(orderbooks)
+            PublicTradesRepository(session).insert_trades(trades)
+            KalshiWsProtocolEventRepository(session).insert_events(protocols)
             session.commit()
+        for item in items:
+            self._mark_market_db_item_committed(item)
+
+    def _mark_market_db_item_committed(self, item: _DbWriterItem) -> None:
         if item.kind == "orderbook":
             self._mark_persistence_success(
                 warning="orderbook_persistence_failed",
-                blockers=("orderbook_persistence_failed",),
+                blockers=(
+                    "orderbook_persistence_failed",
+                    "market_critical_persistence_failed",
+                    "market_critical_persistence_backpressure",
+                ),
             )
-            self.status.last_orderbook_at = item.payload.received_at
+            if _datetime_at_least(
+                item.payload.received_at,
+                self.status.last_orderbook_at,
+            ):
+                self.status.last_orderbook_at = item.payload.received_at
+            if _datetime_at_least(
+                item.payload.received_at,
+                self.status.latest_state_persisted_at,
+            ):
+                self.status.latest_state_persisted_at = item.payload.received_at
+                self.status.latest_state_persistence_lag_ms = _age_ms(
+                    item.payload.received_at,
+                    self.now(),
+                )
             matches_active_market = _orderbook_commit_matches_active_market(
                 item.payload,
                 self.status.active_market_ticker,
@@ -2342,8 +2502,122 @@ class KalshiWsCollector:
                 self._clear_orderbook_delta_warnings()
             self._finish_orderbook_persistence_pending(item.payload.received_at)
         elif item.kind == "trade":
-            self._mark_persistence_success(warning="trade_persistence_failed")
+            self._mark_persistence_success(
+                warning="trade_persistence_failed",
+                blockers=(
+                    "market_critical_persistence_failed",
+                    "market_critical_persistence_backpressure",
+                ),
+            )
             self.status.last_trade_at = item.payload.received_at
+        elif item.kind == "protocol":
+            self.status.protocol_events_persisted += 1
+            if _protocol_event_counts_as_error(
+                item.payload.event_type,
+                close_code=item.payload.close_code,
+            ):
+                self.status.protocol_errors_persisted += 1
+
+    def _next_market_db_batch(self) -> list[tuple[str, _DbWriterItem, _DbWriterItem]]:
+        max_batch = max(1, self.config.market_db_writer_max_batch_size)
+        max_flush_seconds = max(1, self.config.market_db_writer_max_flush_ms) / 1000
+        started = time.perf_counter()
+        batch: list[tuple[str, _DbWriterItem, _DbWriterItem]] = []
+        while len(batch) < max_batch:
+            queue_name, raw_item = self._pop_next_market_db_queue_item()
+            if raw_item is None or queue_name is None:
+                break
+            resolved = self._resolve_market_db_item(raw_item)
+            if resolved is None:
+                self._market_db_queue_task_done(queue_name, raw_item)
+                continue
+            batch.append((queue_name, raw_item, resolved))
+            if (
+                queue_name == "diagnostic"
+                and len(batch) >= self.config.market_protocol_event_max_per_flush
+            ):
+                break
+            if time.perf_counter() - started >= max_flush_seconds:
+                break
+        return batch
+
+    def _pop_next_market_db_queue_item(
+        self,
+    ) -> tuple[str | None, _DbWriterItem | None]:
+        critical_queue = self._db_critical_queue or self._db_writer_queue
+        if critical_queue is not None:
+            try:
+                item = critical_queue.get_nowait()
+                enqueued_at = (
+                    self._db_critical_enqueued_at.popleft()
+                    if self._db_critical_enqueued_at
+                    else item.enqueued_at
+                )
+                self._db_critical_inflight_at.append(enqueued_at)
+                return "critical", item
+            except asyncio.QueueEmpty:
+                pass
+        diagnostic_queue = self._db_diagnostic_queue
+        if diagnostic_queue is not None:
+            try:
+                item = diagnostic_queue.get_nowait()
+                if self._db_diagnostic_enqueued_at:
+                    self._db_diagnostic_enqueued_at.popleft()
+                return "diagnostic", item
+            except asyncio.QueueEmpty:
+                pass
+        return None, None
+
+    def _resolve_market_db_item(self, item: _DbWriterItem) -> _DbWriterItem | None:
+        if item.kind != "orderbook_marker":
+            return item
+        market_ticker = str(item.payload)
+        self._pending_orderbook_markers.discard(market_ticker)
+        return self._pending_orderbook_writes.pop(market_ticker, None)
+
+    def _market_db_queue_task_done(
+        self,
+        queue_name: str,
+        item: _DbWriterItem,
+    ) -> None:
+        queue = (
+            self._db_diagnostic_queue
+            if queue_name == "diagnostic"
+            else self._db_critical_queue or self._db_writer_queue
+        )
+        if queue is not None:
+            queue.task_done()
+        if queue_name == "critical" and self._db_critical_inflight_at:
+            self._db_critical_inflight_at.popleft()
+
+    def _requeue_failed_critical_item(
+        self,
+        item: _DbWriterItem,
+        checked_at: datetime,
+    ) -> bool:
+        if item.kind not in {"orderbook", "trade"} or item.retry_count >= 1:
+            return False
+        queue = self._db_critical_queue or self._db_writer_queue
+        if queue is None:
+            return False
+        retry_item = replace(
+            item,
+            enqueued_at=checked_at,
+            retry_count=item.retry_count + 1,
+        )
+        try:
+            queue.put_nowait(retry_item)
+        except asyncio.QueueFull:
+            self._mark_critical_queue_backpressure(item.kind, checked_at)
+            return False
+        self._db_critical_enqueued_at.append(checked_at)
+        if item.kind == "orderbook":
+            self._add_warning("orderbook_persistence_failed")
+        else:
+            self._add_warning("trade_persistence_failed")
+        self._add_blocker("market_critical_persistence_failed")
+        self._force_next_heartbeat = True
+        return True
 
     def _queued_orderbook_recovery_still_current(self, item: _DbWriterItem) -> bool:
         if item.orderbook_recovery_result is None:
@@ -2365,7 +2639,6 @@ class KalshiWsCollector:
             self.status.orderbook_persistence_pending_since,
             queued_at,
         )
-        self._add_blocker("orderbook_persistence_pending")
         self._refresh_market_feed_state(queued_at)
         self._force_next_heartbeat = True
 
@@ -2402,48 +2675,157 @@ class KalshiWsCollector:
         clear_orderbook_recovery_warnings: bool = False,
         clear_orderbook_delta_warnings: bool = False,
     ) -> str:
-        queue = self._db_writer_queue
+        if kind == "protocol":
+            return self._enqueue_protocol_db_write(payload, enqueued_at)
+
+        queue = self._db_critical_queue or self._db_writer_queue
+        if queue is None:
+            return MARKET_DB_WRITE_DISABLED
+        item = _DbWriterItem(
+            kind=kind,
+            payload=payload,
+            enqueued_at=enqueued_at,
+            orderbook_recovery_result=orderbook_recovery_result,
+            orderbook_recovery_reason=(
+                self.status.market_subscription_recovery_last_reason
+                if orderbook_recovery_result is not None
+                else None
+            ),
+            orderbook_recovery_action=(
+                self.status.market_subscription_recovery_last_action
+                if orderbook_recovery_result is not None
+                else None
+            ),
+            clear_orderbook_recovery_warnings=clear_orderbook_recovery_warnings,
+            clear_orderbook_delta_warnings=clear_orderbook_delta_warnings,
+        )
+        if kind == "orderbook":
+            return self._enqueue_orderbook_db_write(item, enqueued_at)
+        try:
+            queue.put_nowait(item)
+        except asyncio.QueueFull:
+            self._mark_critical_queue_backpressure(kind, enqueued_at)
+            return MARKET_DB_WRITE_FULL
+        self._db_critical_enqueued_at.append(enqueued_at)
+        self._refresh_db_writer_metrics(enqueued_at)
+        return MARKET_DB_WRITE_QUEUED
+
+    def _enqueue_orderbook_db_write(
+        self,
+        item: _DbWriterItem,
+        enqueued_at: datetime,
+    ) -> str:
+        queue = self._db_critical_queue or self._db_writer_queue
+        if queue is None:
+            return MARKET_DB_WRITE_DISABLED
+        market_ticker = item.payload.market_ticker
+        previous = self._pending_orderbook_writes.get(market_ticker)
+        if previous is not None:
+            item = _coalesced_orderbook_item(previous, item)
+        if market_ticker in self._pending_orderbook_markers:
+            self._pending_orderbook_writes[market_ticker] = item
+            if previous is not None:
+                self.status.db_writer_coalesced_orderbook_count += 1
+                self.status.db_writer_dropped_superseded_count += 1
+            self._refresh_db_writer_metrics(enqueued_at)
+            return MARKET_DB_WRITE_COALESCED
+        marker = _DbWriterItem(
+            kind="orderbook_marker",
+            payload=market_ticker,
+            enqueued_at=enqueued_at,
+        )
+        try:
+            queue.put_nowait(marker)
+        except asyncio.QueueFull:
+            self._pending_orderbook_writes.pop(market_ticker, None)
+            self._mark_critical_queue_backpressure("orderbook", enqueued_at)
+            return MARKET_DB_WRITE_FULL
+        self._pending_orderbook_writes[market_ticker] = item
+        if previous is not None:
+            self.status.db_writer_coalesced_orderbook_count += 1
+            self.status.db_writer_dropped_superseded_count += 1
+        self._pending_orderbook_markers.add(market_ticker)
+        self._db_critical_enqueued_at.append(enqueued_at)
+        self._refresh_db_writer_metrics(enqueued_at)
+        return MARKET_DB_WRITE_QUEUED
+
+    def _enqueue_protocol_db_write(
+        self,
+        event: KalshiWsProtocolEventInput,
+        enqueued_at: datetime,
+    ) -> str:
+        if not self._should_persist_protocol_event(event):
+            self.status.protocol_events_sampled_out += 1
+            self._refresh_db_writer_metrics(enqueued_at)
+            return MARKET_DB_WRITE_COALESCED
+        item = _DbWriterItem(kind="protocol", payload=event, enqueued_at=enqueued_at)
+        critical = _protocol_event_is_critical(event.event_type)
+        if critical:
+            queue = self._db_critical_queue or self._db_writer_queue
+        else:
+            queue = self._db_diagnostic_queue
         if queue is None:
             return MARKET_DB_WRITE_DISABLED
         try:
-            queue.put_nowait(
-                _DbWriterItem(
-                    kind=kind,
-                    payload=payload,
-                    enqueued_at=enqueued_at,
-                    orderbook_recovery_result=orderbook_recovery_result,
-                    orderbook_recovery_reason=(
-                        self.status.market_subscription_recovery_last_reason
-                        if orderbook_recovery_result is not None
-                        else None
-                    ),
-                    orderbook_recovery_action=(
-                        self.status.market_subscription_recovery_last_action
-                        if orderbook_recovery_result is not None
-                        else None
-                    ),
-                    clear_orderbook_recovery_warnings=(
-                        clear_orderbook_recovery_warnings
-                    ),
-                    clear_orderbook_delta_warnings=clear_orderbook_delta_warnings,
-                )
-            )
+            queue.put_nowait(item)
         except asyncio.QueueFull:
-            self._add_warning("market_db_writer_queue_backpressure")
-            self._add_blocker("market_db_writer_queue_backpressure")
-            self._force_next_heartbeat = True
-            self.status.db_writer_queue_depth = queue.qsize()
-            if kind != "protocol":
-                self._record_protocol_event(
-                    "queue_backpressure",
-                    event_subtype=kind,
-                    recovery_action="drop_or_block",
-                    recovery_result="queue_full",
-                )
+            if critical:
+                self._mark_critical_queue_backpressure("protocol", enqueued_at)
+            else:
+                self.status.db_writer_dropped_diagnostic_count += 1
+                self.status.protocol_events_dropped_backpressure += 1
+                self._add_warning("market_diagnostic_persistence_backpressure")
+                self._force_next_heartbeat = True
+            self._refresh_db_writer_metrics(enqueued_at)
             return MARKET_DB_WRITE_FULL
-        self._db_writer_enqueued_at.append(enqueued_at)
+        self.status.protocol_events_enqueued += 1
+        if critical:
+            self._db_critical_enqueued_at.append(enqueued_at)
+        else:
+            self._db_diagnostic_enqueued_at.append(enqueued_at)
         self._refresh_db_writer_metrics(enqueued_at)
         return MARKET_DB_WRITE_QUEUED
+
+    def _mark_critical_queue_backpressure(
+        self,
+        kind: str,
+        checked_at: datetime,
+    ) -> None:
+        self._add_warning("market_critical_persistence_backpressure")
+        self._add_blocker("market_critical_persistence_backpressure")
+        self._clear_warnings("market_db_writer_queue_backpressure")
+        self._clear_blockers("market_db_writer_queue_backpressure")
+        self._force_next_heartbeat = True
+        self._refresh_db_writer_metrics(checked_at)
+        self._record_protocol_event(
+            "queue_backpressure",
+            event_subtype=kind,
+            recovery_action="drop_or_block",
+            recovery_result="critical_queue_full",
+        )
+
+    def _should_persist_protocol_event(self, event: KalshiWsProtocolEventInput) -> bool:
+        if _protocol_event_is_critical(event.event_type):
+            return True
+        if event.event_type not in ROUTINE_PROTOCOL_EVENTS:
+            return True
+        rate = (
+            self.config.market_protocol_event_error_sample_rate
+            if _protocol_event_counts_as_error(
+                event.event_type,
+                close_code=event.close_code,
+            )
+            else self.config.market_protocol_event_sample_rate
+        )
+        if rate >= 1:
+            return True
+        if rate <= 0:
+            return False
+        self._protocol_event_sequence[event.event_type] = (
+            self._protocol_event_sequence.get(event.event_type, 0) + 1
+        )
+        interval = max(1, int(round(1 / rate)))
+        return self._protocol_event_sequence[event.event_type] % interval == 1
 
     def _record_protocol_event(
         self,
@@ -2479,7 +2861,11 @@ class KalshiWsCollector:
         if self.session_factory is None:
             return
         created_at = self.now()
-        if event_type in PROTOCOL_ERROR_EVENTS:
+        counts_as_error = _protocol_event_counts_as_error(
+            event_type,
+            close_code=close_code,
+        )
+        if counts_as_error:
             self._protocol_error_events.append(created_at)
         elif event_type in PROTOCOL_RECOVERY_EVENTS:
             self._protocol_error_reset_at = created_at
@@ -2520,12 +2906,19 @@ class KalshiWsCollector:
             payload_summary_json=payload_summary_json,
         )
         enqueue_result = self._enqueue_market_db_write("protocol", event, created_at)
-        if enqueue_result in {MARKET_DB_WRITE_QUEUED, MARKET_DB_WRITE_FULL}:
+        if enqueue_result in {
+            MARKET_DB_WRITE_QUEUED,
+            MARKET_DB_WRITE_FULL,
+            MARKET_DB_WRITE_COALESCED,
+        }:
             return
         try:
             with self.session_factory() as session:
                 KalshiWsProtocolEventRepository(session).insert_event(event)
                 session.commit()
+            self.status.protocol_events_persisted += 1
+            if counts_as_error:
+                self.status.protocol_errors_persisted += 1
         except SQLAlchemyError:
             LOGGER.warning("Kalshi WS protocol event persistence failed.", exc_info=True)
 
@@ -2638,16 +3031,90 @@ class KalshiWsCollector:
             self.status.orderbook_persistence_pending_since,
             checked_at,
         )
-        queue = self._db_writer_queue
+        self.status.latest_state_persisted_age_ms = _age_ms(
+            self.status.latest_state_persisted_at,
+            checked_at,
+        )
+        critical_queue = self._db_critical_queue or self._db_writer_queue
+        diagnostic_queue = self._db_diagnostic_queue
         self.status.ws_reader_queue_depth = 0
         self.status.ws_reader_queue_oldest_age_ms = None
-        if queue is None:
+        if critical_queue is None:
             self.status.db_writer_queue_depth = 0
             self.status.db_writer_queue_oldest_age_ms = None
+            self.status.db_writer_critical_queue_depth = 0
+            self.status.db_writer_critical_queue_oldest_age_ms = None
+            self.status.db_writer_diagnostic_queue_depth = 0
+            self.status.db_writer_diagnostic_queue_oldest_age_ms = None
+            self.status.protocol_event_queue_depth = 0
+            self.status.protocol_event_oldest_age_ms = None
+            self.status.historical_persistence_lag_ms = None
             return
-        self.status.db_writer_queue_depth = queue.qsize()
-        oldest = self._db_writer_enqueued_at[0] if self._db_writer_enqueued_at else None
-        self.status.db_writer_queue_oldest_age_ms = _age_ms(oldest, checked_at)
+        critical_oldest_values = [
+            value
+            for value in (
+                self._db_critical_enqueued_at[0]
+                if self._db_critical_enqueued_at
+                else None,
+                self._db_critical_inflight_at[0]
+                if self._db_critical_inflight_at
+                else None,
+            )
+            if value is not None
+        ]
+        critical_oldest = (
+            min(_as_utc(value) for value in critical_oldest_values)
+            if critical_oldest_values
+            else None
+        )
+        diagnostic_oldest = (
+            self._db_diagnostic_enqueued_at[0]
+            if self._db_diagnostic_enqueued_at
+            else None
+        )
+        self.status.db_writer_critical_queue_depth = critical_queue.qsize() + len(
+            self._db_critical_inflight_at
+        )
+        self.status.db_writer_critical_queue_oldest_age_ms = _age_ms(
+            critical_oldest,
+            checked_at,
+        )
+        self.status.db_writer_diagnostic_queue_depth = (
+            diagnostic_queue.qsize() if diagnostic_queue is not None else 0
+        )
+        self.status.db_writer_diagnostic_queue_oldest_age_ms = _age_ms(
+            diagnostic_oldest,
+            checked_at,
+        )
+        self.status.db_writer_queue_depth = self.status.db_writer_critical_queue_depth
+        self.status.db_writer_queue_oldest_age_ms = (
+            self.status.db_writer_critical_queue_oldest_age_ms
+        )
+        self.status.protocol_event_queue_depth = (
+            self.status.db_writer_diagnostic_queue_depth
+        )
+        self.status.protocol_event_oldest_age_ms = (
+            self.status.db_writer_diagnostic_queue_oldest_age_ms
+        )
+        self.status.historical_persistence_lag_ms = (
+            self.status.db_writer_diagnostic_queue_oldest_age_ms
+        )
+        critical_age = self.status.db_writer_critical_queue_oldest_age_ms or 0
+        critical_depth = self.status.db_writer_critical_queue_depth
+        if (
+            critical_depth >= self.config.market_db_writer_backpressure_block_depth
+            or critical_age >= self.config.market_db_writer_backpressure_max_age_ms
+        ):
+            self._add_warning("market_critical_persistence_backpressure")
+            self._add_blocker("market_critical_persistence_backpressure")
+        elif critical_depth >= self.config.market_db_writer_backpressure_warn_depth:
+            self._add_warning("market_critical_persistence_backpressure")
+            self._clear_blockers("market_critical_persistence_backpressure")
+        elif "market_critical_persistence_backpressure" in self.status.blockers:
+            self._add_warning("market_critical_persistence_backpressure")
+        else:
+            self._clear_warnings("market_critical_persistence_backpressure")
+            self._clear_blockers("market_critical_persistence_backpressure")
 
     def _persist_reference_tick(self, tick: ReferenceTickInput) -> bool:
         if self.session_factory is None:
@@ -3422,6 +3889,10 @@ def _latest_datetime(*values: datetime | None) -> datetime | None:
     return max(present) if present else None
 
 
+def _datetime_at_least(value: datetime, minimum: datetime | None) -> bool:
+    return minimum is None or _as_utc(value) >= _as_utc(minimum)
+
+
 def _age_ms(value_at: datetime | None, checked_at: datetime) -> int | None:
     if value_at is None:
         return None
@@ -3459,6 +3930,38 @@ def _market_reconnect_confirmation_message(message: ParsedWsMessage) -> bool:
         "orderbook_snapshot",
         "orderbook_delta",
     }
+
+
+def _protocol_event_is_critical(event_type: str) -> bool:
+    return event_type in CRITICAL_PROTOCOL_EVENTS or event_type.endswith("_error")
+
+
+def _coalesced_orderbook_item(
+    previous: _DbWriterItem,
+    current: _DbWriterItem,
+) -> _DbWriterItem:
+    if current.orderbook_recovery_result is not None:
+        recovery_result = current.orderbook_recovery_result
+        recovery_reason = current.orderbook_recovery_reason
+        recovery_action = current.orderbook_recovery_action
+    else:
+        recovery_result = previous.orderbook_recovery_result
+        recovery_reason = previous.orderbook_recovery_reason
+        recovery_action = previous.orderbook_recovery_action
+    return replace(
+        current,
+        orderbook_recovery_result=recovery_result,
+        orderbook_recovery_reason=recovery_reason,
+        orderbook_recovery_action=recovery_action,
+        clear_orderbook_recovery_warnings=(
+            current.clear_orderbook_recovery_warnings
+            or previous.clear_orderbook_recovery_warnings
+        ),
+        clear_orderbook_delta_warnings=(
+            current.clear_orderbook_delta_warnings
+            or previous.clear_orderbook_delta_warnings
+        ),
+    )
 
 
 def _orderbook_commit_matches_current(

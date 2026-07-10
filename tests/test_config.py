@@ -32,6 +32,18 @@ def test_default_config_is_observer_only() -> None:
     assert config.kalshi_ws_snapshot_timeout_seconds == 10
     assert config.kalshi_ws_db_writer_queue_max_size == 1000
     assert config.kalshi_ws_db_slow_write_ms == 500
+    assert config.market_db_writer_critical_queue_max_size == 2000
+    assert config.market_db_writer_diagnostic_queue_max_size == 5000
+    assert config.market_db_writer_flush_interval_ms == 250
+    assert config.market_db_writer_max_batch_size == 500
+    assert config.market_db_writer_max_flush_ms == 1000
+    assert config.market_orderbook_snapshot_min_interval_ms == 250
+    assert config.market_protocol_event_sample_rate == 0.02
+    assert config.market_protocol_event_error_sample_rate == 1.0
+    assert config.market_protocol_event_max_per_flush == 100
+    assert config.market_db_writer_backpressure_warn_depth == 750
+    assert config.market_db_writer_backpressure_block_depth == 1500
+    assert config.market_db_writer_backpressure_max_age_ms == 10000
     assert config.kalshi_ws_subscribe_orderbook is True
     assert config.kalshi_ws_subscribe_ticker is True
     assert config.kalshi_ws_subscribe_trades is True
@@ -162,6 +174,18 @@ def test_kalshi_websocket_env_vars_parse_safely() -> None:
             "KALSHI_WS_SNAPSHOT_TIMEOUT_SECONDS": "9",
             "KALSHI_WS_DB_WRITER_QUEUE_MAX_SIZE": "25",
             "KALSHI_WS_DB_SLOW_WRITE_MS": "250",
+            "MARKET_DB_WRITER_CRITICAL_QUEUE_MAX_SIZE": "30",
+            "MARKET_DB_WRITER_DIAGNOSTIC_QUEUE_MAX_SIZE": "40",
+            "MARKET_DB_WRITER_FLUSH_INTERVAL_MS": "125",
+            "MARKET_DB_WRITER_MAX_BATCH_SIZE": "50",
+            "MARKET_DB_WRITER_MAX_FLUSH_MS": "750",
+            "MARKET_ORDERBOOK_SNAPSHOT_MIN_INTERVAL_MS": "150",
+            "MARKET_PROTOCOL_EVENT_SAMPLE_RATE": "0.25",
+            "MARKET_PROTOCOL_EVENT_ERROR_SAMPLE_RATE": "0.75",
+            "MARKET_PROTOCOL_EVENT_MAX_PER_FLUSH": "20",
+            "MARKET_DB_WRITER_BACKPRESSURE_WARN_DEPTH": "11",
+            "MARKET_DB_WRITER_BACKPRESSURE_BLOCK_DEPTH": "12",
+            "MARKET_DB_WRITER_BACKPRESSURE_MAX_AGE_MS": "1300",
             "KALSHI_WS_SUBSCRIBE_ORDERBOOK": "false",
             "KALSHI_WS_SUBSCRIBE_TICKER": "true",
             "KALSHI_WS_SUBSCRIBE_TRADES": "false",
@@ -178,9 +202,27 @@ def test_kalshi_websocket_env_vars_parse_safely() -> None:
     assert config.kalshi_ws_snapshot_timeout_seconds == 9
     assert config.kalshi_ws_db_writer_queue_max_size == 25
     assert config.kalshi_ws_db_slow_write_ms == 250
+    assert config.market_db_writer_critical_queue_max_size == 30
+    assert config.market_db_writer_diagnostic_queue_max_size == 40
+    assert config.market_db_writer_flush_interval_ms == 125
+    assert config.market_db_writer_max_batch_size == 50
+    assert config.market_db_writer_max_flush_ms == 750
+    assert config.market_orderbook_snapshot_min_interval_ms == 150
+    assert config.market_protocol_event_sample_rate == 0.25
+    assert config.market_protocol_event_error_sample_rate == 0.75
+    assert config.market_protocol_event_max_per_flush == 20
+    assert config.market_db_writer_backpressure_warn_depth == 11
+    assert config.market_db_writer_backpressure_block_depth == 12
+    assert config.market_db_writer_backpressure_max_age_ms == 1300
     assert config.kalshi_ws_subscribe_orderbook is False
     assert config.kalshi_ws_subscribe_ticker is True
     assert config.kalshi_ws_subscribe_trades is False
+
+
+def test_market_protocol_sample_rate_allows_zero() -> None:
+    config = load_config({"MARKET_PROTOCOL_EVENT_SAMPLE_RATE": "0"})
+
+    assert config.market_protocol_event_sample_rate == 0
 
 
 def test_kalshi_cfbenchmarks_env_vars_parse_safely() -> None:

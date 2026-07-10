@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, insert, select
 from sqlalchemy.orm import Session
 
 from ape.db.models import PublicTrade
@@ -18,6 +18,14 @@ class PublicTradesRepository:
         self.session.add(row)
         self.session.flush()
         return row
+
+    def insert_trades(self, trades: list[PublicTradeInput]) -> None:
+        if not trades:
+            return
+        self.session.execute(
+            insert(PublicTrade),
+            [trade.__dict__ for trade in trades],
+        )
 
     def get_recent_trades(self, market_ticker: str, limit: int = 100) -> list[PublicTrade]:
         return list(

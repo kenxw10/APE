@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, insert, or_, select
 from sqlalchemy.orm import Session
 
 from ape.db.models import KalshiWsProtocolEvent
+from ape.kalshi.protocol_events import PROTOCOL_ERROR_EVENTS, PROTOCOL_NORMAL_CLOSE_CODES
 from ape.repositories.inputs import KalshiWsProtocolEventInput
 
 
@@ -21,6 +22,14 @@ class KalshiWsProtocolEventRepository:
         self.session.add(row)
         self.session.flush()
         return row
+
+    def insert_events(self, events: list[KalshiWsProtocolEventInput]) -> None:
+        if not events:
+            return
+        self.session.execute(
+            insert(KalshiWsProtocolEvent),
+            [event.__dict__ for event in events],
+        )
 
     def list_recent(self, *, limit: int = 200) -> list[KalshiWsProtocolEvent]:
         capped_limit = min(max(limit, 1), 500)
@@ -41,15 +50,7 @@ class KalshiWsProtocolEventRepository:
             .select_from(KalshiWsProtocolEvent)
             .where(
                 KalshiWsProtocolEvent.created_at >= since,
-                KalshiWsProtocolEvent.event_type.in_(
-                    (
-                        "websocket_error",
-                        "update_subscription_error",
-                        "reconnect_failed",
-                        "db_write_slow",
-                        "queue_backpressure",
-                    )
-                ),
+                _protocol_error_expression(),
             )
         )
         return int(value or 0)
@@ -72,16 +73,17 @@ class KalshiWsProtocolEventRepository:
             )
         )
         total = sum(by_event_type.values())
-        error_count = sum(
-            by_event_type.get(event_type, 0)
-            for event_type in (
-                "websocket_error",
-                "update_subscription_error",
-                "reconnect_failed",
-                "db_write_slow",
-                "queue_backpressure",
+        abnormal_close_count = self.session.scalar(
+            select(func.count())
+            .select_from(KalshiWsProtocolEvent)
+            .where(
+                KalshiWsProtocolEvent.created_at >= since,
+                _abnormal_close_expression(),
             )
         )
+        error_count = sum(
+            by_event_type.get(event_type, 0) for event_type in PROTOCOL_ERROR_EVENTS
+        ) + int(abnormal_close_count or 0)
         close_count = by_event_type.get("websocket_close", 0)
         reconnect_count = sum(
             by_event_type.get(event_type, 0)
@@ -100,3 +102,18 @@ class KalshiWsProtocolEventRepository:
             "by_event_type": by_event_type,
             "latest_event_at": latest_at,
         }
+
+
+def _protocol_error_expression():
+    return or_(
+        KalshiWsProtocolEvent.event_type.in_(tuple(PROTOCOL_ERROR_EVENTS)),
+        _abnormal_close_expression(),
+    )
+
+
+def _abnormal_close_expression():
+    return (
+        (KalshiWsProtocolEvent.event_type == "websocket_close")
+        & KalshiWsProtocolEvent.close_code.is_not(None)
+        & KalshiWsProtocolEvent.close_code.not_in(tuple(PROTOCOL_NORMAL_CLOSE_CODES))
+    )

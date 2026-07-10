@@ -157,6 +157,8 @@ After PR 9e, market feed recovery adds bounded subscription and rollover diagnos
 
 After PR 9f, the market worker also records raw Kalshi WebSocket protocol evidence in `kalshi_ws_protocol_events`. `/ws/status` exposes worker role, connection ID, subscription reconciliation, confirmed SIDs, list-subscription results, in-flight snapshot state, market DB writer queue metrics, recent protocol error count, reconnect reason, and close details. `/ws/protocol/recent` and `/ws/protocol/summary` expose read-only subscribe/update/list/ping/pong/close/error evidence for production validation.
 
+After PR 9g, the market worker persistence path is split into critical market state and noncritical diagnostic/protocol queues. Critical latest market state, orderbook snapshots, public trades, rollover state, and heartbeats are prioritized; routine protocol events are sampled/rate-limited and may be dropped under diagnostic backpressure. `/ws/status` separates critical queue health from diagnostic queue health and reports coalesced orderbook writes, dropped diagnostic events, sampled protocol events, and latest state persistence age/lag. No env change is required before PR 9g unless the optional defaults below need tuning.
+
 For `/ws/status`, `last_error_type` and `last_error_message` describe a current unresolved worker error. A successful current orderbook or trade database write clears old recovered errors so stale startup failures do not keep the status page red.
 
 If a manual migration is needed outside API startup, run:
@@ -241,6 +243,18 @@ KALSHI_WS_MAX_RECONNECT_SECONDS=60
 KALSHI_WS_SUBSCRIBE_ORDERBOOK=true
 KALSHI_WS_SUBSCRIBE_TICKER=true
 KALSHI_WS_SUBSCRIBE_TRADES=true
+MARKET_DB_WRITER_CRITICAL_QUEUE_MAX_SIZE=2000
+MARKET_DB_WRITER_DIAGNOSTIC_QUEUE_MAX_SIZE=5000
+MARKET_DB_WRITER_FLUSH_INTERVAL_MS=250
+MARKET_DB_WRITER_MAX_BATCH_SIZE=500
+MARKET_DB_WRITER_MAX_FLUSH_MS=1000
+MARKET_ORDERBOOK_SNAPSHOT_MIN_INTERVAL_MS=250
+MARKET_PROTOCOL_EVENT_SAMPLE_RATE=0.02
+MARKET_PROTOCOL_EVENT_ERROR_SAMPLE_RATE=1.0
+MARKET_PROTOCOL_EVENT_MAX_PER_FLUSH=100
+MARKET_DB_WRITER_BACKPRESSURE_WARN_DEPTH=750
+MARKET_DB_WRITER_BACKPRESSURE_BLOCK_DEPTH=1500
+MARKET_DB_WRITER_BACKPRESSURE_MAX_AGE_MS=10000
 APE_WORKER_ROLE=market-data
 APP_MODE=OBSERVER
 TRADING_ENABLED=false

@@ -52,8 +52,29 @@ class KalshiWsStatusSnapshot:
     ws_reader_queue_oldest_age_ms: int | None
     db_writer_queue_depth: int
     db_writer_queue_oldest_age_ms: int | None
+    db_writer_critical_queue_depth: int
+    db_writer_critical_queue_oldest_age_ms: int | None
+    db_writer_diagnostic_queue_depth: int
+    db_writer_diagnostic_queue_oldest_age_ms: int | None
     db_writer_last_flush_ms: int | None
+    db_writer_last_critical_flush_ms: int | None
+    db_writer_last_diagnostic_flush_ms: int | None
     db_writer_slow_flush_count: int
+    db_writer_dropped_diagnostic_count: int
+    db_writer_coalesced_orderbook_count: int
+    db_writer_coalesced_trade_count: int
+    db_writer_dropped_superseded_count: int
+    latest_state_persisted_at: datetime | None
+    latest_state_persisted_age_ms: int | None
+    latest_state_persistence_lag_ms: int | None
+    historical_persistence_lag_ms: int | None
+    protocol_events_enqueued: int
+    protocol_events_persisted: int
+    protocol_events_sampled_out: int
+    protocol_events_dropped_backpressure: int
+    protocol_errors_persisted: int
+    protocol_event_queue_depth: int
+    protocol_event_oldest_age_ms: int | None
     orderbook_persistence_pending: bool
     orderbook_persistence_pending_count: int
     orderbook_persistence_pending_since: datetime | None
@@ -145,8 +166,29 @@ def build_kalshi_ws_status(
     ws_reader_queue_oldest_age_ms: int | None = None
     db_writer_queue_depth = 0
     db_writer_queue_oldest_age_ms: int | None = None
+    db_writer_critical_queue_depth = 0
+    db_writer_critical_queue_oldest_age_ms: int | None = None
+    db_writer_diagnostic_queue_depth = 0
+    db_writer_diagnostic_queue_oldest_age_ms: int | None = None
     db_writer_last_flush_ms: int | None = None
+    db_writer_last_critical_flush_ms: int | None = None
+    db_writer_last_diagnostic_flush_ms: int | None = None
     db_writer_slow_flush_count = 0
+    db_writer_dropped_diagnostic_count = 0
+    db_writer_coalesced_orderbook_count = 0
+    db_writer_coalesced_trade_count = 0
+    db_writer_dropped_superseded_count = 0
+    latest_state_persisted_at: datetime | None = None
+    latest_state_persisted_age_ms: int | None = None
+    latest_state_persistence_lag_ms: int | None = None
+    historical_persistence_lag_ms: int | None = None
+    protocol_events_enqueued = 0
+    protocol_events_persisted = 0
+    protocol_events_sampled_out = 0
+    protocol_events_dropped_backpressure = 0
+    protocol_errors_persisted = 0
+    protocol_event_queue_depth = 0
+    protocol_event_oldest_age_ms: int | None = None
     orderbook_persistence_pending = False
     orderbook_persistence_pending_count = 0
     orderbook_persistence_pending_since: datetime | None = None
@@ -246,8 +288,57 @@ def build_kalshi_ws_status(
                     db_writer_queue_oldest_age_ms = (
                         liveness.db_writer_queue_oldest_age_ms
                     )
+                    db_writer_critical_queue_depth = (
+                        liveness.db_writer_critical_queue_depth
+                    )
+                    db_writer_critical_queue_oldest_age_ms = (
+                        liveness.db_writer_critical_queue_oldest_age_ms
+                    )
+                    db_writer_diagnostic_queue_depth = (
+                        liveness.db_writer_diagnostic_queue_depth
+                    )
+                    db_writer_diagnostic_queue_oldest_age_ms = (
+                        liveness.db_writer_diagnostic_queue_oldest_age_ms
+                    )
                     db_writer_last_flush_ms = liveness.db_writer_last_flush_ms
+                    db_writer_last_critical_flush_ms = (
+                        liveness.db_writer_last_critical_flush_ms
+                    )
+                    db_writer_last_diagnostic_flush_ms = (
+                        liveness.db_writer_last_diagnostic_flush_ms
+                    )
                     db_writer_slow_flush_count = liveness.db_writer_slow_flush_count
+                    db_writer_dropped_diagnostic_count = (
+                        liveness.db_writer_dropped_diagnostic_count
+                    )
+                    db_writer_coalesced_orderbook_count = (
+                        liveness.db_writer_coalesced_orderbook_count
+                    )
+                    db_writer_coalesced_trade_count = (
+                        liveness.db_writer_coalesced_trade_count
+                    )
+                    db_writer_dropped_superseded_count = (
+                        liveness.db_writer_dropped_superseded_count
+                    )
+                    latest_state_persisted_at = liveness.latest_state_persisted_at
+                    latest_state_persisted_age_ms = (
+                        liveness.latest_state_persisted_age_ms
+                    )
+                    latest_state_persistence_lag_ms = (
+                        liveness.latest_state_persistence_lag_ms
+                    )
+                    historical_persistence_lag_ms = (
+                        liveness.historical_persistence_lag_ms
+                    )
+                    protocol_events_enqueued = liveness.protocol_events_enqueued
+                    protocol_events_persisted = liveness.protocol_events_persisted
+                    protocol_events_sampled_out = liveness.protocol_events_sampled_out
+                    protocol_events_dropped_backpressure = (
+                        liveness.protocol_events_dropped_backpressure
+                    )
+                    protocol_errors_persisted = liveness.protocol_errors_persisted
+                    protocol_event_queue_depth = liveness.protocol_event_queue_depth
+                    protocol_event_oldest_age_ms = liveness.protocol_event_oldest_age_ms
                     orderbook_persistence_pending = (
                         liveness.orderbook_persistence_pending
                     )
@@ -419,8 +510,33 @@ def build_kalshi_ws_status(
         ws_reader_queue_oldest_age_ms=ws_reader_queue_oldest_age_ms,
         db_writer_queue_depth=db_writer_queue_depth,
         db_writer_queue_oldest_age_ms=db_writer_queue_oldest_age_ms,
+        db_writer_critical_queue_depth=db_writer_critical_queue_depth,
+        db_writer_critical_queue_oldest_age_ms=(
+            db_writer_critical_queue_oldest_age_ms
+        ),
+        db_writer_diagnostic_queue_depth=db_writer_diagnostic_queue_depth,
+        db_writer_diagnostic_queue_oldest_age_ms=(
+            db_writer_diagnostic_queue_oldest_age_ms
+        ),
         db_writer_last_flush_ms=db_writer_last_flush_ms,
+        db_writer_last_critical_flush_ms=db_writer_last_critical_flush_ms,
+        db_writer_last_diagnostic_flush_ms=db_writer_last_diagnostic_flush_ms,
         db_writer_slow_flush_count=db_writer_slow_flush_count,
+        db_writer_dropped_diagnostic_count=db_writer_dropped_diagnostic_count,
+        db_writer_coalesced_orderbook_count=db_writer_coalesced_orderbook_count,
+        db_writer_coalesced_trade_count=db_writer_coalesced_trade_count,
+        db_writer_dropped_superseded_count=db_writer_dropped_superseded_count,
+        latest_state_persisted_at=latest_state_persisted_at,
+        latest_state_persisted_age_ms=latest_state_persisted_age_ms,
+        latest_state_persistence_lag_ms=latest_state_persistence_lag_ms,
+        historical_persistence_lag_ms=historical_persistence_lag_ms,
+        protocol_events_enqueued=protocol_events_enqueued,
+        protocol_events_persisted=protocol_events_persisted,
+        protocol_events_sampled_out=protocol_events_sampled_out,
+        protocol_events_dropped_backpressure=protocol_events_dropped_backpressure,
+        protocol_errors_persisted=protocol_errors_persisted,
+        protocol_event_queue_depth=protocol_event_queue_depth,
+        protocol_event_oldest_age_ms=protocol_event_oldest_age_ms,
         orderbook_persistence_pending=orderbook_persistence_pending,
         orderbook_persistence_pending_count=orderbook_persistence_pending_count,
         orderbook_persistence_pending_since=orderbook_persistence_pending_since,
