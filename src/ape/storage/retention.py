@@ -34,6 +34,7 @@ RETENTION_FAILED = "failed"
 RETENTION_RUNNING = "running"
 RETENTION_TIMED_OUT = "timed_out"
 RETENTION_SUCCESS_STATES = {RETENTION_SUCCESS, RETENTION_SUCCESS_PARTIAL}
+RETENTION_ROW_CAP_REACHED_WARNING = "storage_retention_max_delete_rows_per_table_reached"
 STORAGE_LIVENESS_SOURCE_COMPONENT = "component"
 STORAGE_LIVENESS_SOURCE_LEGACY_FALLBACK = "legacy_aggregate_fallback"
 STORAGE_LIVENESS_SOURCE_MISSING = "missing"
@@ -714,6 +715,15 @@ def _apply_row_retention(
             table_deleted_rows += deleted
             repository.session.commit()
             _retention_sleep_ms(config.storage_retention_batch_sleep_ms)
+        _mark_row_cap_exhausted_if_needed(
+            config=config,
+            repository=repository,
+            policy=policy,
+            condition_sql=policy.delete_condition_sql,
+            parameters={"cutoff": cutoff},
+            rows_processed=table_deleted_rows,
+            warnings=warnings,
+        )
         _sleep_between_retention_tables(config, table_index, policies)
 
 
@@ -767,6 +777,15 @@ def _apply_raw_payload_retention(
             table_stripped_rows += updated
             repository.session.commit()
             _retention_sleep_ms(config.storage_retention_batch_sleep_ms)
+        _mark_row_cap_exhausted_if_needed(
+            config=config,
+            repository=repository,
+            policy=policy,
+            condition_sql=policy.raw_payload_condition_sql,
+            parameters={"cutoff": cutoff},
+            rows_processed=table_stripped_rows,
+            warnings=warnings,
+        )
         _sleep_between_retention_tables(config, table_index, policies)
 
 
@@ -1058,6 +1077,7 @@ def _latest_run_budget_exhausted(
         latest_run.status == RETENTION_SUCCESS_PARTIAL
         or "storage_retention_max_run_seconds_reached" in latest_warnings
         or "storage_retention_max_tables_per_run_reached" in latest_warnings
+        or RETENTION_ROW_CAP_REACHED_WARNING in latest_warnings
     )
 
 
@@ -1183,6 +1203,27 @@ def _retention_batch_size(config: AppConfig, rows_processed_for_table: int) -> i
     return max(0, min(config.storage_retention_batch_size, remaining))
 
 
+def _mark_row_cap_exhausted_if_needed(
+    *,
+    config: AppConfig,
+    repository: StorageRetentionRepository,
+    policy: RetentionPolicy,
+    condition_sql: str,
+    parameters: dict[str, Any],
+    rows_processed: int,
+    warnings: list[str],
+) -> None:
+    max_rows = config.storage_retention_max_delete_rows_per_table
+    if max_rows is None or rows_processed < max_rows:
+        return
+    if repository.has_matching(
+        table_name=policy.table_name,
+        condition_sql=condition_sql,
+        parameters=parameters,
+    ) and RETENTION_ROW_CAP_REACHED_WARNING not in warnings:
+        warnings.append(RETENTION_ROW_CAP_REACHED_WARNING)
+
+
 def _sleep_between_retention_tables(
     config: AppConfig,
     table_index: int,
@@ -1201,6 +1242,7 @@ def _retention_budget_exhausted(warnings: list[str]) -> bool:
     return (
         "storage_retention_max_run_seconds_reached" in warnings
         or "storage_retention_max_tables_per_run_reached" in warnings
+        or RETENTION_ROW_CAP_REACHED_WARNING in warnings
     )
 
 

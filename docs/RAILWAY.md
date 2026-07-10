@@ -588,7 +588,7 @@ Expected behavior:
 - `/storage/status` shows `enabled=true` from worker metadata after the worker has recorded a heartbeat.
 - `/storage/status` shows `liveness_source=component`, `worker_role=maintenance`, `latest_component_heartbeat_mode=storage_retention`, and `worker_heartbeat_stale=false`.
 - `latest_run_status` becomes `success` or `success_partial` after the first retention pass.
-- `success_partial` is acceptable when the worker stopped at a configured time/table budget with no blockers and the next interval can continue cleanup.
+- `success_partial` is acceptable when the worker stopped at a configured time, table, or per-table row budget with no blockers and the next interval can continue cleanup.
 - `latest_total_deleted_rows`, `latest_total_raw_payload_stripped_rows`, `latest_run_budget_exhausted`, `latest_tables_processed`, `latest_tables_skipped`, and DB timeout/error counters are visible for audit.
 - `table_stats` reports aggregate table counts/sizes without row contents or raw payloads.
 - `storage_retention_runs` receives audit rows for retention attempts.

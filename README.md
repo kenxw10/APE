@@ -361,7 +361,7 @@ The read-only endpoint is:
 
 It returns aggregate table stats, latest retention-run audit information, maintenance liveness fields (`liveness_source`, `worker_role`, heartbeat timestamps/ages, component/aggregate modes, `worker_heartbeat_stale`), warning/critical database-size status, and retention config summary. A healthy dedicated maintenance worker should show `liveness_source=component`, `worker_role=maintenance`, `latest_component_heartbeat_mode=storage_retention`, `worker_heartbeat_stale=false`, and latest run status `success` or `success_partial` with no blockers. It does not expose raw payload contents, secrets, or any delete controls.
 
-`success_partial` means the worker reached a configured time/table budget and stopped cleanly so the next interval can continue. Treat that as acceptable incremental progress unless it repeats with no row-count movement, DB timeouts, or blockers.
+`success_partial` means the worker reached a configured time, table, or per-table row budget and stopped cleanly so the next interval can continue. Treat that as acceptable incremental progress unless it repeats with no row-count movement, DB timeouts, or blockers.
 
 Postgres deletes do not immediately shrink physical disk usage. Normal autovacuum should make freed table space reusable. A manual `VACUUM FULL` can shrink files but locks tables and is intentionally out of scope; APE never runs `VACUUM FULL` automatically.
 

@@ -140,7 +140,7 @@ PR 8a post-merge checkpoint:
 - Confirm `storage_retention_runs` rows are written and latest status becomes
   `success` or `success_partial` with no blockers.
 - Treat `success_partial` as acceptable incremental progress only when it is
-  caused by the configured time/table budget and row totals continue moving on
+  caused by the configured time, table, or per-table row budget and row totals continue moving on
   later runs.
 - Confirm latest totals, processed/skipped tables, budget-exhausted flag, and
   DB timeout/error counters are present in `/storage/status`.
