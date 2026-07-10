@@ -20,7 +20,13 @@ from ape.config import AppConfig
 from ape.kalshi.client import KalshiRestClient
 from ape.kalshi.diagnostics import build_kalshi_config_diagnostic
 from ape.kalshi.errors import KalshiError
-from ape.kalshi.protocol_events import PROTOCOL_ERROR_EVENTS, PROTOCOL_RECOVERY_EVENTS
+from ape.kalshi.protocol_events import (
+    PROTOCOL_ERROR_EVENTS,
+    PROTOCOL_RECOVERY_EVENTS,
+)
+from ape.kalshi.protocol_events import (
+    protocol_event_counts_as_error as _protocol_event_counts_as_error,
+)
 from ape.kalshi.reference_messages import (
     BRTI_SOURCE,
     ParsedReferenceMessage,
@@ -3928,18 +3934,6 @@ def _market_reconnect_confirmation_message(message: ParsedWsMessage) -> bool:
 
 def _protocol_event_is_critical(event_type: str) -> bool:
     return event_type in CRITICAL_PROTOCOL_EVENTS or event_type.endswith("_error")
-
-
-def _protocol_event_counts_as_error(
-    event_type: str,
-    *,
-    close_code: int | None = None,
-) -> bool:
-    if event_type in PROTOCOL_ERROR_EVENTS:
-        return True
-    if event_type == "websocket_close":
-        return close_code not in {None, 1000, 1001}
-    return False
 
 
 def _coalesced_orderbook_item(
