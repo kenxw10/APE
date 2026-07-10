@@ -6,6 +6,7 @@ from sqlalchemy import desc, func, insert, select
 from sqlalchemy.orm import Session
 
 from ape.db.models import KalshiWsProtocolEvent
+from ape.kalshi.protocol_events import PROTOCOL_ERROR_EVENTS
 from ape.repositories.inputs import KalshiWsProtocolEventInput
 
 
@@ -49,15 +50,7 @@ class KalshiWsProtocolEventRepository:
             .select_from(KalshiWsProtocolEvent)
             .where(
                 KalshiWsProtocolEvent.created_at >= since,
-                KalshiWsProtocolEvent.event_type.in_(
-                    (
-                        "websocket_error",
-                        "update_subscription_error",
-                        "reconnect_failed",
-                        "db_write_slow",
-                        "queue_backpressure",
-                    )
-                ),
+                KalshiWsProtocolEvent.event_type.in_(tuple(PROTOCOL_ERROR_EVENTS)),
             )
         )
         return int(value or 0)
@@ -81,14 +74,7 @@ class KalshiWsProtocolEventRepository:
         )
         total = sum(by_event_type.values())
         error_count = sum(
-            by_event_type.get(event_type, 0)
-            for event_type in (
-                "websocket_error",
-                "update_subscription_error",
-                "reconnect_failed",
-                "db_write_slow",
-                "queue_backpressure",
-            )
+            by_event_type.get(event_type, 0) for event_type in PROTOCOL_ERROR_EVENTS
         )
         close_count = by_event_type.get("websocket_close", 0)
         reconnect_count = sum(

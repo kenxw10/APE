@@ -413,18 +413,57 @@ def test_kalshi_ws_protocol_repository_records_recent_and_summary(session) -> No
             raw_message="Already subscribed",
         )
     )
+    repository.insert_event(
+        KalshiWsProtocolEventInput(
+            event_type="subscription_error",
+            created_at=now + timedelta(seconds=2),
+            worker_service="ape-worker.market_data",
+            worker_role="market-data",
+            connection_id="conn-1",
+            raw_code="400",
+            raw_message="Subscription rejected",
+        )
+    )
+    repository.insert_event(
+        KalshiWsProtocolEventInput(
+            event_type="db_write_slow",
+            created_at=now + timedelta(seconds=3),
+            worker_service="ape-worker.market_data",
+            worker_role="market-data",
+            connection_id="conn-1",
+            latency_ms=1500,
+        )
+    )
+    repository.insert_event(
+        KalshiWsProtocolEventInput(
+            event_type="queue_backpressure",
+            created_at=now + timedelta(seconds=4),
+            worker_service="ape-worker.market_data",
+            worker_role="market-data",
+            connection_id="conn-1",
+            recovery_action="drop_or_block",
+        )
+    )
     session.commit()
 
     recent = repository.list_recent(limit=10)
     summary = repository.summary_since(since=now - timedelta(seconds=5))
+    recent_errors = repository.count_recent_errors(since=now - timedelta(seconds=5))
 
     assert [event.event_type for event in recent] == [
+        "queue_backpressure",
+        "db_write_slow",
+        "subscription_error",
         "websocket_error",
         "subscribe_sent",
     ]
-    assert summary["total"] == 2
-    assert summary["error_count"] == 1
+    assert summary["total"] == 5
+    assert summary["error_count"] == 2
+    assert recent_errors == 2
     assert summary["by_event_type"] == {
+        "db_write_slow": 1,
+        "queue_backpressure": 1,
         "subscribe_sent": 1,
+        "subscription_error": 1,
         "websocket_error": 1,
     }

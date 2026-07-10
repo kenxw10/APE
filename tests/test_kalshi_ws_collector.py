@@ -3402,6 +3402,9 @@ def test_collector_does_not_sync_insert_when_market_db_queue_is_full(tmp_path) -
         )
 
         assert persisted is False
+        assert collector._pending_orderbook_writes == {}
+        assert collector._pending_orderbook_markers == set()
+        assert collector.status.orderbook_persistence_pending_count == 0
         assert "market_critical_persistence_backpressure" in collector.status.warnings
         assert "market_critical_persistence_backpressure" in collector.status.blockers
         assert collector.status.protocol_event_recent_error_count == 0

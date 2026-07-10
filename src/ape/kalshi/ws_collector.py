@@ -20,6 +20,7 @@ from ape.config import AppConfig
 from ape.kalshi.client import KalshiRestClient
 from ape.kalshi.diagnostics import build_kalshi_config_diagnostic
 from ape.kalshi.errors import KalshiError
+from ape.kalshi.protocol_events import PROTOCOL_ERROR_EVENTS, PROTOCOL_RECOVERY_EVENTS
 from ape.kalshi.reference_messages import (
     BRTI_SOURCE,
     ParsedReferenceMessage,
@@ -62,17 +63,6 @@ MIN_HEARTBEAT_INTERVAL_SECONDS = 1.0
 MAX_DIAGNOSTIC_SAMPLES = 3
 MAX_DIAGNOSTIC_KEYS = 20
 PROTOCOL_ERROR_WINDOW_SECONDS = 1800
-PROTOCOL_ERROR_EVENTS = {
-    "websocket_error",
-    "subscription_error",
-    "list_subscriptions_error",
-    "update_subscription_error",
-    "get_snapshot_error",
-    "reconnect_failed",
-}
-PROTOCOL_RECOVERY_EVENTS = {
-    "reconnect_completed",
-}
 CRITICAL_PROTOCOL_EVENTS = PROTOCOL_ERROR_EVENTS | PROTOCOL_RECOVERY_EVENTS | {
     "websocket_open",
     "websocket_close",
@@ -2726,11 +2716,11 @@ class KalshiWsCollector:
         previous = self._pending_orderbook_writes.get(market_ticker)
         if previous is not None:
             item = _coalesced_orderbook_item(previous, item)
-        self._pending_orderbook_writes[market_ticker] = item
-        if previous is not None:
-            self.status.db_writer_coalesced_orderbook_count += 1
-            self.status.db_writer_dropped_superseded_count += 1
         if market_ticker in self._pending_orderbook_markers:
+            self._pending_orderbook_writes[market_ticker] = item
+            if previous is not None:
+                self.status.db_writer_coalesced_orderbook_count += 1
+                self.status.db_writer_dropped_superseded_count += 1
             self._refresh_db_writer_metrics(enqueued_at)
             return MARKET_DB_WRITE_COALESCED
         marker = _DbWriterItem(
@@ -2741,8 +2731,13 @@ class KalshiWsCollector:
         try:
             queue.put_nowait(marker)
         except asyncio.QueueFull:
+            self._pending_orderbook_writes.pop(market_ticker, None)
             self._mark_critical_queue_backpressure("orderbook", enqueued_at)
             return MARKET_DB_WRITE_FULL
+        self._pending_orderbook_writes[market_ticker] = item
+        if previous is not None:
+            self.status.db_writer_coalesced_orderbook_count += 1
+            self.status.db_writer_dropped_superseded_count += 1
         self._pending_orderbook_markers.add(market_ticker)
         self._db_critical_enqueued_at.append(enqueued_at)
         self._refresh_db_writer_metrics(enqueued_at)
