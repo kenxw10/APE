@@ -46,6 +46,7 @@ from ape.storage.retention import (
     RETENTION_SUCCESS,
     RETENTION_SUCCESS_PARTIAL,
     StorageRetentionWorker,
+    build_storage_status,
     run_storage_retention_once,
 )
 
@@ -236,6 +237,8 @@ def test_storage_retention_max_duration_stops_before_chunks(
 
     assert result.status == RETENTION_SUCCESS_PARTIAL
     assert result.budget_exhausted is True
+    assert result.tables_processed == []
+    assert "orderbook_snapshots" in result.tables_skipped
     assert "storage_retention_max_run_seconds_reached" in result.warnings
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(OrderbookSnapshot)) == 1
@@ -260,6 +263,81 @@ def test_storage_retention_limits_tables_per_run(retention_db) -> None:
         latest = StorageRetentionRepository(session).get_latest_run()
         assert latest is not None
         assert list(latest.table_row_counts_before.keys()) == ["orderbook_snapshots"]
+    status = build_storage_status(config, now=now)
+    assert status.latest_tables_processed == ["orderbook_snapshots"]
+    assert "public_trades" in status.latest_tables_skipped
+
+
+def test_storage_retention_rotates_capped_tables_between_runs(retention_db) -> None:
+    database_url, session_factory = retention_db
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    config = _retention_config(database_url, max_tables_per_run=2)
+
+    first = run_storage_retention_once(config, session_factory, now=lambda: now)
+    second = run_storage_retention_once(
+        config,
+        session_factory,
+        now=lambda: now + timedelta(seconds=1),
+    )
+    third = run_storage_retention_once(
+        config,
+        session_factory,
+        now=lambda: now + timedelta(seconds=2),
+    )
+    fourth = run_storage_retention_once(
+        config,
+        session_factory,
+        now=lambda: now + timedelta(seconds=3),
+    )
+    fifth = run_storage_retention_once(
+        config,
+        session_factory,
+        now=lambda: now + timedelta(seconds=4),
+    )
+
+    assert first.tables_processed == ["orderbook_snapshots", "public_trades"]
+    assert second.tables_processed == ["reference_ticks", "worker_heartbeats"]
+    assert third.tables_processed == ["strategy_decisions", "kalshi_ws_protocol_events"]
+    assert fourth.tables_processed == [
+        "strategy_dry_run_positions",
+        "strategy_dry_run_events",
+    ]
+    assert fifth.tables_processed == ["markets", "orderbook_snapshots"]
+    assert "orderbook_snapshots" in second.tables_skipped
+    assert "strategy_decisions" in second.tables_skipped
+
+
+def test_storage_retention_reports_only_tables_reached_before_time_budget(
+    retention_db,
+    monkeypatch,
+) -> None:
+    database_url, session_factory = retention_db
+    now = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+    config = _retention_config(database_url, max_run_seconds=1)
+    monotonic_values = iter([0.0, 0.0, 0.0, 2.0, 2.0, 2.0])
+    monkeypatch.setattr(retention_module, "monotonic", lambda: next(monotonic_values))
+
+    with session_factory() as session:
+        OrderbookRepository(session).insert_snapshot(
+            OrderbookSnapshotInput(
+                market_ticker="KXBTC15M-OLD",
+                received_at=now - timedelta(seconds=120),
+            )
+        )
+        session.commit()
+
+    result = run_storage_retention_once(config, session_factory, now=lambda: now)
+
+    assert result.status == RETENTION_SUCCESS_PARTIAL
+    assert result.tables_processed == ["orderbook_snapshots"]
+    assert "public_trades" in result.tables_skipped
+    with session_factory() as session:
+        latest = StorageRetentionRepository(session).get_latest_run()
+        assert latest is not None
+        assert list(latest.table_row_counts_before.keys()) == ["orderbook_snapshots"]
+    status = build_storage_status(config, now=now)
+    assert status.latest_tables_processed == ["orderbook_snapshots"]
+    assert "public_trades" in status.latest_tables_skipped
 
 
 def test_storage_retention_caps_delete_rows_per_table(retention_db) -> None:

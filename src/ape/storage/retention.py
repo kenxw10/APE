@@ -430,12 +430,8 @@ def run_storage_retention_once(
     warnings: list[str] = []
     blockers: list[str] = []
     started_monotonic = monotonic()
-    selected_policies, skipped_policies = _selected_retention_policies(
-        config=config,
-        warnings=warnings,
-    )
-    selected_table_names = tuple(policy.table_name for policy in selected_policies)
-    skipped_table_names = [policy.table_name for policy in skipped_policies]
+    selected_policies: tuple[RetentionPolicy, ...] = ()
+    processed_table_names: list[str] = []
 
     try:
         with session_factory() as session:
@@ -447,6 +443,12 @@ def run_storage_retention_once(
             )
             if timed_out:
                 warnings.append("stale_running_retention_runs_marked_timed_out")
+            previous_run = repository.get_latest_run()
+            selected_policies, _ = _selected_retention_policies(
+                config=config,
+                warnings=warnings,
+                previous_run=previous_run,
+            )
             repository.start_run(
                 StorageRetentionRunInput(
                     run_id=run_id,
@@ -462,8 +464,14 @@ def run_storage_retention_once(
             session.commit()
 
             try:
-                table_row_counts_before = repository.row_counts(selected_table_names)
-                table_sizes_before = repository.table_sizes(selected_table_names)
+                def record_policy_started(policy: RetentionPolicy) -> None:
+                    table_name = policy.table_name
+                    if table_name in processed_table_names:
+                        return
+                    table_row_counts_before.update(repository.row_counts((table_name,)))
+                    table_sizes_before.update(repository.table_sizes((table_name,)))
+                    processed_table_names.append(table_name)
+
                 _apply_row_retention(
                     config=config,
                     repository=repository,
@@ -472,6 +480,7 @@ def run_storage_retention_once(
                     started_at=started_at,
                     started_monotonic=started_monotonic,
                     warnings=warnings,
+                    on_policy_started=record_policy_started,
                 )
                 _apply_raw_payload_retention(
                     config=config,
@@ -481,9 +490,11 @@ def run_storage_retention_once(
                     started_at=started_at,
                     started_monotonic=started_monotonic,
                     warnings=warnings,
+                    on_policy_started=record_policy_started,
                 )
-                table_row_counts_after = repository.row_counts(selected_table_names)
-                table_sizes_after = repository.table_sizes(selected_table_names)
+                processed_table_names_tuple = tuple(processed_table_names)
+                table_row_counts_after = repository.row_counts(processed_table_names_tuple)
+                table_sizes_after = repository.table_sizes(processed_table_names_tuple)
                 finished_at = _as_utc(clock())
                 budget_exhausted = _retention_budget_exhausted(warnings)
                 result = StorageRetentionResult(
@@ -492,7 +503,7 @@ def run_storage_retention_once(
                     finished_at=finished_at,
                     status=(
                         RETENTION_SUCCESS_PARTIAL
-                        if budget_exhausted or skipped_table_names
+                        if budget_exhausted
                         else RETENTION_SUCCESS
                     ),
                     dry_run=config.storage_retention_dry_run,
@@ -506,8 +517,8 @@ def run_storage_retention_once(
                     warnings=_unique_strings(warnings),
                     blockers=blockers,
                     budget_exhausted=budget_exhausted,
-                    tables_processed=list(selected_table_names),
-                    tables_skipped=skipped_table_names,
+                    tables_processed=list(processed_table_names),
+                    tables_skipped=_retention_tables_skipped(processed_table_names),
                 )
             except Exception as exc:
                 session.rollback()
@@ -530,8 +541,8 @@ def run_storage_retention_once(
                     error_type=exc.__class__.__name__,
                     error_message=_safe_error_message(exc),
                     budget_exhausted=_retention_budget_exhausted(warnings),
-                    tables_processed=list(selected_table_names),
-                    tables_skipped=skipped_table_names,
+                    tables_processed=list(processed_table_names),
+                    tables_skipped=_retention_tables_skipped(processed_table_names),
                 )
 
             repository.finish_run(run_id, _result_to_input(result))
@@ -558,8 +569,8 @@ def run_storage_retention_once(
             error_type=exc.__class__.__name__,
             error_message=_safe_error_message(exc),
             budget_exhausted=_retention_budget_exhausted(warnings),
-            tables_processed=list(selected_table_names),
-            tables_skipped=skipped_table_names,
+            tables_processed=list(processed_table_names),
+            tables_skipped=_retention_tables_skipped(processed_table_names),
         )
 
 
@@ -670,10 +681,12 @@ def _apply_row_retention(
     started_at: datetime,
     started_monotonic: float,
     warnings: list[str],
+    on_policy_started: Callable[[RetentionPolicy], None],
 ) -> None:
     for table_index, policy in enumerate(policies):
         if _max_run_seconds_reached(config, started_monotonic, warnings):
             return
+        on_policy_started(policy)
         cutoff = started_at - timedelta(seconds=_policy_retention_seconds(config, policy))
         if config.storage_retention_dry_run:
             deleted_rows[policy.table_name] = repository.count_matching(
@@ -713,6 +726,7 @@ def _apply_raw_payload_retention(
     started_at: datetime,
     started_monotonic: float,
     warnings: list[str],
+    on_policy_started: Callable[[RetentionPolicy], None],
 ) -> None:
     for table_index, policy in enumerate(policies):
         if (
@@ -723,6 +737,7 @@ def _apply_raw_payload_retention(
             continue
         if _max_run_seconds_reached(config, started_monotonic, warnings):
             return
+        on_policy_started(policy)
         cutoff = started_at - timedelta(
             seconds=_policy_raw_payload_retention_seconds(config, policy) or 0
         )
@@ -1025,7 +1040,11 @@ def _latest_tables_processed(latest_run: StorageRetentionRun | None) -> list[str
 
 
 def _latest_tables_skipped(latest_tables_processed: list[str]) -> list[str]:
-    processed = set(latest_tables_processed)
+    return _retention_tables_skipped(latest_tables_processed)
+
+
+def _retention_tables_skipped(processed_table_names: list[str]) -> list[str]:
+    processed = set(processed_table_names)
     return [table_name for table_name in RETENTION_TABLE_NAMES if table_name not in processed]
 
 
@@ -1127,6 +1146,7 @@ def _selected_retention_policies(
     *,
     config: AppConfig,
     warnings: list[str],
+    previous_run: StorageRetentionRun | None,
 ) -> tuple[tuple[RetentionPolicy, ...], tuple[RetentionPolicy, ...]]:
     max_tables = config.storage_retention_max_tables_per_run
     if max_tables is None or max_tables >= len(RETENTION_POLICIES):
@@ -1134,7 +1154,24 @@ def _selected_retention_policies(
 
     if "storage_retention_max_tables_per_run_reached" not in warnings:
         warnings.append("storage_retention_max_tables_per_run_reached")
-    return RETENTION_POLICIES[:max_tables], RETENTION_POLICIES[max_tables:]
+    start_index = _next_retention_policy_index(previous_run)
+    ordered_policies = (
+        RETENTION_POLICIES[start_index:] + RETENTION_POLICIES[:start_index]
+    )
+    return ordered_policies[:max_tables], ordered_policies[max_tables:]
+
+
+def _next_retention_policy_index(previous_run: StorageRetentionRun | None) -> int:
+    if previous_run is None or previous_run.status not in RETENTION_SUCCESS_STATES:
+        return 0
+    processed_table_names = _latest_tables_processed(previous_run)
+    if not processed_table_names:
+        return 0
+    try:
+        last_index = RETENTION_TABLE_NAMES.index(processed_table_names[-1])
+    except ValueError:
+        return 0
+    return (last_index + 1) % len(RETENTION_POLICIES)
 
 
 def _retention_batch_size(config: AppConfig, rows_processed_for_table: int) -> int:
