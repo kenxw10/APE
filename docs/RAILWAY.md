@@ -51,6 +51,8 @@ After PR 9i merges, enable the fast challenger only by adding `STRATEGY_CHALLENG
 
 After PR 10 merges, enable momentum v2 only by adding `STRATEGY_V2_ENABLED=true` to `ape-strategy-worker`. Keep `APP_MODE=DRY_RUN`, `TRADING_ENABLED=false`, and `EXECUTE=false`. The worker writes feature/config attribution and causal hypothetical intent/fill evidence only; there are no order, cancel, paper, live, private-channel, account, or balance paths. Validate `/strategy/features/latest`, `/strategy/features/recent`, `/strategy/dry-run/intents/recent`, `/strategy/dry-run/position-marks/recent`, and `/strategy/variants/comparison` before relying on the research records.
 
+After PR 10a, also validate `/strategy/dry-run/outcomes/recent` and the `action=ENTRY` / `action=EXIT` filters on `/strategy/dry-run/intents/recent`. These are read-only records for DRY_RUN V2 entry and exit simulations. No Railway service, environment variable, credential, live order, private channel, or execution setting is added.
+
 After PR 9f merges, production workers are split by role. The role is selected
 with `--role` or `APE_WORKER_ROLE`; the CLI flag wins when both are set. A
 role-specific worker only starts loops for that role, even if unrelated env

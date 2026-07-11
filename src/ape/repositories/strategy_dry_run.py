@@ -102,6 +102,16 @@ class StrategyDryRunRepository:
         self.session.flush()
         return row
 
+    def link_exit_intent(
+        self, *, position_id: str, exit_intent_id: str
+    ) -> StrategyDryRunPosition | None:
+        row = self.get_position_by_id(position_id)
+        if row is None:
+            return None
+        row.exit_intent_id = exit_intent_id
+        self.session.flush()
+        return row
+
     def close_position(
         self,
         *,

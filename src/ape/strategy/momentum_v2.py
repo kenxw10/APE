@@ -19,8 +19,9 @@ from ape.repositories.inputs import (
 from ape.strategy.context import StrategyEvaluationContext
 
 V2_STRATEGY_ID = "btc15_momentum_v2"
-V2_ARCHITECTURE_VERSION = "momentum_v2_heuristic_v1"
-V2_FEATURE_SCHEMA_VERSION = "momentum_v2_features_v1"
+V2_ARCHITECTURE_VERSION = "momentum_v2_heuristic_v2"
+V2_FEATURE_SCHEMA_VERSION = "momentum_v2_features_v2"
+V2_LIFECYCLE_SCHEMA_VERSION = "momentum_v2_lifecycle_v1"
 V2_EDGE_MODEL_VERSION = "heuristic_edge_v1"
 
 STATE_V2_FEATURES_NOT_READY = "V2_FEATURES_NOT_READY"
@@ -89,15 +90,33 @@ def built_in_config_version(
     payload = _json_safe(parameters)
     parameter_hash = _hash(payload)
     code_version = resolve_code_version()
-    version_hash = _hash({"parameters": parameter_hash, "code": code_version})
+    architecture_version = (
+        V2_ARCHITECTURE_VERSION
+        if strategy_id == V2_STRATEGY_ID
+        else "momentum_v1_legacy"
+    )
+    feature_schema_version = (
+        V2_FEATURE_SCHEMA_VERSION
+        if strategy_id == V2_STRATEGY_ID
+        else "momentum_v1_legacy"
+    )
+    version_hash = _hash(
+        {
+            "parameters": parameter_hash,
+            "code": code_version,
+            "architecture": architecture_version,
+            "feature_schema": feature_schema_version,
+            "lifecycle": (
+                V2_LIFECYCLE_SCHEMA_VERSION if strategy_id == V2_STRATEGY_ID else None
+            ),
+        }
+    )
     version_id = f"config-{strategy_id}-{version_hash[:20]}"
     return StrategyConfigVersionInput(
         strategy_config_version_id=version_id,
         strategy_id=strategy_id,
-        architecture_version=(
-            V2_ARCHITECTURE_VERSION if strategy_id == V2_STRATEGY_ID else "momentum_v1_legacy"
-        ),
-        feature_schema_version=V2_FEATURE_SCHEMA_VERSION,
+        architecture_version=architecture_version,
+        feature_schema_version=feature_schema_version,
         parameter_snapshot=payload,
         parameter_hash=parameter_hash,
         code_commit_sha=code_version,
@@ -126,7 +145,13 @@ def evaluate_momentum_v2(
     hard_gates: list[str] = []
     warnings: list[str] = []
 
-    if not quality["reference_ready"] or not quality["book_ready"] or not quality["market_ready"]:
+    if (
+        not quality["reference_ready"]
+        or not quality["book_ready"]
+        or not quality["market_ready"]
+        or not quality.get("canonical_market_ready", True)
+        or not quality.get("canonical_reference_ready", True)
+    ):
         hard_gates.append("v2_prerequisite_data_missing_or_stale")
     if context.seconds_since_open is None or context.seconds_since_open < 120:
         hard_gates.append("v2_first_120_seconds")
@@ -138,7 +163,7 @@ def evaluate_momentum_v2(
         hard_gates.append("v2_timing_tier_unavailable")
     if features["distance_bps"] is None or features["distance_bps"] < Decimal("1.5"):
         hard_gates.append("v2_boundary_distance_below_1_5_bps")
-    if not features["fast_impulse_active"]:
+    if mode == "CONTINUATION" and not features["fast_impulse_active"]:
         hard_gates.append("v2_fast_impulse_not_active")
     if (
         features["reversal_beyond_origin"]
@@ -218,7 +243,7 @@ def evaluate_momentum_v2(
             snapshot,
             measurements,
         )
-    if mode != "CONTINUATION":
+    if mode not in {"BOUNDARY_CROSS_HOLD", "CONTINUATION"}:
         return V2Evaluation(
             STATE_V2_HARD_GATE_BLOCKED,
             "v2_candidate_mode_not_enabled",
@@ -359,9 +384,19 @@ def _features(context: StrategyEvaluationContext, *, config: AppConfig) -> dict[
         (returns["return_15s"] or Decimal("-999")) >= Decimal("1.25")
         or (returns["return_30s"] or Decimal("-999")) >= Decimal("2")
     ) and (returns["return_5s"] or Decimal("-999")) > Decimal("-0.5")
+    last_cross_at, cross_hold_seconds = _boundary_cross_hold(context, side)
+    candidate_mode = (
+        "BOUNDARY_CROSS_HOLD"
+        if last_cross_at is not None and cross_hold_seconds is not None and cross_hold_seconds >= 5
+        else "CONTINUATION"
+        if fast_active
+        else "UNSTABLE"
+    )
     return {
         "candidate_side": side,
-        "candidate_mode": "CONTINUATION" if fast_active else "UNSTABLE",
+        "candidate_mode": candidate_mode,
+        "last_boundary_cross_at": last_cross_at,
+        "boundary_cross_hold_seconds": cross_hold_seconds,
         "current_brti": latest,
         **returns,
         "velocity_bps": returns["return_5s"],
@@ -374,6 +409,8 @@ def _features(context: StrategyEvaluationContext, *, config: AppConfig) -> dict[
         "longest_counter_run": _longest_counter_run(values),
         "impulse_hold_seconds": _impulse_hold(values),
         "retrace_fraction": retrace,
+        "impulse_retention_fraction": Decimal("1") - retrace,
+        "reversal_overshoot_bps": max(Decimal("0"), -current),
         "reversal_beyond_origin": reversal,
         "boundary_crosses_30s": _boundary_crosses(context, 30),
         "boundary_crosses_60s": _boundary_crosses(context, 60),
@@ -395,8 +432,24 @@ def _features(context: StrategyEvaluationContext, *, config: AppConfig) -> dict[
         "desired_bid_depth": bid_depth,
         "desired_ask_depth": ask_depth,
         **contract_moves,
+        "contract_response_velocity_5s": _velocity(contract_moves["contract_move_5s_cents"], 5),
+        "contract_response_velocity_15s": _velocity(contract_moves["contract_move_15s_cents"], 15),
+        "contract_response_velocity_30s": _velocity(contract_moves["contract_move_30s_cents"], 30),
+        "fast_medium_response_acceleration": _velocity(contract_moves["contract_move_5s_cents"], 5)
+        - _velocity(contract_moves["contract_move_15s_cents"], 15),
+        "medium_slow_response_acceleration": _velocity(
+            contract_moves["contract_move_15s_cents"], 15
+        )
+        - _velocity(contract_moves["contract_move_30s_cents"], 30),
+        "contract_brti_response_ratio_15s": _response_ratio(
+            contract_moves["contract_move_15s_cents"], returns["return_15s"]
+        ),
+        "contract_brti_response_ratio_30s": _response_ratio(
+            contract_moves["contract_move_30s_cents"], returns["return_30s"]
+        ),
         "expected_contract_move_cents": expected_move,
         "response_residual_cents": residual,
+        "full_repricing_state": observed_move >= expected_move,
         **micro,
         "trade_ratio": trade_ratio,
         "trade_count": trade_count,
@@ -427,6 +480,8 @@ def _features(context: StrategyEvaluationContext, *, config: AppConfig) -> dict[
                 context.evaluated_at,
                 config.strategy_kalshi_book_max_age_ms,
             ),
+            "canonical_market_ready": _canonical_market_ready(context),
+            "canonical_reference_ready": _canonical_reference_ready(context),
         },
     }
 
@@ -492,7 +547,17 @@ def _feature_snapshot(
             {
                 key: value
                 for key, value in features.items()
-                if "imbalance" in key or key in {"trade_ratio", "trade_count"}
+                if "imbalance" in key
+                or key
+                in {
+                    "trade_ratio",
+                    "trade_count",
+                    "order_flow_5s",
+                    "order_flow_15s",
+                    "desired_bid_replenishment",
+                    "opposing_ask_depletion",
+                    "depth_withdrawal_pressure",
+                }
             }
         ),
         execution_features=execution,
@@ -573,24 +638,11 @@ def _oriented_return(
 def _desired_book(
     book: OrderbookSnapshot | None, side: str | None
 ) -> tuple[Decimal | None, Decimal | None, Decimal | None, Decimal | None, Decimal | None]:
-    if book is None or side not in {"YES", "NO"}:
+    bid_ladder, ask_ladder = _executable_ladders(book, side)
+    if not bid_ladder or not ask_ladder:
         return None, None, None, None, None
-    if side == "YES":
-        bid, ask, bid_depth, ask_depth = (
-            book.yes_bid,
-            book.yes_ask,
-            book.yes_bid_count,
-            book.yes_ask_count,
-        )
-    else:
-        bid, ask, bid_depth, ask_depth = (
-            book.no_bid,
-            book.no_ask,
-            book.no_bid_count,
-            book.no_ask_count,
-        )
-    bid_value = Decimal(bid) if bid is not None else None
-    ask_value = Decimal(ask) if ask is not None else None
+    bid_value, bid_depth = bid_ladder[0]
+    ask_value, ask_depth = ask_ladder[0]
     return (
         bid_value,
         ask_value,
@@ -669,33 +721,280 @@ def _boundary_crosses(context: StrategyEvaluationContext, window: int) -> int:
 
 
 def _microstructure(context: StrategyEvaluationContext, side: str | None) -> dict[str, Decimal]:
-    rows = context.orderbook_history[-5:]
-    imbalances: list[Decimal] = []
-    for row in rows:
-        bid, ask, _, bid_depth, ask_depth = _desired_book(row, side)
-        del bid, ask
-        if bid_depth is not None and ask_depth is not None and bid_depth + ask_depth > 0:
-            imbalances.append((bid_depth - ask_depth) / (bid_depth + ask_depth))
-    top5 = sum(imbalances, Decimal("0")) / Decimal(len(imbalances)) if imbalances else Decimal("0")
-    support = (
-        Decimal(sum(value > 0 for value in imbalances)) / Decimal(len(imbalances))
-        if imbalances
-        else Decimal("0")
-    )
-    flow = Decimal("0")
-    if len(rows) >= 2:
-        _, _, _, first_bid, first_ask = _desired_book(rows[0], side)
-        _, _, _, last_bid, last_ask = _desired_book(rows[-1], side)
-        if None not in (first_bid, first_ask, last_bid, last_ask):
-            delta = (last_bid - first_bid) - (last_ask - first_ask)
-            denominator = abs(last_bid - first_bid) + abs(last_ask - first_ask)
-            flow = Decimal("0") if denominator == 0 else delta / denominator
-    return {
-        "top5_imbalance": top5,
-        "top5_imbalance_support_fraction": support,
-        "order_flow_5s": flow,
-        "order_flow_15s": flow,
+    rows = tuple(context.orderbook_history)
+    current_bid, current_ask = _executable_ladders(context.orderbook, side)
+    if not current_bid or not current_ask:
+        return _empty_microstructure()
+    depths = {
+        f"bid_depth_{level}": _cumulative_depth(current_bid, level) for level in (1, 3, 5)
+    } | {f"ask_depth_{level}": _cumulative_depth(current_ask, level) for level in (1, 3, 5)}
+    imbalances = {
+        f"imbalance_{level}": _imbalance(depths[f"bid_depth_{level}"], depths[f"ask_depth_{level}"])
+        for level in (1, 3, 5)
     }
+    five_rows = _rows_since(rows, context.evaluated_at, 5)
+    fifteen_rows = _rows_since(rows, context.evaluated_at, 15)
+    history = [
+        _imbalance(_cumulative_depth(bid, 5), _cumulative_depth(ask, 5))
+        for row in fifteen_rows
+        if (ladders := _executable_ladders(row, side))
+        and (bid := ladders[0])
+        and (ask := ladders[1])
+    ]
+    replenishment, depletion, withdrawal = _depth_pressures(fifteen_rows, side)
+    return {
+        **depths,
+        **imbalances,
+        "top5_imbalance": imbalances["imbalance_5"],
+        "top5_imbalance_support_fraction": _positive_fraction(history),
+        "order_flow_5s": _order_flow_imbalance(five_rows, side),
+        "order_flow_15s": _order_flow_imbalance(fifteen_rows, side),
+        "desired_bid_replenishment": replenishment,
+        "opposing_ask_depletion": depletion,
+        "depth_withdrawal_pressure": withdrawal,
+        "imbalance_support_persistence": _positive_fraction(history),
+        "adverse_pressure_persistence": _positive_fraction([-value for value in history]),
+        "replenishment_persistence": _positive_fraction(
+            _pressure_series(fifteen_rows, side, "replenishment")
+        ),
+        "depletion_persistence": _positive_fraction(
+            _pressure_series(fifteen_rows, side, "depletion")
+        ),
+        "depth_withdrawal_persistence": _positive_fraction(
+            _pressure_series(fifteen_rows, side, "withdrawal")
+        ),
+        "adverse_contract_divergence_persistence_5s": _adverse_divergence_persistence(
+            five_rows, side
+        ),
+        "persistent_adverse_microstructure": imbalances["imbalance_5"] <= Decimal("-0.60"),
+    }
+
+
+def _executable_ladders(
+    book: OrderbookSnapshot | None, side: str | None
+) -> tuple[list[tuple[Decimal, Decimal]], list[tuple[Decimal, Decimal]]]:
+    if (
+        book is None
+        or side not in {"YES", "NO"}
+        or book.ladder_schema_version != "kalshi_executable_ladders_v2"
+    ):
+        return [], []
+    bid_raw = book.yes_bid_ladder if side == "YES" else book.no_bid_ladder
+    ask_raw = book.yes_ask_ladder if side == "YES" else book.no_ask_ladder
+    return _parse_ladder(bid_raw), _parse_ladder(ask_raw)
+
+
+def _parse_ladder(value: Any) -> list[tuple[Decimal, Decimal]]:
+    if not isinstance(value, list):
+        return []
+    levels: list[tuple[Decimal, Decimal]] = []
+    for level in value[:5]:
+        if not isinstance(level, dict):
+            return []
+        try:
+            price = Decimal(str(level["price"]))
+            count = Decimal(str(level["count"]))
+        except (KeyError, ArithmeticError, ValueError):
+            return []
+        if price < 0 or price > 1 or count <= 0:
+            return []
+        levels.append((price, count))
+    return levels
+
+
+def _cumulative_depth(levels: list[tuple[Decimal, Decimal]], count: int) -> Decimal:
+    return sum((size for _, size in levels[:count]), Decimal("0"))
+
+
+def _imbalance(bid_depth: Decimal, ask_depth: Decimal) -> Decimal:
+    total = bid_depth + ask_depth
+    return Decimal("0") if total <= 0 else (bid_depth - ask_depth) / total
+
+
+def _rows_since(
+    rows: tuple[OrderbookSnapshot, ...], evaluated_at: datetime, seconds: int
+) -> tuple[OrderbookSnapshot, ...]:
+    cutoff = _utc(evaluated_at) - timedelta(seconds=seconds)
+    return tuple(row for row in rows if _utc(row.received_at) >= cutoff)
+
+
+def _order_flow_imbalance(rows: tuple[OrderbookSnapshot, ...], side: str | None) -> Decimal:
+    signed = Decimal("0")
+    magnitude = Decimal("0")
+    for prior, current in zip(rows, rows[1:], strict=False):
+        prior_bid, prior_ask = _executable_ladders(prior, side)
+        current_bid, current_ask = _executable_ladders(current, side)
+        if not prior_bid or not prior_ask or not current_bid or not current_ask:
+            continue
+        prior_bid_price, current_bid_price = prior_bid[0][0], current_bid[0][0]
+        prior_ask_price, current_ask_price = prior_ask[0][0], current_ask[0][0]
+        prior_bid_depth = _cumulative_depth(prior_bid, 5)
+        current_bid_depth = _cumulative_depth(current_bid, 5)
+        prior_ask_depth = _cumulative_depth(prior_ask, 5)
+        current_ask_depth = _cumulative_depth(current_ask, 5)
+        bid_pressure = (
+            current_bid_depth
+            if current_bid_price > prior_bid_price
+            else -prior_bid_depth
+            if current_bid_price < prior_bid_price
+            else current_bid_depth - prior_bid_depth
+        )
+        ask_pressure = (
+            current_ask_depth
+            if current_ask_price > prior_ask_price
+            else -prior_ask_depth
+            if current_ask_price < prior_ask_price
+            else prior_ask_depth - current_ask_depth
+        )
+        signed += bid_pressure + ask_pressure
+        magnitude += abs(bid_pressure) + abs(ask_pressure)
+    return max(Decimal("-1"), min(Decimal("1"), signed / magnitude)) if magnitude else Decimal("0")
+
+
+def _depth_pressures(
+    rows: tuple[OrderbookSnapshot, ...], side: str | None
+) -> tuple[Decimal, Decimal, Decimal]:
+    series = _pressure_series(rows, side, "all")
+    if not series:
+        return Decimal("0"), Decimal("0"), Decimal("0")
+    replenishment = sum((item[0] for item in series), Decimal("0"))
+    depletion = sum((item[1] for item in series), Decimal("0"))
+    withdrawal = sum((item[2] for item in series), Decimal("0"))
+    scale = max(
+        Decimal("1"),
+        sum((abs(value) for triplet in series for value in triplet), Decimal("0")),
+    )
+    return replenishment / scale, depletion / scale, withdrawal / scale
+
+
+def _pressure_series(rows: tuple[OrderbookSnapshot, ...], side: str | None, kind: str) -> list[Any]:
+    values: list[tuple[Decimal, Decimal, Decimal]] = []
+    for prior, current in zip(rows, rows[1:], strict=False):
+        prior_bid, prior_ask = _executable_ladders(prior, side)
+        current_bid, current_ask = _executable_ladders(current, side)
+        if not prior_bid or not prior_ask or not current_bid or not current_ask:
+            continue
+        bid_delta = _cumulative_depth(current_bid, 5) - _cumulative_depth(prior_bid, 5)
+        ask_delta = _cumulative_depth(current_ask, 5) - _cumulative_depth(prior_ask, 5)
+        values.append(
+            (
+                max(bid_delta, Decimal("0")),
+                max(-ask_delta, Decimal("0")),
+                max(-bid_delta, Decimal("0")),
+            )
+        )
+    if kind == "all":
+        return values
+    index = {"replenishment": 0, "depletion": 1, "withdrawal": 2}[kind]
+    return [triplet[index] for triplet in values]
+
+
+def _positive_fraction(values: list[Decimal]) -> Decimal:
+    if not values:
+        return Decimal("0")
+    return Decimal(sum(value > 0 for value in values)) / Decimal(len(values))
+
+
+def _adverse_divergence_persistence(
+    rows: tuple[OrderbookSnapshot, ...], side: str | None
+) -> Decimal:
+    return _positive_fraction([-_order_flow_imbalance(rows, side)])
+
+
+def _empty_microstructure() -> dict[str, Decimal]:
+    return {
+        **{f"bid_depth_{level}": Decimal("0") for level in (1, 3, 5)},
+        **{f"ask_depth_{level}": Decimal("0") for level in (1, 3, 5)},
+        **{f"imbalance_{level}": Decimal("0") for level in (1, 3, 5)},
+        "top5_imbalance": Decimal("0"),
+        "top5_imbalance_support_fraction": Decimal("0"),
+        "order_flow_5s": Decimal("0"),
+        "order_flow_15s": Decimal("0"),
+        "desired_bid_replenishment": Decimal("0"),
+        "opposing_ask_depletion": Decimal("0"),
+        "depth_withdrawal_pressure": Decimal("0"),
+        "imbalance_support_persistence": Decimal("0"),
+        "adverse_pressure_persistence": Decimal("0"),
+        "replenishment_persistence": Decimal("0"),
+        "depletion_persistence": Decimal("0"),
+        "depth_withdrawal_persistence": Decimal("0"),
+        "adverse_contract_divergence_persistence_5s": Decimal("0"),
+        "persistent_adverse_microstructure": Decimal("0"),
+    }
+
+
+def _boundary_cross_hold(
+    context: StrategyEvaluationContext, side: str | None
+) -> tuple[datetime | None, int | None]:
+    if context.boundary is None or side not in {"YES", "NO"}:
+        return None, None
+    rows = [
+        row
+        for row in context.reference_ticks
+        if row.parsed_value is not None
+        and _utc(row.received_at) >= _utc(context.evaluated_at) - timedelta(seconds=30)
+    ]
+    cross_at: datetime | None = None
+    for previous, current in zip(rows, rows[1:], strict=False):
+        previous_side = "YES" if Decimal(previous.parsed_value) > context.boundary else "NO"
+        current_side = "YES" if Decimal(current.parsed_value) > context.boundary else "NO"
+        if previous_side != current_side and current_side == side:
+            cross_at = _utc(current.received_at)
+    if cross_at is None:
+        return None, None
+    after_cross = [
+        row for row in rows if _utc(row.received_at) >= cross_at and row.parsed_value is not None
+    ]
+    if not after_cross or any(
+        ("YES" if Decimal(row.parsed_value) > context.boundary else "NO") != side
+        for row in after_cross
+    ):
+        return None, None
+    return cross_at, max(0, int((_utc(context.evaluated_at) - cross_at).total_seconds()))
+
+
+def _velocity(value: Decimal | None, seconds: int) -> Decimal:
+    return Decimal("0") if value is None else value / Decimal(seconds)
+
+
+def _response_ratio(contract_cents: Decimal | None, brti_bps: Decimal | None) -> Decimal:
+    if contract_cents is None or brti_bps is None or brti_bps == 0:
+        return Decimal("0")
+    return contract_cents / brti_bps
+
+
+def _canonical_market_ready(context: StrategyEvaluationContext) -> bool:
+    liveness = getattr(context, "market_liveness", None)
+    if liveness is None:
+        return True
+    if liveness.market_feed_transport_state not in {"healthy", "unknown"}:
+        return False
+    if liveness.market_feed_subscription_state not in {"subscribed", "unknown"}:
+        return False
+    if liveness.market_feed_snapshot_state in {"missing", "resync_pending", "stale_cap_exceeded"}:
+        return False
+    if liveness.market_feed_active_ticker_state == "mismatch":
+        return False
+    if liveness.market_feed_sequence_state in {"gap", "reset"}:
+        return False
+    return not liveness.market_recovery_attempt_in_progress
+
+
+def _canonical_reference_ready(context: StrategyEvaluationContext) -> bool:
+    liveness = getattr(context, "reference_liveness", None)
+    if liveness is None:
+        return True
+    metadata = liveness.metadata or {}
+    blockers = metadata.get("blockers") if isinstance(metadata.get("blockers"), list) else []
+    warnings = metadata.get("warnings") if isinstance(metadata.get("warnings"), list) else []
+    unsafe = {
+        "brti_reference_transport_stale",
+        "brti_reference_persistence_stale",
+        "brti_reference_worker_heartbeat_stale",
+        "brti_reference_first_tick_timeout",
+        "brti_reference_no_valid_tick_timeout",
+    }
+    return not any(str(value) in unsafe for value in [*blockers, *warnings])
 
 
 def _trade_flow(context: StrategyEvaluationContext, side: str | None) -> tuple[Decimal, int]:
@@ -818,6 +1117,8 @@ def _hash(value: Any) -> str:
 def _json_safe(value: Any) -> Any:
     if isinstance(value, Decimal):
         return str(value)
+    if isinstance(value, datetime):
+        return _utc(value).isoformat()
     if isinstance(value, dict):
         return {str(key): _json_safe(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):

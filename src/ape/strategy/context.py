@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -13,6 +14,7 @@ from ape.repositories.markets import MarketsRepository
 from ape.repositories.orderbook import OrderbookRepository
 from ape.repositories.public_trades import PublicTradesRepository
 from ape.repositories.reference_ticks import ReferenceTicksRepository
+from ape.worker.feed_liveness import load_market_feed_liveness, load_reference_feed_liveness
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,10 @@ class StrategyEvaluationContext:
     reference_ticks: tuple[ReferenceTick, ...]
     orderbook_history: tuple[OrderbookSnapshot, ...]
     recent_trades: tuple[PublicTrade, ...]
+    market_liveness: Any | None = None
+    reference_liveness: Any | None = None
+    active_ticker_state: str | None = None
+    feed_quality_state: dict[str, Any] | None = None
 
     @property
     def brti_value(self) -> Decimal | None:
@@ -58,7 +64,13 @@ class StrategyEvaluationContext:
 
 
 def load_strategy_evaluation_context(
-    *, config: AppConfig, session: Session, evaluated_at: datetime
+    *,
+    config: AppConfig,
+    session: Session,
+    evaluated_at: datetime,
+    reference_lookback_seconds: int = 130,
+    trade_lookback_seconds: int = 30,
+    orderbook_lookback_seconds: int = 95,
 ) -> StrategyEvaluationContext:
     market = MarketsRepository(session).get_active_market(
         now=evaluated_at,
@@ -67,7 +79,10 @@ def load_strategy_evaluation_context(
     reference_repository = ReferenceTicksRepository(session)
     orderbook_repository = OrderbookRepository(session)
     trades_repository = PublicTradesRepository(session)
-    reference_tick = reference_repository.get_latest_valid_tick(BRTI_SOURCE)
+    reference_liveness = load_reference_feed_liveness(
+        session, config, checked_at=evaluated_at
+    )
+    reference_tick = reference_liveness.latest_valid_tick
     boundary, boundary_source = _market_boundary(market)
     if market is None:
         return StrategyEvaluationContext(
@@ -81,27 +96,38 @@ def load_strategy_evaluation_context(
             reference_ticks=(),
             orderbook_history=(),
             recent_trades=(),
+            reference_liveness=reference_liveness,
+            feed_quality_state={"market": "missing", "reference": reference_liveness.source},
         )
+
+    market_liveness = load_market_feed_liveness(
+        session,
+        config,
+        checked_at=evaluated_at,
+        active_market_ticker=market.market_ticker,
+    )
 
     reference_ticks = tuple(
         reference_repository.get_ticks_since(
             BRTI_SOURCE,
-            evaluated_at - timedelta(seconds=130),
-            limit=512,
+            evaluated_at - timedelta(seconds=reference_lookback_seconds),
+            limit=max(reference_lookback_seconds * 4, 512),
         )
     )
-    orderbook = orderbook_repository.get_latest_snapshot(market.market_ticker)
+    orderbook = market_liveness.latest_orderbook or orderbook_repository.get_latest_snapshot(
+        market.market_ticker
+    )
     orderbook_history = tuple(
         orderbook_repository.get_snapshots_since(
             market.market_ticker,
-            evaluated_at - timedelta(seconds=95),
+            evaluated_at - timedelta(seconds=orderbook_lookback_seconds),
             limit=512,
         )
     )
     recent_trades = tuple(
         trades_repository.get_trades_since(
             market.market_ticker,
-            evaluated_at - timedelta(seconds=30),
+            evaluated_at - timedelta(seconds=trade_lookback_seconds),
             limit=512,
         )
     )
@@ -112,10 +138,18 @@ def load_strategy_evaluation_context(
         boundary_source=boundary_source,
         reference_tick=reference_tick,
         orderbook=orderbook,
-        latest_trade=trades_repository.get_latest_trade(market.market_ticker),
+        latest_trade=market_liveness.latest_trade
+        or trades_repository.get_latest_trade(market.market_ticker),
         reference_ticks=reference_ticks,
         orderbook_history=orderbook_history,
         recent_trades=recent_trades,
+        market_liveness=market_liveness,
+        reference_liveness=reference_liveness,
+        active_ticker_state=market_liveness.market_feed_active_ticker_state,
+        feed_quality_state={
+            "market": market_liveness.market_feed_state,
+            "reference": reference_liveness.source,
+        },
     )
 
 

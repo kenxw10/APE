@@ -91,9 +91,13 @@ class OrderbookState:
             yes_ask_count=yes_ask_level.size if yes_ask_level else None,
             no_bid_count=yes_ask_level.size if yes_ask_level else None,
             no_ask_count=yes_bid.size if yes_bid else None,
-            ladder_schema_version="kalshi_yes_price_ladder_v1",
-            yes_bid_ladder=_top_ladder(self.yes_levels, complement=False),
-            no_bid_ladder=_top_ladder(self.no_levels, complement=True),
+            # These are executable contracts, not the raw Kalshi YES-price legs.
+            # Existing v1 rows retain their schema version and remain readable.
+            ladder_schema_version="kalshi_executable_ladders_v2",
+            yes_bid_ladder=_executable_ladder(self.yes_levels, complement=False, ascending=False),
+            yes_ask_ladder=_executable_ladder(self.no_levels, complement=False, ascending=True),
+            no_bid_ladder=_executable_ladder(self.no_levels, complement=True, ascending=False),
+            no_ask_ladder=_executable_ladder(self.yes_levels, complement=True, ascending=True),
             book_status="ok" if not warnings else "|".join(warnings),
             raw_payload_hash=raw_payload_hash,
             raw_payload=raw_payload,
@@ -128,10 +132,11 @@ def _best_ask(levels: dict[Decimal, Decimal]) -> BestLevel | None:
     return BestLevel(price=price, size=size)
 
 
-def _top_ladder(
+def _executable_ladder(
     levels: dict[Decimal, Decimal],
     *,
     complement: bool,
+    ascending: bool,
 ) -> list[dict[str, str]]:
     normalized = [
         (ONE_DOLLAR - price if complement else price, size)
@@ -140,7 +145,7 @@ def _top_ladder(
     ]
     return [
         {"price": format(price, "f"), "count": format(size, "f")}
-        for price, size in sorted(normalized, reverse=True)[:5]
+        for price, size in sorted(normalized, key=lambda item: item[0], reverse=not ascending)[:5]
     ]
 
 

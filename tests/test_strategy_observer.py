@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -51,6 +52,7 @@ from ape.strategy.observer import (
     build_strategy_dry_run_status,
     build_strategy_variants_comparison,
     evaluate_strategy_observer,
+    evaluate_strategy_variants,
     strategy_variant_configs,
 )
 from ape.worker.services import (
@@ -485,6 +487,316 @@ def test_v2_pending_intent_resolves_without_current_candidate_side(session) -> N
     assert event.occurred_at == fill_time.replace(tzinfo=None)
 
 
+def test_variants_receive_one_shared_context_per_iteration(session, monkeypatch) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config(
+        {
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+            "STRATEGY_CHALLENGER_ENABLED": "true",
+            "STRATEGY_V2_ENABLED": "true",
+            "STRATEGY_BRTI_LOOKBACK_LONG_SECONDS": "240",
+            "STRATEGY_TRADE_CONFIRMATION_LOOKBACK_SECONDS": "45",
+            "STRATEGY_CONTRACT_LOOKBACK_SECONDS": "120",
+        }
+    )
+    _seed_observable_context(session, now=now)
+    original_loader = observer_module.load_strategy_evaluation_context
+    load_count = 0
+    contexts = []
+    reference_lookbacks = []
+    trade_lookbacks = []
+    orderbook_lookbacks = []
+
+    def load_once(**kwargs):
+        nonlocal load_count
+        load_count += 1
+        reference_lookbacks.append(kwargs["reference_lookback_seconds"])
+        trade_lookbacks.append(kwargs["trade_lookback_seconds"])
+        orderbook_lookbacks.append(kwargs["orderbook_lookback_seconds"])
+        return original_loader(**kwargs)
+
+    def capture_context(*, config, safety, session, now, shared_context=None):
+        del safety, session
+        contexts.append(shared_context)
+        return StrategyDecisionInput(
+            decision_id=f"shared-{config.strategy_id}",
+            evaluated_at=now,
+            decision_state=STATE_OBSERVE_ONLY_MARKET,
+            primary_reason="observer_decision_ledger_only",
+            app_mode="DRY_RUN",
+            strategy_id=config.strategy_id,
+            blockers=[],
+            warnings=[],
+        )
+
+    monkeypatch.setattr(observer_module, "load_strategy_evaluation_context", load_once)
+    monkeypatch.setattr(observer_module, "evaluate_strategy_observer", capture_context)
+
+    results = evaluate_strategy_variants(
+        config=config,
+        safety=assess_startup_safety(config),
+        session=session,
+        now=now,
+    )
+
+    assert load_count == 1
+    assert reference_lookbacks == [240]
+    assert trade_lookbacks == [45]
+    assert orderbook_lookbacks == [120]
+    assert len(contexts) == 2
+    assert contexts[0] is contexts[1]
+    assert [variant.strategy_id for variant, _ in results] == [
+        CONTROL_STRATEGY_ID,
+        CHALLENGER_STRATEGY_ID,
+        V2_STRATEGY_ID,
+    ]
+
+
+def test_shared_context_trims_orderbook_history_to_variant_lookback(session, monkeypatch) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({"STRATEGY_TRADE_CONFIRMATION_LOOKBACK_SECONDS": "5"})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(session, now=now)
+    old_snapshot = OrderbookRepository(session).insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker="KXBTC15M-ACTIVE",
+            received_at=now - timedelta(seconds=90),
+            sequence_number=121,
+            yes_bid=Decimal("0.50"),
+            yes_ask=Decimal("0.52"),
+            no_bid=Decimal("0.48"),
+            no_ask=Decimal("0.50"),
+            yes_bid_count=Decimal("3"),
+            yes_ask_count=Decimal("3"),
+            no_bid_count=Decimal("3"),
+            no_ask_count=Decimal("3"),
+            book_status="ok",
+        )
+    )
+    old_trade = PublicTradesRepository(session).insert_trade(
+        PublicTradeInput(
+            market_ticker="KXBTC15M-ACTIVE",
+            received_at=now - timedelta(seconds=20),
+            executed_at=now - timedelta(seconds=20),
+            price=Decimal("0.61"),
+            trade_count=Decimal("1"),
+            side_inferred="YES",
+        )
+    )
+    old_reference_tick = ReferenceTicksRepository(session).insert_tick(
+        ReferenceTickInput(
+            source="kalshi_cfbenchmarks_brti",
+            received_at=now - timedelta(seconds=90),
+            source_ts=now - timedelta(seconds=90),
+            raw_value="62010",
+            parsed_value=Decimal("62010"),
+            parse_status="valid",
+        )
+    )
+    shared_context = observer_module.load_strategy_evaluation_context(
+        config=config,
+        session=session,
+        evaluated_at=now,
+        reference_lookback_seconds=config.strategy_brti_lookback_long_seconds,
+    )
+    captured: dict[str, object] = {}
+    variant_config = replace(config, strategy_brti_lookback_long_seconds=60)
+    original_metrics = observer_module._contract_confirmation_metrics
+    original_trade_metrics = observer_module._trade_confirmation_metrics
+    original_impulse_metrics = observer_module._brti_impulse_metrics
+
+    def capture_metrics(**kwargs):
+        captured["orderbook_history"] = kwargs["orderbook_history"]
+        return original_metrics(**kwargs)
+
+    def capture_trade_metrics(**kwargs):
+        captured["recent_trades"] = kwargs["trades"]
+        return original_trade_metrics(**kwargs)
+
+    def capture_impulse_metrics(**kwargs):
+        captured["reference_ticks"] = kwargs["ticks"]
+        return original_impulse_metrics(**kwargs)
+
+    monkeypatch.setattr(observer_module, "_contract_confirmation_metrics", capture_metrics)
+    monkeypatch.setattr(observer_module, "_trade_confirmation_metrics", capture_trade_metrics)
+    monkeypatch.setattr(observer_module, "_brti_impulse_metrics", capture_impulse_metrics)
+
+    evaluate_strategy_observer(
+        config=variant_config,
+        safety=safety,
+        session=session,
+        now=now,
+        shared_context=shared_context,
+    )
+
+    orderbook_history = captured["orderbook_history"]
+    assert isinstance(orderbook_history, list)
+    assert old_snapshot.id not in {snapshot.id for snapshot in orderbook_history}
+    assert all(
+        observer_module._as_utc(snapshot.received_at)
+        >= now - timedelta(seconds=config.strategy_contract_lookback_seconds)
+        for snapshot in orderbook_history
+    )
+    recent_trades = captured["recent_trades"]
+    assert isinstance(recent_trades, list)
+    assert old_trade.id not in {trade.id for trade in recent_trades}
+    assert all(
+        observer_module._as_utc(trade.received_at)
+        >= now - timedelta(seconds=config.strategy_trade_confirmation_lookback_seconds)
+        for trade in recent_trades
+    )
+    reference_ticks = captured["reference_ticks"]
+    assert isinstance(reference_ticks, list)
+    assert old_reference_tick.id not in {tick.id for tick in reference_ticks}
+    assert all(
+        observer_module._as_utc(tick.received_at)
+        >= now - timedelta(seconds=variant_config.strategy_brti_lookback_long_seconds)
+        for tick in reference_ticks
+    )
+
+
+def test_v2_causal_exit_fill_closes_once_and_persists_outcome(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    market_ticker = "KXBTC15M-V2-EXIT"
+    positions = StrategyDryRunRepository(session)
+    positions.insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="v2-open-exit",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=market_ticker,
+            decision_id="v2-entry",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now - timedelta(seconds=10),
+            open_price=Decimal("0.63"),
+            contract_count=1,
+            entry_reason="v2_causal_hypothetical_fill",
+            status="OPEN",
+            lifecycle_version="momentum_v2_lifecycle_v1",
+            entry_time_stop_seconds=30,
+            entry_max_hold_seconds=60,
+        )
+    )
+    OrderbookRepository(session).insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker=market_ticker,
+            received_at=now,
+            yes_bid=Decimal("0.74"),
+            yes_ask=Decimal("0.75"),
+            yes_bid_count=Decimal("1"),
+            yes_ask_count=Decimal("1"),
+            no_bid=Decimal("0.25"),
+            no_ask=Decimal("0.26"),
+            no_bid_count=Decimal("1"),
+            no_ask_count=Decimal("1"),
+            book_status="ok",
+        )
+    )
+    decision = StrategyDecisionInput(
+        decision_id="v2-profit-signal",
+        evaluated_at=now,
+        decision_state="V2_HARD_GATE_BLOCKED",
+        primary_reason="v2_test",
+        app_mode="DRY_RUN",
+        strategy_id=V2_STRATEGY_ID,
+        market_ticker=market_ticker,
+        candidate_side="NO",
+        boundary=Decimal("62000"),
+        brti_value=Decimal("62010"),
+        seconds_left=300,
+        measurements={
+            "features": {"return_5s": "0", "return_15s": "0"},
+            "score": {"total": "80"},
+            "edge": {"lower_bound_cents": "2"},
+        },
+    )
+    observer_module._apply_v2_hypothetical_lifecycle(
+        config=load_config({}), session=session, decision=decision
+    )
+    intents = StrategyV2Repository(session)
+    exit_intent = intents.get_pending_exit_intent(position_id="v2-open-exit")
+    assert exit_intent is not None
+    assert exit_intent.action == "EXIT"
+    assert exit_intent.status == "PENDING"
+    marks_before_exit = intents.list_marks_for_position(position_id="v2-open-exit")
+    assert [mark.executable_bid for mark in marks_before_exit] == [Decimal("0.74")]
+
+    first_future_book = OrderbookRepository(session).insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker=market_ticker,
+            received_at=now + timedelta(milliseconds=750),
+            yes_bid=Decimal("0.72"),
+            yes_ask=Decimal("0.73"),
+            yes_bid_count=Decimal("1"),
+            yes_ask_count=Decimal("1"),
+            no_bid=Decimal("0.27"),
+            no_ask=Decimal("0.28"),
+            no_bid_count=Decimal("1"),
+            no_ask_count=Decimal("1"),
+            book_status="ok",
+        )
+    )
+    second_future_book = OrderbookRepository(session).insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker=market_ticker,
+            received_at=now + timedelta(seconds=1),
+            yes_bid=Decimal("0.75"),
+            yes_ask=Decimal("0.76"),
+            yes_bid_count=Decimal("1"),
+            yes_ask_count=Decimal("1"),
+            no_bid=Decimal("0.24"),
+            no_ask=Decimal("0.25"),
+            no_bid_count=Decimal("1"),
+            no_ask_count=Decimal("1"),
+            book_status="ok",
+        )
+    )
+    OrderbookRepository(session).insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker=market_ticker,
+            received_at=now + timedelta(milliseconds=1500),
+            yes_bid=Decimal("0.90"),
+            yes_ask=Decimal("0.91"),
+            yes_bid_count=Decimal("1"),
+            yes_ask_count=Decimal("1"),
+            no_bid=Decimal("0.09"),
+            no_ask=Decimal("0.10"),
+            no_bid_count=Decimal("1"),
+            no_ask_count=Decimal("1"),
+            book_status="ok",
+        )
+    )
+    observer_module._apply_v2_hypothetical_lifecycle(
+        config=load_config({}),
+        session=session,
+        decision=replace(decision, evaluated_at=now + timedelta(milliseconds=1500)),
+    )
+
+    position = positions.get_position_by_id("v2-open-exit")
+    assert position is not None
+    assert position.status == "CLOSED"
+    assert position.close_price == Decimal("0.75")
+    assert position.realized_pnl_cents == Decimal("12")
+    resolved_exit_intent = next(
+        intent
+        for intent in intents.list_recent_intents(
+            strategy_id=V2_STRATEGY_ID,
+            limit=10,
+        )
+        if intent.intent_id == exit_intent.intent_id
+    )
+    assert resolved_exit_intent.fill_snapshot_id == second_future_book.id
+    assert resolved_exit_intent.fill_snapshot_id != first_future_book.id
+    outcomes = intents.list_recent_outcomes(strategy_id=V2_STRATEGY_ID, limit=10)
+    assert len(outcomes) == 1
+    assert outcomes[0].exit_intent_id == exit_intent.intent_id
+    assert outcomes[0].mfe_cents == Decimal("12")
+    assert outcomes[0].mae_cents == Decimal("0")
+    assert outcomes[0].time_to_mfe_ms == 11000
+
+
 def test_v2_intent_uses_recorded_timing_parameters(session, monkeypatch) -> None:
     now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
     market_ticker = "KXBTC15M-TIMING"
@@ -626,6 +938,92 @@ def test_v2_sweeps_expired_intents_without_an_active_market(session) -> None:
     assert expired.status == "EXPIRED"
     assert no_fill is not None
     assert no_fill.status == "NO_FILL"
+
+
+def test_v2_manages_open_positions_without_an_active_market(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    market_ticker = "KXBTC15M-NO-ACTIVE-MARKET"
+    positions = StrategyDryRunRepository(session)
+    positions.insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="v2-no-market-open-position",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=market_ticker,
+            decision_id="v2-no-market-entry",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now - timedelta(seconds=10),
+            open_price=Decimal("0.62"),
+            contract_count=1,
+            entry_reason="v2_causal_hypothetical_fill",
+            status="OPEN",
+        )
+    )
+    orderbooks = OrderbookRepository(session)
+    orderbooks.insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker=market_ticker,
+            received_at=now,
+            yes_bid=Decimal("0.65"),
+            yes_ask=Decimal("0.66"),
+            yes_bid_count=Decimal("1"),
+            yes_ask_count=Decimal("1"),
+            no_bid=Decimal("0.34"),
+            no_ask=Decimal("0.35"),
+            no_bid_count=Decimal("1"),
+            no_ask_count=Decimal("1"),
+            book_status="ok",
+        )
+    )
+    no_market_decision = StrategyDecisionInput(
+        decision_id="v2-no-active-market-management",
+        evaluated_at=now,
+        decision_state="V2_HARD_GATE_BLOCKED",
+        primary_reason="no_active_market",
+        app_mode="DRY_RUN",
+        strategy_id=V2_STRATEGY_ID,
+        market_ticker=None,
+        candidate_side=None,
+    )
+
+    observer_module._apply_v2_hypothetical_lifecycle(
+        config=load_config({}),
+        session=session,
+        decision=no_market_decision,
+    )
+
+    intents = StrategyV2Repository(session)
+    pending_exit = intents.get_pending_exit_intent(position_id="v2-no-market-open-position")
+    assert pending_exit is not None
+    assert pending_exit.trigger == "v2_force_market_lifecycle_failure"
+    assert intents.list_marks_for_position(position_id="v2-no-market-open-position")
+
+    orderbooks.insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker=market_ticker,
+            received_at=now + timedelta(milliseconds=750),
+            yes_bid=Decimal("0.65"),
+            yes_ask=Decimal("0.66"),
+            yes_bid_count=Decimal("1"),
+            yes_ask_count=Decimal("1"),
+            no_bid=Decimal("0.34"),
+            no_ask=Decimal("0.35"),
+            no_bid_count=Decimal("1"),
+            no_ask_count=Decimal("1"),
+            book_status="ok",
+        )
+    )
+    result = observer_module._apply_v2_hypothetical_lifecycle(
+        config=load_config({}),
+        session=session,
+        decision=replace(no_market_decision, evaluated_at=now + timedelta(seconds=1)),
+    )
+
+    position = positions.get_position_by_id("v2-no-market-open-position")
+    assert position is not None
+    assert position.status == "FORCE_CLOSED"
+    assert position.close_price == Decimal("0.65")
+    assert result.latest_event_type == "V2_EXIT_FILLED"
 
 
 def test_v2_resolves_only_the_first_post_delay_orderbook(session) -> None:
