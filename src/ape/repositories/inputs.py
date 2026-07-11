@@ -79,7 +79,9 @@ class OrderbookSnapshotInput:
     no_ask_count: Decimal | None = None
     ladder_schema_version: str | None = None
     yes_bid_ladder: JsonPayload | None = None
+    yes_ask_ladder: JsonPayload | None = None
     no_bid_ladder: JsonPayload | None = None
+    no_ask_ladder: JsonPayload | None = None
     book_status: str | None = None
     raw_payload_hash: str | None = None
     raw_payload: JsonPayload | None = None
@@ -183,6 +185,18 @@ class StrategyDryRunPositionInput:
     feature_snapshot_id: str | None = None
     strategy_config_version_id: str | None = None
     code_commit_sha: str | None = None
+    entry_intent_id: str | None = None
+    exit_intent_id: str | None = None
+    lifecycle_version: str | None = None
+    entry_timing_tier: str | None = None
+    entry_score_threshold: Decimal | None = None
+    entry_time_stop_seconds: int | None = None
+    entry_max_hold_seconds: int | None = None
+    entry_score: Decimal | None = None
+    entry_edge_lower_bound_cents: Decimal | None = None
+    entry_response_residual_cents: Decimal | None = None
+    entry_boundary: Decimal | None = None
+    entry_standardized_distance: Decimal | None = None
     measurements: JsonPayload | None = None
 
 
@@ -259,10 +273,18 @@ class StrategyTradeIntentInput:
     position_id: str | None = None
     optimistic_price: Decimal | None = None
     optimistic_snapshot_id: int | None = None
+    architecture_version: str | None = None
+    code_commit_sha: str | None = None
+    lifecycle_version: str | None = None
+    trigger: str | None = None
+    trigger_classification: str | None = None
+    attempt_number: int | None = None
+    decision_time_executable_bid: Decimal | None = None
     resolved_at: datetime | None = None
     fill_snapshot_id: int | None = None
     simulated_fill_price: Decimal | None = None
     simulated_fill_size: Decimal | None = None
+    fill_timestamp: datetime | None = None
     resolution_reason: str | None = None
     measurements: JsonPayload | None = None
 
@@ -281,6 +303,41 @@ class StrategyPositionMarkInput:
     edge_lower_bound_cents: Decimal | None = None
     boundary_state: JsonPayload | None = None
     management_reason: str | None = None
+    measurements: JsonPayload | None = None
+
+
+@dataclass(frozen=True)
+class StrategyPositionOutcomeInput:
+    outcome_id: str
+    position_id: str
+    strategy_id: str
+    market_ticker: str
+    held_side: str
+    lifecycle_version: str
+    opened_at: datetime
+    closed_at: datetime
+    holding_duration_ms: int
+    quantity: Decimal
+    entry_price: Decimal
+    exit_price: Decimal
+    realized_pnl_cents: Decimal
+    architecture_version: str | None = None
+    strategy_config_version_id: str | None = None
+    code_commit_sha: str | None = None
+    entry_decision_id: str | None = None
+    exit_decision_id: str | None = None
+    entry_intent_id: str | None = None
+    exit_intent_id: str | None = None
+    entry_feature_snapshot_id: str | None = None
+    exit_feature_snapshot_id: str | None = None
+    mfe_cents: Decimal | None = None
+    mae_cents: Decimal | None = None
+    time_to_mfe_ms: int | None = None
+    time_to_mae_ms: int | None = None
+    optimistic_entry_delta: Decimal | None = None
+    decision_to_filled_exit_delta: Decimal | None = None
+    close_trigger: str | None = None
+    close_reason: str | None = None
     measurements: JsonPayload | None = None
 
 

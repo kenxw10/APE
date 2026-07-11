@@ -20,6 +20,7 @@ Rules:
 - BRTI/CF Benchmarks PRs may add observer-only reference-feed capture only when explicitly scoped; they must not add strategy decisions, paper trading, live trading, order placement, private/user channels, or execution controls.
 - Dry-run strategy PRs may add hypothetical ledger simulation only when explicitly scoped; they must not add paper trading, live trading, Kalshi order placement, account reads, private/user channels, or execution controls.
 - Database schema/repository changes are allowed only in PRs that explicitly authorize storage or ledger work.
+- PR 10a validation must confirm V2 outcome and intent endpoints remain read-only, and that `strategy_position_outcomes` is durable evidence rather than short-retention market telemetry.
 - Railway worker services should be always-on processes, not cron jobs, unless a later PR explicitly changes that decision.
 
 PR 5 post-merge checkpoint:

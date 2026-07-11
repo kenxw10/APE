@@ -35,6 +35,7 @@ from ape.repositories.inputs import (
     StrategyDryRunEventInput,
     StrategyDryRunPositionInput,
     StrategyPositionMarkInput,
+    StrategyPositionOutcomeInput,
     StrategyTradeIntentInput,
     WorkerHeartbeatInput,
 )
@@ -50,9 +51,11 @@ from ape.repositories.strategy_dry_run import (
 from ape.repositories.strategy_v2 import StrategyV2Repository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import SafetyAssessment, assess_startup_safety
-from ape.strategy.context import load_strategy_evaluation_context
+from ape.strategy.context import StrategyEvaluationContext, load_strategy_evaluation_context
 from ape.strategy.momentum_v2 import (
     STATE_V2_ENTRY_SIGNAL,
+    V2_ARCHITECTURE_VERSION,
+    V2_LIFECYCLE_SCHEMA_VERSION,
     V2_PARAMETERS,
     V2_STRATEGY_ID,
     built_in_config_version,
@@ -87,6 +90,11 @@ STATE_ENTER_DRY_RUN = "ENTER_DRY_RUN"
 STATE_MANAGE_POSITION = "MANAGE_POSITION"
 STATE_EXIT_SIGNAL = "EXIT_SIGNAL"
 STATE_FORCE_EXIT = "FORCE_EXIT"
+STATE_V2_MANAGE_POSITION = "V2_MANAGE_POSITION"
+STATE_V2_EXIT_SIGNAL = "V2_EXIT_SIGNAL"
+STATE_V2_FORCE_EXIT = "V2_FORCE_EXIT"
+STATE_V2_EXIT_PENDING = "V2_EXIT_PENDING"
+STATE_V2_EXIT_ATTEMPT_LIMIT = "V2_EXIT_ATTEMPT_LIMIT"
 
 CONTROL_STRATEGY_ID = "btc15_momentum_v1"
 CHALLENGER_STRATEGY_ID = "btc15_momentum_v1_fast"
@@ -287,6 +295,13 @@ class StrategyDryRunPositionSnapshot:
     feature_snapshot_id: str | None = None
     strategy_config_version_id: str | None = None
     code_commit_sha: str | None = None
+    entry_intent_id: str | None = None
+    exit_intent_id: str | None = None
+    lifecycle_version: str | None = None
+    entry_timing_tier: str | None = None
+    entry_score_threshold: Decimal | None = None
+    entry_time_stop_seconds: int | None = None
+    entry_max_hold_seconds: int | None = None
     measurements_summary: JsonPayload | None = None
 
 
@@ -529,6 +544,7 @@ def evaluate_strategy_observer(
     safety: SafetyAssessment,
     session: Session,
     now: datetime | None = None,
+    shared_context: StrategyEvaluationContext | None = None,
 ) -> StrategyDecisionInput:
     evaluated_at = _as_utc(now or datetime.now(UTC))
     thresholds = _thresholds(config)
@@ -883,9 +899,13 @@ def evaluate_strategy_observer(
 
     dry_run_repository = StrategyDryRunRepository(session)
     markets_repository = MarketsRepository(session)
-    active_market = markets_repository.get_active_market(
-        now=evaluated_at,
-        series_ticker=config.kalshi_btc15_series_ticker,
+    active_market = (
+        shared_context.market
+        if shared_context is not None
+        else markets_repository.get_active_market(
+            now=evaluated_at,
+            series_ticker=config.kalshi_btc15_series_ticker,
+        )
     )
     if _dry_run_runtime_enabled(config, safety):
         open_positions = dry_run_repository.list_open_positions(strategy_id=config.strategy_id)
@@ -972,16 +992,20 @@ def evaluate_strategy_observer(
     if boundary is None:
         return decision(STATE_MARKET_NOT_PARSEABLE, "market_boundary_not_parseable")
 
-    market_liveness = load_market_feed_liveness(
-        session,
-        config,
-        checked_at=evaluated_at,
-        active_market_ticker=market.market_ticker,
+    market_liveness = (
+        shared_context.market_liveness
+        if shared_context is not None and shared_context.market_liveness is not None
+        else load_market_feed_liveness(
+            session,
+            config,
+            checked_at=evaluated_at,
+            active_market_ticker=market.market_ticker,
+        )
     )
-    reference_liveness = load_reference_feed_liveness(
-        session,
-        config,
-        checked_at=evaluated_at,
+    reference_liveness = (
+        shared_context.reference_liveness
+        if shared_context is not None and shared_context.reference_liveness is not None
+        else load_reference_feed_liveness(session, config, checked_at=evaluated_at)
     )
     reference_worker_metadata = reference_liveness.metadata
     orderbook_worker_metadata = market_liveness.metadata
@@ -1107,8 +1131,16 @@ def evaluate_strategy_observer(
         )
 
     reference_repository = ReferenceTicksRepository(session)
-    latest_reference_tick = reference_repository.get_latest_tick(BRTI_SOURCE)
-    reference_tick = reference_repository.get_latest_valid_tick(BRTI_SOURCE)
+    latest_reference_tick = (
+        reference_liveness.latest_tick
+        if shared_context is not None
+        else reference_repository.get_latest_tick(BRTI_SOURCE)
+    )
+    reference_tick = (
+        shared_context.reference_tick
+        if shared_context is not None
+        else reference_repository.get_latest_valid_tick(BRTI_SOURCE)
+    )
     if reference_tick is None:
         metadata_stale_reason = _metadata_stale_reason(reference_worker_metadata)
         if metadata_stale_reason is not None:
@@ -1189,7 +1221,12 @@ def evaluate_strategy_observer(
             )
         return decision(STATE_REFERENCE_STALE, brti_reference_stale_reason)
 
-    orderbook = OrderbookRepository(session).get_latest_snapshot(market.market_ticker)
+    orderbook = (
+        shared_context.orderbook
+        if shared_context is not None
+        and market.market_ticker == getattr(shared_context.market, "market_ticker", None)
+        else OrderbookRepository(session).get_latest_snapshot(market.market_ticker)
+    )
     if orderbook is None:
         if manage_feed_failure_position():
             return decision(
@@ -1251,15 +1288,24 @@ def evaluate_strategy_observer(
             )
         return decision(STATE_KALSHI_STALE, orderbook_liveness_reason)
 
-    latest_trade = PublicTradesRepository(session).get_latest_trade(market.market_ticker)
+    latest_trade = (
+        shared_context.latest_trade
+        if shared_context is not None
+        and market.market_ticker == getattr(shared_context.market, "market_ticker", None)
+        else PublicTradesRepository(session).get_latest_trade(market.market_ticker)
+    )
     if latest_trade is not None:
         latest_trade_age_ms = _age_ms(latest_trade.received_at, evaluated_at)
 
     reference_since = evaluated_at - timedelta(seconds=config.strategy_brti_lookback_long_seconds)
-    reference_ticks = ReferenceTicksRepository(session).get_ticks_since(
-        BRTI_SOURCE,
-        reference_since,
-        limit=max(config.strategy_brti_lookback_long_seconds * 4, 256),
+    reference_ticks = (
+        list(shared_context.reference_ticks)
+        if shared_context is not None
+        else ReferenceTicksRepository(session).get_ticks_since(
+            BRTI_SOURCE,
+            reference_since,
+            limit=max(config.strategy_brti_lookback_long_seconds * 4, 256),
+        )
     )
     orderbook_since = evaluated_at - timedelta(
         seconds=max(
@@ -1267,15 +1313,25 @@ def evaluate_strategy_observer(
             config.strategy_contract_ask_pullback_lookback_seconds,
         )
     )
-    orderbook_history = OrderbookRepository(session).get_snapshots_since(
-        market.market_ticker,
-        orderbook_since,
-        limit=512,
+    orderbook_history = (
+        list(shared_context.orderbook_history)
+        if shared_context is not None
+        and market.market_ticker == getattr(shared_context.market, "market_ticker", None)
+        else OrderbookRepository(session).get_snapshots_since(
+            market.market_ticker,
+            orderbook_since,
+            limit=512,
+        )
     )
-    recent_trades = PublicTradesRepository(session).get_trades_since(
-        market.market_ticker,
-        evaluated_at - timedelta(seconds=config.strategy_trade_confirmation_lookback_seconds),
-        limit=250,
+    recent_trades = (
+        list(shared_context.recent_trades)
+        if shared_context is not None
+        and market.market_ticker == getattr(shared_context.market, "market_ticker", None)
+        else PublicTradesRepository(session).get_trades_since(
+            market.market_ticker,
+            evaluated_at - timedelta(seconds=config.strategy_trade_confirmation_lookback_seconds),
+            limit=250,
+        )
     )
 
     if (
@@ -1560,6 +1616,7 @@ def evaluate_strategy_variants(
             safety=safety,
             session=session,
             now=evaluated_at,
+            shared_context=context,
         )
         config_version = v2_repository.ensure_config_version(
             built_in_config_version(variant_config.strategy_id, _thresholds(variant_config))
@@ -2221,8 +2278,11 @@ def build_v2_intent_records(
     *,
     limit: int,
     strategy_id: str = V2_STRATEGY_ID,
+    action: str | None = None,
 ) -> dict[str, Any]:
-    return _build_v2_records(config, kind="intents", limit=limit, strategy_id=strategy_id)
+    return _build_v2_records(
+        config, kind="intents", limit=limit, strategy_id=strategy_id, action=action
+    )
 
 
 def build_v2_mark_records(
@@ -2234,12 +2294,22 @@ def build_v2_mark_records(
     return _build_v2_records(config, kind="marks", limit=limit, strategy_id=strategy_id)
 
 
+def build_v2_outcome_records(
+    config: AppConfig,
+    *,
+    limit: int,
+    strategy_id: str = V2_STRATEGY_ID,
+) -> dict[str, Any]:
+    return _build_v2_records(config, kind="outcomes", limit=limit, strategy_id=strategy_id)
+
+
 def _build_v2_records(
     config: AppConfig,
     *,
     kind: str,
     limit: int,
     strategy_id: str | None = None,
+    action: str | None = None,
 ) -> dict[str, Any]:
     capped_limit = min(max(limit, 1), 500)
     if not config.database_url:
@@ -2258,6 +2328,12 @@ def _build_v2_records(
                     rows = repository.list_recent_feature_snapshots(limit=capped_limit)
                 elif kind == "intents":
                     rows = repository.list_recent_intents(
+                        strategy_id=strategy_id,
+                        limit=capped_limit,
+                        action=action,
+                    )
+                elif kind == "outcomes":
+                    rows = repository.list_recent_outcomes(
                         strategy_id=strategy_id,
                         limit=capped_limit,
                     )
@@ -2344,6 +2420,13 @@ def strategy_dry_run_position_snapshot(
         feature_snapshot_id=position.feature_snapshot_id,
         strategy_config_version_id=position.strategy_config_version_id,
         code_commit_sha=position.code_commit_sha,
+        entry_intent_id=position.entry_intent_id,
+        exit_intent_id=position.exit_intent_id,
+        lifecycle_version=position.lifecycle_version,
+        entry_timing_tier=position.entry_timing_tier,
+        entry_score_threshold=position.entry_score_threshold,
+        entry_time_stop_seconds=position.entry_time_stop_seconds,
+        entry_max_hold_seconds=position.entry_max_hold_seconds,
         measurements_summary=_measurement_summary(position.measurements),
     )
 
@@ -4435,6 +4518,15 @@ def _resolve_v2_pending_intent(
     resolved_at: datetime,
     decision: StrategyDecisionInput | StrategyDecision | None,
 ) -> tuple[str | None, str | None]:
+    if pending.action == "EXIT":
+        return _resolve_v2_pending_exit(
+            session=session,
+            intents=intents,
+            positions=positions,
+            pending=pending,
+            resolved_at=resolved_at,
+            decision=decision,
+        )
     future_books = OrderbookRepository(session).get_snapshots_between(
         pending.market_ticker,
         start=pending.effective_after,
@@ -4461,6 +4553,7 @@ def _resolve_v2_pending_intent(
                 fill_snapshot_id=future_book.id,
                 fill_price=ask,
                 fill_size=Decimal(pending.quantity),
+                fill_timestamp=future_book.received_at,
             )
             fill_time = future_book.received_at
             position = positions.insert_position_if_absent(
@@ -4482,6 +4575,41 @@ def _resolve_v2_pending_intent(
                     feature_snapshot_id=pending.feature_snapshot_id,
                     strategy_config_version_id=pending.strategy_config_version_id,
                     code_commit_sha=decision.code_commit_sha if decision is not None else None,
+                    entry_intent_id=pending.intent_id,
+                    lifecycle_version=V2_LIFECYCLE_SCHEMA_VERSION,
+                    entry_timing_tier=_measurement_text(decision.measurements, "timing_tier")
+                    if decision
+                    else None,
+                    entry_score_threshold=_measurement_decimal(
+                        decision.measurements, "score", "threshold"
+                    )
+                    if decision
+                    else None,
+                    entry_time_stop_seconds=_v2_tier_seconds(decision, "time_stop")
+                    if decision
+                    else None,
+                    entry_max_hold_seconds=_v2_tier_seconds(decision, "max_hold")
+                    if decision
+                    else None,
+                    entry_score=_measurement_decimal(decision.measurements, "score", "total")
+                    if decision
+                    else None,
+                    entry_edge_lower_bound_cents=_measurement_decimal(
+                        decision.measurements, "edge", "lower_bound_cents"
+                    )
+                    if decision
+                    else None,
+                    entry_response_residual_cents=_measurement_decimal(
+                        decision.measurements, "features", "response_residual_cents"
+                    )
+                    if decision
+                    else None,
+                    entry_boundary=decision.boundary if decision is not None else None,
+                    entry_standardized_distance=_measurement_decimal(
+                        decision.measurements, "features", "standardized_distance_120s"
+                    )
+                    if decision
+                    else None,
                     measurements={
                         "intent_id": pending.intent_id,
                         "fill_snapshot_id": future_book.id,
@@ -4522,6 +4650,487 @@ def _resolve_v2_pending_intent(
         )
         return ("NO_FILL" if future_books else "EXPIRED"), None
     return None, None
+
+
+def _resolve_v2_pending_exit(
+    *,
+    session: Session,
+    intents: StrategyV2Repository,
+    positions: StrategyDryRunRepository,
+    pending: StrategyTradeIntent,
+    resolved_at: datetime,
+    decision: StrategyDecisionInput | StrategyDecision | None,
+) -> tuple[str | None, str | None]:
+    position = positions.get_position_by_id(pending.position_id or "")
+    if position is None or position.status != OPEN_POSITION_STATUS:
+        intents.resolve_intent(
+            pending,
+            status="EXPIRED",
+            resolved_at=resolved_at,
+            reason="v2_exit_position_not_open",
+            position_id=pending.position_id,
+        )
+        return "EXPIRED", pending.position_id
+
+    future_books = OrderbookRepository(session).get_snapshots_between(
+        pending.market_ticker,
+        start=pending.effective_after,
+        end=pending.expires_at,
+    )
+    future_book = future_books[0] if future_books else None
+    if future_book is not None:
+        bid, _, _ = _desired_book(future_book, position.side_candidate)
+        bid_depth = _desired_exit_book_size(future_book, position.side_candidate)
+        if (
+            bid is not None
+            and bid_depth is not None
+            and bid >= Decimal(pending.intended_limit_price)
+            and bid_depth >= Decimal(pending.quantity)
+        ):
+            fill_time = future_book.received_at
+            intents.resolve_intent(
+                pending,
+                status="FILLED",
+                resolved_at=resolved_at,
+                reason="v2_exit_future_book_fill",
+                position_id=position.position_id,
+                fill_snapshot_id=future_book.id,
+                fill_price=bid,
+                fill_size=Decimal(pending.quantity),
+                fill_timestamp=future_book.received_at,
+            )
+            realized = (
+                (bid - Decimal(position.open_price))
+                * Decimal("100")
+                * Decimal(position.contract_count)
+            )
+            positions.link_exit_intent(
+                position_id=position.position_id, exit_intent_id=pending.intent_id
+            )
+            closed = positions.close_position(
+                position_id=position.position_id,
+                closed_at=fill_time,
+                close_price=bid,
+                close_reason=pending.trigger or pending.resolution_reason or "v2_exit_fill",
+                status="FORCE_CLOSED" if pending.trigger_classification == "FORCE" else "CLOSED",
+                realized_pnl_cents=realized,
+                measurements={
+                    **(position.measurements if isinstance(position.measurements, dict) else {}),
+                    "exit_intent_id": pending.intent_id,
+                    "exit_fill_snapshot_id": future_book.id,
+                },
+            )
+            if closed is not None:
+                _persist_v2_outcome(
+                    intents=intents,
+                    position=closed,
+                    exit_intent=pending,
+                    exit_decision=decision,
+                )
+                exit_event_key = _stable_hash({"intent": pending.intent_id, "event": "exit-fill"})[
+                    :24
+                ]
+                positions.insert_event_if_absent(
+                    StrategyDryRunEventInput(
+                        event_id=f"v2-event-{exit_event_key}",
+                        event_type="V2_EXIT_FILLED",
+                        occurred_at=fill_time,
+                        strategy_id=V2_STRATEGY_ID,
+                        position_id=position.position_id,
+                        decision_id=pending.decision_id,
+                        market_ticker=pending.market_ticker,
+                        side_candidate=position.side_candidate,
+                        price=bid,
+                        contract_count=position.contract_count,
+                        reason=pending.trigger,
+                        feature_snapshot_id=pending.feature_snapshot_id,
+                        strategy_config_version_id=pending.strategy_config_version_id,
+                        code_commit_sha=pending.code_commit_sha,
+                    )
+                )
+            return "V2_EXIT_FILLED", position.position_id
+    if _as_utc(resolved_at) > _as_utc(pending.expires_at):
+        intents.resolve_intent(
+            pending,
+            status="NO_FILL" if future_books else "EXPIRED",
+            resolved_at=resolved_at,
+            reason=(
+                "v2_exit_future_book_price_or_depth_unavailable"
+                if future_books
+                else "v2_exit_no_future_book_before_expiry"
+            ),
+            position_id=position.position_id,
+        )
+        return ("V2_EXIT_NO_FILL" if future_books else "V2_EXIT_EXPIRED"), position.position_id
+    return None, position.position_id
+
+
+def _apply_v2_position_management(
+    *,
+    config: AppConfig,
+    session: Session,
+    intents: StrategyV2Repository,
+    positions: StrategyDryRunRepository,
+    position: StrategyDryRunPosition,
+    decision: StrategyDecisionInput,
+) -> str:
+    now = decision.evaluated_at
+    orderbook = OrderbookRepository(session).get_latest_snapshot(position.market_ticker)
+    held_bid, _, _ = (
+        _desired_book(orderbook, position.side_candidate)
+        if orderbook is not None
+        else (None, None, None)
+    )
+    score = _measurement_decimal(decision.measurements, "score", "total")
+    edge = _measurement_decimal(decision.measurements, "edge", "lower_bound_cents")
+    mark_key = _stable_hash({"position": position.position_id, "bucket": int(now.timestamp())})[:24]
+    mark_id = f"v2-mark-{mark_key}"
+    intents.insert_mark_if_absent(
+        StrategyPositionMarkInput(
+            mark_id=mark_id,
+            strategy_id=V2_STRATEGY_ID,
+            position_id=position.position_id,
+            market_ticker=position.market_ticker,
+            marked_at=now,
+            feature_snapshot_id=(
+                decision.feature_snapshot_id
+                if decision.market_ticker == position.market_ticker
+                else position.feature_snapshot_id
+            ),
+            strategy_config_version_id=position.strategy_config_version_id,
+            executable_bid=held_bid,
+            score=score,
+            edge_lower_bound_cents=edge,
+            boundary_state={
+                "boundary": _decimal_text(position.entry_boundary or position.boundary),
+                "distance_bps": _decimal_text(position.distance_bps_at_entry),
+            },
+            management_reason=decision.primary_reason,
+        )
+    )
+    pending = intents.get_pending_exit_intent(position_id=position.position_id)
+    if pending is not None:
+        source = (
+            decision
+            if pending.decision_id == decision.decision_id
+            else StrategyDecisionsRepository(session).get_decision_by_id(pending.decision_id)
+        )
+        event_type, _ = _resolve_v2_pending_intent(
+            session=session,
+            intents=intents,
+            positions=positions,
+            pending=pending,
+            resolved_at=now,
+            decision=source,
+        )
+        return event_type or STATE_V2_EXIT_PENDING
+
+    management_decision = decision
+    final_minute_warning: str | None = None
+    if decision.seconds_left is not None and decision.seconds_left <= 60:
+        latest_reference = ReferenceTicksRepository(session).get_latest_valid_tick(BRTI_SOURCE)
+        official_average = (
+            latest_reference.last_60s_windowed_average_15min
+            if latest_reference is not None
+            and latest_reference.final_minute_average_status == "valid"
+            else None
+        )
+        if official_average is None:
+            final_minute_warning = "v2_final_minute_average_unavailable"
+        else:
+            management_decision = replace(decision, brti_value=Decimal(official_average))
+    state, trigger, classification, warning = _v2_management_state(
+        position=position,
+        decision=management_decision,
+        held_bid=held_bid,
+    )
+    warning = warning or final_minute_warning
+    if warning is not None:
+        warning_event_key = _stable_hash(
+            {
+                "position": position.position_id,
+                "warning": warning,
+                "bucket": int(now.timestamp()),
+            }
+        )[:24]
+        positions.insert_event_if_absent(
+            StrategyDryRunEventInput(
+                event_id=f"v2-event-{warning_event_key}",
+                event_type=state,
+                occurred_at=now,
+                strategy_id=V2_STRATEGY_ID,
+                position_id=position.position_id,
+                decision_id=decision.decision_id,
+                market_ticker=position.market_ticker,
+                side_candidate=position.side_candidate,
+                reason=warning,
+                feature_snapshot_id=decision.feature_snapshot_id,
+                strategy_config_version_id=position.strategy_config_version_id,
+                code_commit_sha=decision.code_commit_sha,
+            )
+        )
+    if trigger is None or held_bid is None:
+        return state
+    attempt = intents.count_exit_attempts(position_id=position.position_id)
+    if attempt >= 3:
+        attempt_event_key = _stable_hash(
+            {"position": position.position_id, "attempt-limit": attempt}
+        )[:24]
+        positions.insert_event_if_absent(
+            StrategyDryRunEventInput(
+                event_id=f"v2-event-{attempt_event_key}",
+                event_type=STATE_V2_EXIT_ATTEMPT_LIMIT,
+                occurred_at=now,
+                strategy_id=V2_STRATEGY_ID,
+                position_id=position.position_id,
+                decision_id=decision.decision_id,
+                market_ticker=position.market_ticker,
+                side_candidate=position.side_candidate,
+                reason="v2_exit_attempt_limit_reached",
+                feature_snapshot_id=decision.feature_snapshot_id,
+                strategy_config_version_id=position.strategy_config_version_id,
+                code_commit_sha=decision.code_commit_sha,
+                measurements={"exit_attempts": attempt},
+            )
+        )
+        return STATE_V2_EXIT_ATTEMPT_LIMIT
+    effective_after = now + timedelta(
+        milliseconds=int(V2_PARAMETERS["decision_to_book_latency_ms"])
+    )
+    expires_at = effective_after + timedelta(seconds=int(V2_PARAMETERS["intent_expiry_seconds"]))
+    intent_id = (
+        f"v2-exit-{_stable_hash({'position': position.position_id, 'attempt': attempt + 1})[:24]}"
+    )
+    intent = intents.insert_intent_if_absent(
+        StrategyTradeIntentInput(
+            intent_id=intent_id,
+            strategy_id=V2_STRATEGY_ID,
+            decision_id=decision.decision_id,
+            position_id=position.position_id,
+            market_ticker=position.market_ticker,
+            side_candidate=position.side_candidate,
+            action="EXIT",
+            created_at=now,
+            effective_after=effective_after,
+            expires_at=expires_at,
+            intended_limit_price=max(held_bid - Decimal("0.01"), Decimal("0.01")),
+            quantity=Decimal(position.contract_count),
+            strategy_config_version_id=position.strategy_config_version_id,
+            feature_snapshot_id=decision.feature_snapshot_id,
+            architecture_version=V2_ARCHITECTURE_VERSION,
+            code_commit_sha=decision.code_commit_sha,
+            lifecycle_version=V2_LIFECYCLE_SCHEMA_VERSION,
+            trigger=trigger,
+            trigger_classification=classification,
+            attempt_number=attempt + 1,
+            decision_time_executable_bid=held_bid,
+            optimistic_price=held_bid,
+            optimistic_snapshot_id=getattr(orderbook, "id", None),
+            measurements={"management_state": state, "held_side": position.side_candidate},
+        )
+    )
+    positions.link_exit_intent(position_id=position.position_id, exit_intent_id=intent.intent_id)
+    exit_signal_event_key = _stable_hash({"intent": intent.intent_id, "event": "exit-signal"})[:24]
+    positions.insert_event_if_absent(
+        StrategyDryRunEventInput(
+            event_id=f"v2-event-{exit_signal_event_key}",
+            event_type=state,
+            occurred_at=now,
+            strategy_id=V2_STRATEGY_ID,
+            position_id=position.position_id,
+            decision_id=decision.decision_id,
+            market_ticker=position.market_ticker,
+            side_candidate=position.side_candidate,
+            price=held_bid,
+            contract_count=position.contract_count,
+            reason=trigger,
+            feature_snapshot_id=decision.feature_snapshot_id,
+            strategy_config_version_id=position.strategy_config_version_id,
+            code_commit_sha=decision.code_commit_sha,
+            measurements={"attempt_number": attempt + 1, "classification": classification},
+        )
+    )
+    return state
+
+
+def _v2_management_state(
+    *,
+    position: StrategyDryRunPosition,
+    decision: StrategyDecisionInput,
+    held_bid: Decimal | None,
+) -> tuple[str, str | None, str | None, str | None]:
+    features = (decision.measurements or {}).get("features")
+    features = features if isinstance(features, dict) else {}
+    score = _measurement_decimal(decision.measurements, "score", "total")
+    edge = _measurement_decimal(decision.measurements, "edge", "lower_bound_cents")
+    age = max(
+        0, int((_as_utc(decision.evaluated_at) - _as_utc(position.opened_at)).total_seconds())
+    )
+    entry = Decimal(position.open_price)
+    if decision.market_ticker != position.market_ticker or held_bid is None:
+        return STATE_V2_FORCE_EXIT, "v2_force_market_lifecycle_failure", "FORCE", None
+    if decision.seconds_left is not None and decision.seconds_left <= 20:
+        return STATE_V2_FORCE_EXIT, "v2_final_twenty_seconds", "FORCE", None
+    if held_bid <= entry - Decimal("0.12"):
+        return STATE_V2_EXIT_SIGNAL, "v2_hard_loss", "SIGNAL", None
+    if _held_side_adverse_cross(position, decision):
+        return STATE_V2_EXIT_SIGNAL, "v2_adverse_boundary_cross", "SIGNAL", None
+    if bool(features.get("reversal_beyond_origin")):
+        return STATE_V2_EXIT_SIGNAL, "v2_reversal_beyond_impulse_origin", "SIGNAL", None
+    weak = any(
+        value
+        for value in (
+            _decimal_or_none(features.get("return_5s")) is not None
+            and _decimal_or_none(features.get("return_5s")) <= 0,
+            _decimal_or_none(features.get("return_15s")) is not None
+            and _decimal_or_none(features.get("return_15s")) <= 0,
+            score is not None
+            and position.entry_score_threshold is not None
+            and score < Decimal(position.entry_score_threshold),
+            edge is not None and edge <= 0,
+        )
+    )
+    if held_bid <= entry - Decimal("0.08") and weak:
+        return STATE_V2_EXIT_SIGNAL, "v2_soft_loss_with_weakening", "SIGNAL", None
+    if _decimal_or_none(features.get("return_5s")) is not None and _decimal_or_none(
+        features.get("return_5s")
+    ) <= Decimal("-1"):
+        return STATE_V2_EXIT_SIGNAL, "v2_held_side_return_5s", "SIGNAL", None
+    if _decimal_or_none(features.get("return_15s")) is not None and _decimal_or_none(
+        features.get("return_15s")
+    ) <= Decimal("-1.5"):
+        return STATE_V2_EXIT_SIGNAL, "v2_held_side_return_15s", "SIGNAL", None
+    if bool(features.get("persistent_adverse_microstructure")):
+        return STATE_V2_EXIT_SIGNAL, "v2_persistent_adverse_microstructure", "SIGNAL", None
+    if edge is not None and edge <= 0:
+        return STATE_V2_EXIT_SIGNAL, "v2_edge_lower_bound_nonpositive", "SIGNAL", None
+    residual = _decimal_or_none(features.get("response_residual_cents"))
+    if residual is not None and residual <= Decimal("0.5") and held_bid > entry:
+        return STATE_V2_EXIT_SIGNAL, "v2_underreaction_resolved", "SIGNAL", None
+    if held_bid >= entry + Decimal("0.10"):
+        return STATE_V2_EXIT_SIGNAL, "v2_profit_target", "SIGNAL", None
+    if held_bid >= Decimal("0.88"):
+        return STATE_V2_EXIT_SIGNAL, "v2_high_bid_target", "SIGNAL", None
+    if (
+        position.entry_time_stop_seconds is not None
+        and age >= position.entry_time_stop_seconds
+        and (
+            (
+                score is not None
+                and position.entry_score_threshold is not None
+                and score < position.entry_score_threshold
+            )
+            or (edge is not None and edge <= 0)
+        )
+    ):
+        return STATE_V2_EXIT_SIGNAL, "v2_tier_time_stop", "SIGNAL", None
+    if position.entry_max_hold_seconds is not None and age >= position.entry_max_hold_seconds:
+        return STATE_V2_EXIT_SIGNAL, "v2_absolute_max_hold", "SIGNAL", None
+    return STATE_V2_MANAGE_POSITION, None, None, None
+
+
+def _held_side_adverse_cross(
+    position: StrategyDryRunPosition, decision: StrategyDecisionInput
+) -> bool:
+    boundary = position.entry_boundary or position.boundary
+    if boundary is None or decision.brti_value is None:
+        return False
+    crossed = (
+        Decimal(decision.brti_value) < Decimal(boundary)
+        if position.side_candidate == "YES"
+        else Decimal(decision.brti_value) > Decimal(boundary)
+    )
+    if not crossed or Decimal(boundary) == 0:
+        return False
+    return abs(Decimal(decision.brti_value) - Decimal(boundary)) / abs(Decimal(boundary)) * Decimal(
+        "10000"
+    ) >= Decimal("1.5")
+
+
+def _persist_v2_outcome(
+    *,
+    intents: StrategyV2Repository,
+    position: StrategyDryRunPosition,
+    exit_intent: StrategyTradeIntent,
+    exit_decision: StrategyDecisionInput | StrategyDecision | None,
+) -> None:
+    if (
+        position.closed_at is None
+        or position.close_price is None
+        or position.realized_pnl_cents is None
+    ):
+        return
+    marks = intents.list_marks_for_position(position_id=position.position_id)
+    marks = [mark for mark in marks if mark.executable_bid is not None]
+    entry = Decimal(position.open_price)
+    quantity = Decimal(position.contract_count)
+    excursions = [
+        ((Decimal(mark.executable_bid) - entry) * Decimal("100") * quantity, mark.marked_at)
+        for mark in marks
+    ]
+    if excursions:
+        mfe, mfe_at = max(excursions, key=lambda item: item[0])
+        mae, mae_at = min(excursions, key=lambda item: item[0])
+    else:
+        mfe = mae = Decimal("0")
+        mfe_at = mae_at = position.closed_at
+    entry_intent = intents.get_intent(position.entry_intent_id or "")
+    intents.insert_outcome_if_absent(
+        StrategyPositionOutcomeInput(
+            outcome_id=f"v2-outcome-{_stable_hash({'position': position.position_id})[:24]}",
+            position_id=position.position_id,
+            strategy_id=position.strategy_id,
+            market_ticker=position.market_ticker,
+            held_side=position.side_candidate,
+            lifecycle_version=position.lifecycle_version or V2_LIFECYCLE_SCHEMA_VERSION,
+            architecture_version=exit_intent.architecture_version or V2_ARCHITECTURE_VERSION,
+            strategy_config_version_id=position.strategy_config_version_id,
+            code_commit_sha=exit_intent.code_commit_sha,
+            entry_decision_id=position.decision_id,
+            exit_decision_id=exit_intent.decision_id,
+            entry_intent_id=position.entry_intent_id,
+            exit_intent_id=exit_intent.intent_id,
+            entry_feature_snapshot_id=position.feature_snapshot_id,
+            exit_feature_snapshot_id=exit_intent.feature_snapshot_id,
+            opened_at=position.opened_at,
+            closed_at=position.closed_at,
+            holding_duration_ms=max(
+                0,
+                int(
+                    (_as_utc(position.closed_at) - _as_utc(position.opened_at)).total_seconds()
+                    * 1000
+                ),
+            ),
+            quantity=quantity,
+            entry_price=entry,
+            exit_price=Decimal(position.close_price),
+            realized_pnl_cents=Decimal(position.realized_pnl_cents),
+            mfe_cents=mfe,
+            mae_cents=mae,
+            time_to_mfe_ms=max(
+                0, int((_as_utc(mfe_at) - _as_utc(position.opened_at)).total_seconds() * 1000)
+            ),
+            time_to_mae_ms=max(
+                0, int((_as_utc(mae_at) - _as_utc(position.opened_at)).total_seconds() * 1000)
+            ),
+            optimistic_entry_delta=(
+                Decimal(entry_intent.optimistic_price) - entry
+                if entry_intent is not None and entry_intent.optimistic_price is not None
+                else None
+            ),
+            decision_to_filled_exit_delta=(
+                Decimal(position.close_price) - Decimal(exit_intent.decision_time_executable_bid)
+                if exit_intent.decision_time_executable_bid is not None
+                else None
+            ),
+            close_trigger=exit_intent.trigger,
+            close_reason=exit_intent.resolution_reason,
+            measurements={
+                "exit_decision_state": getattr(exit_decision, "decision_state", None),
+                "exit_fill_snapshot_id": exit_intent.fill_snapshot_id,
+            },
+        )
+    )
 
 
 def _apply_v2_hypothetical_lifecycle(
@@ -4570,6 +5179,7 @@ def _apply_v2_hypothetical_lifecycle(
     pending = intents.get_pending_intent(
         strategy_id=V2_STRATEGY_ID,
         market_ticker=market_ticker,
+        action="ENTRY",
     )
 
     if pending is not None:
@@ -4629,6 +5239,9 @@ def _apply_v2_hypothetical_lifecycle(
                     quantity=Decimal("1"),
                     strategy_config_version_id=decision.strategy_config_version_id,
                     feature_snapshot_id=decision.feature_snapshot_id,
+                    architecture_version=V2_ARCHITECTURE_VERSION,
+                    code_commit_sha=decision.code_commit_sha,
+                    lifecycle_version=V2_LIFECYCLE_SCHEMA_VERSION,
                     optimistic_price=_decimal_or_none(
                         (decision.measurements or {}).get("features", {}).get("desired_ask")
                         if isinstance((decision.measurements or {}).get("features"), dict)
@@ -4645,52 +5258,16 @@ def _apply_v2_hypothetical_lifecycle(
             )
             latest_event_type = "ENTRY_INTENT_PENDING"
 
-    open_position = positions.get_latest_open_position(strategy_id=V2_STRATEGY_ID)
-    if open_position is not None and open_position.market_ticker == market_ticker:
-        mark_orderbook = OrderbookRepository(session).get_latest_snapshot(
-            open_position.market_ticker
+    for open_position in positions.list_open_positions(strategy_id=V2_STRATEGY_ID):
+        lifecycle_event = _apply_v2_position_management(
+            config=config,
+            session=session,
+            intents=intents,
+            positions=positions,
+            position=open_position,
+            decision=decision,
         )
-        desired_bid, _, _ = (
-            _desired_book(mark_orderbook, open_position.side_candidate)
-            if mark_orderbook is not None
-            else (None, None, None)
-        )
-        score = _decimal_or_none(
-            (decision.measurements or {}).get("score", {}).get("total")
-            if isinstance((decision.measurements or {}).get("score"), dict)
-            else None
-        )
-        edge = _decimal_or_none(
-            (decision.measurements or {}).get("edge", {}).get("lower_bound_cents")
-            if isinstance((decision.measurements or {}).get("edge"), dict)
-            else None
-        )
-        mark_key = _stable_hash(
-            {
-                "position": open_position.position_id,
-                "bucket": int(now.timestamp()),
-            }
-        )[:24]
-        mark_id = f"v2-mark-{mark_key}"
-        intents.insert_mark_if_absent(
-            StrategyPositionMarkInput(
-                mark_id=mark_id,
-                strategy_id=V2_STRATEGY_ID,
-                position_id=open_position.position_id,
-                market_ticker=open_position.market_ticker,
-                marked_at=now,
-                feature_snapshot_id=decision.feature_snapshot_id,
-                strategy_config_version_id=decision.strategy_config_version_id,
-                executable_bid=desired_bid,
-                score=score,
-                edge_lower_bound_cents=edge,
-                boundary_state={
-                    "boundary": _decimal_text(decision.boundary),
-                    "distance_bps": _decimal_text(decision.distance_bps),
-                },
-                management_reason=decision.primary_reason,
-            )
-        )
+        latest_event_type = lifecycle_event or latest_event_type
         latest_position_id = open_position.position_id
 
     return DryRunLedgerResult(
@@ -4821,6 +5398,27 @@ def _measurement_text(measurements: JsonPayload | None, key: str) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _measurement_decimal(
+    measurements: JsonPayload | None, section: str, key: str
+) -> Decimal | None:
+    if not isinstance(measurements, dict):
+        return None
+    value = measurements.get(section)
+    if isinstance(value, dict):
+        return _decimal_or_none(value.get(key))
+    return None
+
+
+def _v2_tier_seconds(
+    decision: StrategyDecisionInput | StrategyDecision | None, field: str
+) -> int | None:
+    tier = _measurement_text(decision.measurements, "timing_tier") if decision else None
+    if tier not in V2_PARAMETERS["tiers"]:
+        return None
+    value = V2_PARAMETERS["tiers"][tier].get(field)
+    return int(value) if value is not None else None
 
 
 def _realized_pnl_cents(

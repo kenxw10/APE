@@ -84,6 +84,7 @@ from ape.strategy.observer import (
     build_v2_feature_records,
     build_v2_intent_records,
     build_v2_mark_records,
+    build_v2_outcome_records,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -303,8 +304,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     def strategy_dry_run_intents_recent(
         limit: int = Query(default=100, ge=1, le=500),
         strategy_id: str = "btc15_momentum_v2",
+        action: str | None = Query(default=None, pattern="^(ENTRY|EXIT)$"),
     ) -> dict[str, Any]:
-        return build_v2_intent_records(settings, limit=limit, strategy_id=strategy_id)
+        return build_v2_intent_records(
+            settings, limit=limit, strategy_id=strategy_id, action=action
+        )
 
     @app.get("/strategy/dry-run/position-marks/recent")
     def strategy_dry_run_position_marks_recent(
@@ -312,6 +316,13 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         strategy_id: str = "btc15_momentum_v2",
     ) -> dict[str, Any]:
         return build_v2_mark_records(settings, limit=limit, strategy_id=strategy_id)
+
+    @app.get("/strategy/dry-run/outcomes/recent")
+    def strategy_dry_run_outcomes_recent(
+        limit: int = Query(default=100, ge=1, le=500),
+        strategy_id: str = "btc15_momentum_v2",
+    ) -> dict[str, Any]:
+        return build_v2_outcome_records(settings, limit=limit, strategy_id=strategy_id)
 
     @app.get("/storage/status", response_model=StorageStatusResponse)
     def storage_status() -> StorageStatusResponse:

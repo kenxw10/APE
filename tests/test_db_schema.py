@@ -36,6 +36,7 @@ def test_schema_can_be_created_in_local_sqlite_database(tmp_path) -> None:
             "strategy_config_versions",
             "strategy_trade_intents",
             "strategy_position_marks",
+            "strategy_position_outcomes",
             "worker_heartbeats",
             "storage_retention_runs",
         }
@@ -46,7 +47,7 @@ def test_schema_can_be_created_in_local_sqlite_database(tmp_path) -> None:
                 select(SchemaMigration).where(SchemaMigration.version == CURRENT_SCHEMA_VERSION)
             )
             assert migration is not None
-            assert session.scalar(select(func.count()).select_from(SchemaMigration)) == 8
+            assert session.scalar(select(func.count()).select_from(SchemaMigration)) == 9
 
         orderbook_columns = {
             column["name"] for column in inspector.get_columns("orderbook_snapshots")
@@ -62,7 +63,9 @@ def test_schema_can_be_created_in_local_sqlite_database(tmp_path) -> None:
             "no_ask_count",
             "ladder_schema_version",
             "yes_bid_ladder",
+            "yes_ask_ladder",
             "no_bid_ladder",
+            "no_ask_ladder",
         }
         assert "trade_count" in trade_columns
         assert "strategy_id" in event_columns

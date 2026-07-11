@@ -9,7 +9,7 @@ from ape.config import ConfigError, load_config
 from ape.db.models import Base, SchemaMigration, utc_now
 from ape.db.session import DatabaseConfigError, create_engine_from_config
 
-CURRENT_SCHEMA_VERSION = "0008_momentum_v2_feature_architecture"
+CURRENT_SCHEMA_VERSION = "0009_momentum_v2_scope_completion"
 SCHEMA_VERSIONS = (
     "0001_initial_schema",
     "0002_fixed_point_ws_quantities",
@@ -18,6 +18,7 @@ SCHEMA_VERSIONS = (
     "0005_strategy_dry_run_event_strategy_id",
     "0006_kalshi_ws_protocol_events",
     "0007_strategy_decision_strategy_id",
+    "0008_momentum_v2_feature_architecture",
     CURRENT_SCHEMA_VERSION,
 )
 POSTGRES_MIGRATION_LOCK_ID = 4_150_002
@@ -34,6 +35,7 @@ def run_migrations(engine: Engine) -> None:
         _ensure_strategy_dry_run_event_strategy_id(connection)
         _ensure_strategy_decision_strategy_id(connection)
         _ensure_momentum_v2_columns(connection)
+        _ensure_momentum_v2_scope_completion_columns(connection)
         _record_schema_versions(connection)
 
 
@@ -225,6 +227,57 @@ def _ensure_momentum_v2_columns(connection: Connection) -> None:
         table_name="strategy_feature_snapshots",
         index_name="ix_strategy_feature_snapshots_market_evaluated",
         column_names=("market_ticker", "evaluated_at"),
+    )
+
+
+def _ensure_momentum_v2_scope_completion_columns(connection: Connection) -> None:
+    columns = {
+        "orderbook_snapshots": {
+            "yes_ask_ladder": "JSON",
+            "no_ask_ladder": "JSON",
+        },
+        "strategy_dry_run_positions": {
+            "entry_intent_id": "VARCHAR(128)",
+            "exit_intent_id": "VARCHAR(128)",
+            "lifecycle_version": "VARCHAR(128)",
+            "entry_timing_tier": "VARCHAR(64)",
+            "entry_score_threshold": "NUMERIC(24, 8)",
+            "entry_time_stop_seconds": "INTEGER",
+            "entry_max_hold_seconds": "INTEGER",
+            "entry_score": "NUMERIC(24, 8)",
+            "entry_edge_lower_bound_cents": "NUMERIC(24, 8)",
+            "entry_response_residual_cents": "NUMERIC(24, 8)",
+            "entry_boundary": "NUMERIC(24, 8)",
+            "entry_standardized_distance": "NUMERIC(24, 8)",
+        },
+        "strategy_trade_intents": {
+            "architecture_version": "VARCHAR(128)",
+            "code_commit_sha": "VARCHAR(128)",
+            "lifecycle_version": "VARCHAR(128)",
+            "trigger": "VARCHAR(128)",
+            "trigger_classification": "VARCHAR(32)",
+            "attempt_number": "INTEGER",
+            "decision_time_executable_bid": "NUMERIC(24, 8)",
+            "fill_timestamp": "TIMESTAMP",
+        },
+    }
+    inspector = inspect(connection)
+    table_names = set(inspector.get_table_names())
+    for table_name, expected in columns.items():
+        if table_name not in table_names:
+            continue
+        existing = {column["name"] for column in inspector.get_columns(table_name)}
+        for column_name, type_sql in expected.items():
+            if column_name not in existing:
+                connection.execute(
+                    text(_add_column_statement(connection, table_name, column_name, type_sql))
+                )
+
+    _ensure_composite_index(
+        connection,
+        table_name="strategy_trade_intents",
+        index_name="ix_strategy_trade_intents_position_status",
+        column_names=("position_id", "status"),
     )
     _ensure_composite_index(
         connection,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -51,6 +52,7 @@ from ape.strategy.observer import (
     build_strategy_dry_run_status,
     build_strategy_variants_comparison,
     evaluate_strategy_observer,
+    evaluate_strategy_variants,
     strategy_variant_configs,
 )
 from ape.worker.services import (
@@ -483,6 +485,156 @@ def test_v2_pending_intent_resolves_without_current_candidate_side(session) -> N
     assert position.code_commit_sha == "source-commit"
     assert event is not None
     assert event.occurred_at == fill_time.replace(tzinfo=None)
+
+
+def test_variants_receive_one_shared_context_per_iteration(session, monkeypatch) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config(
+        {
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+            "STRATEGY_CHALLENGER_ENABLED": "true",
+            "STRATEGY_V2_ENABLED": "true",
+        }
+    )
+    _seed_observable_context(session, now=now)
+    original_loader = observer_module.load_strategy_evaluation_context
+    load_count = 0
+    contexts = []
+
+    def load_once(**kwargs):
+        nonlocal load_count
+        load_count += 1
+        return original_loader(**kwargs)
+
+    def capture_context(*, config, safety, session, now, shared_context=None):
+        del safety, session
+        contexts.append(shared_context)
+        return StrategyDecisionInput(
+            decision_id=f"shared-{config.strategy_id}",
+            evaluated_at=now,
+            decision_state=STATE_OBSERVE_ONLY_MARKET,
+            primary_reason="observer_decision_ledger_only",
+            app_mode="DRY_RUN",
+            strategy_id=config.strategy_id,
+            blockers=[],
+            warnings=[],
+        )
+
+    monkeypatch.setattr(observer_module, "load_strategy_evaluation_context", load_once)
+    monkeypatch.setattr(observer_module, "evaluate_strategy_observer", capture_context)
+
+    results = evaluate_strategy_variants(
+        config=config,
+        safety=assess_startup_safety(config),
+        session=session,
+        now=now,
+    )
+
+    assert load_count == 1
+    assert len(contexts) == 2
+    assert contexts[0] is contexts[1]
+    assert [variant.strategy_id for variant, _ in results] == [
+        CONTROL_STRATEGY_ID,
+        CHALLENGER_STRATEGY_ID,
+        V2_STRATEGY_ID,
+    ]
+
+
+def test_v2_causal_exit_fill_closes_once_and_persists_outcome(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    market_ticker = "KXBTC15M-V2-EXIT"
+    positions = StrategyDryRunRepository(session)
+    positions.insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="v2-open-exit",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=market_ticker,
+            decision_id="v2-entry",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now - timedelta(seconds=10),
+            open_price=Decimal("0.63"),
+            contract_count=1,
+            entry_reason="v2_causal_hypothetical_fill",
+            status="OPEN",
+            lifecycle_version="momentum_v2_lifecycle_v1",
+            entry_time_stop_seconds=30,
+            entry_max_hold_seconds=60,
+        )
+    )
+    OrderbookRepository(session).insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker=market_ticker,
+            received_at=now,
+            yes_bid=Decimal("0.74"),
+            yes_ask=Decimal("0.75"),
+            yes_bid_count=Decimal("1"),
+            yes_ask_count=Decimal("1"),
+            no_bid=Decimal("0.25"),
+            no_ask=Decimal("0.26"),
+            no_bid_count=Decimal("1"),
+            no_ask_count=Decimal("1"),
+            book_status="ok",
+        )
+    )
+    decision = StrategyDecisionInput(
+        decision_id="v2-profit-signal",
+        evaluated_at=now,
+        decision_state="V2_HARD_GATE_BLOCKED",
+        primary_reason="v2_test",
+        app_mode="DRY_RUN",
+        strategy_id=V2_STRATEGY_ID,
+        market_ticker=market_ticker,
+        candidate_side="NO",
+        boundary=Decimal("62000"),
+        brti_value=Decimal("62010"),
+        seconds_left=300,
+        measurements={
+            "features": {"return_5s": "0", "return_15s": "0"},
+            "score": {"total": "80"},
+            "edge": {"lower_bound_cents": "2"},
+        },
+    )
+    observer_module._apply_v2_hypothetical_lifecycle(
+        config=load_config({}), session=session, decision=decision
+    )
+    intents = StrategyV2Repository(session)
+    exit_intent = intents.get_pending_exit_intent(position_id="v2-open-exit")
+    assert exit_intent is not None
+    assert exit_intent.action == "EXIT"
+    assert exit_intent.status == "PENDING"
+
+    OrderbookRepository(session).insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker=market_ticker,
+            received_at=now + timedelta(seconds=1),
+            yes_bid=Decimal("0.74"),
+            yes_ask=Decimal("0.75"),
+            yes_bid_count=Decimal("1"),
+            yes_ask_count=Decimal("1"),
+            no_bid=Decimal("0.25"),
+            no_ask=Decimal("0.26"),
+            no_bid_count=Decimal("1"),
+            no_ask_count=Decimal("1"),
+            book_status="ok",
+        )
+    )
+    observer_module._apply_v2_hypothetical_lifecycle(
+        config=load_config({}),
+        session=session,
+        decision=replace(decision, evaluated_at=now + timedelta(seconds=2)),
+    )
+
+    position = positions.get_position_by_id("v2-open-exit")
+    assert position is not None
+    assert position.status == "CLOSED"
+    assert position.close_price == Decimal("0.74")
+    assert position.realized_pnl_cents == Decimal("11")
+    outcomes = intents.list_recent_outcomes(strategy_id=V2_STRATEGY_ID, limit=10)
+    assert len(outcomes) == 1
+    assert outcomes[0].exit_intent_id == exit_intent.intent_id
 
 
 def test_v2_intent_uses_recorded_timing_parameters(session, monkeypatch) -> None:

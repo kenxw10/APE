@@ -40,6 +40,8 @@ PR 9i adds an opt-in dry-run challenger beside the existing control strategy. Th
 
 PR 10 adds `btc15_momentum_v2`, disabled by default. Every strategy iteration now persists one canonical `momentum_v2_features_v1` snapshot plus immutable built-in configuration attribution. V2 uses candidate-oriented impulse/path, volatility-normalized boundary, contract-response, compact top-five depth, score, and heuristic-edge evidence. It creates database-only hypothetical entry intents and resolves them only against a later persisted orderbook after a 500 ms simulated latency; it never places, cancels, or reconciles a real order.
 
+PR 10a completes the DRY_RUN-only V2 evidence lifecycle. Post-10a snapshots use `kalshi_executable_ladders_v2`, V2 records `momentum_v2_features_v2` features from explicit YES/NO bid and ask ladders, and hypothetical exits are causal intents that close only after a later executable book fill. Closed positions write immutable outcome attribution through read-only endpoints; no execution capability is added.
+
 ## Safety Defaults
 
 The default configuration is intentionally non-trading:

@@ -143,7 +143,9 @@ class OrderbookSnapshot(Base):
     no_ask_count: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
     ladder_schema_version: Mapped[str | None] = mapped_column(String(64))
     yes_bid_ladder: Mapped[Any | None] = mapped_column(JSON)
+    yes_ask_ladder: Mapped[Any | None] = mapped_column(JSON)
     no_bid_ladder: Mapped[Any | None] = mapped_column(JSON)
+    no_ask_ladder: Mapped[Any | None] = mapped_column(JSON)
     book_status: Mapped[str | None] = mapped_column(String(64))
     raw_payload_hash: Mapped[str | None] = mapped_column(String(128))
     raw_payload: Mapped[Any | None] = mapped_column(JSON)
@@ -321,6 +323,18 @@ class StrategyDryRunPosition(Base):
     feature_snapshot_id: Mapped[str | None] = mapped_column(String(128), index=True)
     strategy_config_version_id: Mapped[str | None] = mapped_column(String(128), index=True)
     code_commit_sha: Mapped[str | None] = mapped_column(String(128))
+    entry_intent_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    exit_intent_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    lifecycle_version: Mapped[str | None] = mapped_column(String(128))
+    entry_timing_tier: Mapped[str | None] = mapped_column(String(64))
+    entry_score_threshold: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    entry_time_stop_seconds: Mapped[int | None] = mapped_column(Integer)
+    entry_max_hold_seconds: Mapped[int | None] = mapped_column(Integer)
+    entry_score: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    entry_edge_lower_bound_cents: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    entry_response_residual_cents: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    entry_boundary: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    entry_standardized_distance: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
     measurements: Mapped[Any | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -456,11 +470,19 @@ class StrategyTradeIntent(Base):
     quantity: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
     optimistic_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
     optimistic_snapshot_id: Mapped[int | None] = mapped_column(Integer)
+    architecture_version: Mapped[str | None] = mapped_column(String(128))
+    code_commit_sha: Mapped[str | None] = mapped_column(String(128))
+    lifecycle_version: Mapped[str | None] = mapped_column(String(128))
+    trigger: Mapped[str | None] = mapped_column(String(128))
+    trigger_classification: Mapped[str | None] = mapped_column(String(32))
+    attempt_number: Mapped[int | None] = mapped_column(Integer)
+    decision_time_executable_bid: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
     status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     fill_snapshot_id: Mapped[int | None] = mapped_column(Integer)
     simulated_fill_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
     simulated_fill_size: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    fill_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolution_reason: Mapped[str | None] = mapped_column(Text)
     measurements: Mapped[Any | None] = mapped_column(JSON)
 
@@ -486,6 +508,51 @@ class StrategyPositionMark(Base):
     boundary_state: Mapped[Any | None] = mapped_column(JSON)
     management_reason: Mapped[str | None] = mapped_column(Text)
     measurements: Mapped[Any | None] = mapped_column(JSON)
+
+
+class StrategyPositionOutcome(Base):
+    __tablename__ = "strategy_position_outcomes"
+    __table_args__ = (
+        UniqueConstraint("outcome_id", name="uq_strategy_position_outcomes_outcome_id"),
+        UniqueConstraint("position_id", name="uq_strategy_position_outcomes_position_id"),
+        Index("ix_strategy_position_outcomes_strategy_closed", "strategy_id", "closed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    outcome_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    position_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    market_ticker: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    held_side: Mapped[str] = mapped_column(String(32), nullable=False)
+    lifecycle_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    architecture_version: Mapped[str | None] = mapped_column(String(128))
+    strategy_config_version_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    code_commit_sha: Mapped[str | None] = mapped_column(String(128))
+    entry_decision_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    exit_decision_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    entry_intent_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    exit_intent_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    entry_feature_snapshot_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    exit_feature_snapshot_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    closed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    holding_duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    entry_price: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    exit_price: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    realized_pnl_cents: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    mfe_cents: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    mae_cents: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    time_to_mfe_ms: Mapped[int | None] = mapped_column(Integer)
+    time_to_mae_ms: Mapped[int | None] = mapped_column(Integer)
+    optimistic_entry_delta: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    decision_to_filled_exit_delta: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    close_trigger: Mapped[str | None] = mapped_column(String(128))
+    close_reason: Mapped[str | None] = mapped_column(Text)
+    measurements: Mapped[Any | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
 
 
 class WorkerHeartbeat(Base):

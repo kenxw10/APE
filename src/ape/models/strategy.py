@@ -139,6 +139,13 @@ class StrategyDryRunPositionResponse(BaseModel):
     feature_snapshot_id: str | None
     strategy_config_version_id: str | None
     code_commit_sha: str | None
+    entry_intent_id: str | None
+    exit_intent_id: str | None
+    lifecycle_version: str | None
+    entry_timing_tier: str | None
+    entry_score_threshold: Decimal | None
+    entry_time_stop_seconds: int | None
+    entry_max_hold_seconds: int | None
     measurements_summary: JsonPayload | None
 
 
