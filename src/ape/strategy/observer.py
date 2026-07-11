@@ -4571,13 +4571,18 @@ def _apply_v2_hypothetical_lifecycle(
     )
 
     if pending is not None:
+        source_decision = (
+            decision
+            if pending.decision_id == decision.decision_id
+            else decisions.get_decision_by_id(pending.decision_id)
+        )
         event_type, position_id = _resolve_v2_pending_intent(
             session=session,
             intents=intents,
             positions=positions,
             pending=pending,
             resolved_at=now,
-            decision=decision,
+            decision=source_decision,
         )
         if event_type is not None:
             latest_event_type = event_type

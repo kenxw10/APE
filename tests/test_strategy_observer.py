@@ -399,6 +399,22 @@ def test_v2_pending_intent_resolves_without_current_candidate_side(session) -> N
     fill_time = now - timedelta(milliseconds=500)
     market_ticker = "KXBTC15M-ACTIVE"
     intents = StrategyV2Repository(session)
+    StrategyDecisionsRepository(session).insert_decision(
+        StrategyDecisionInput(
+            decision_id="v2-entry-decision",
+            evaluated_at=now - timedelta(seconds=2),
+            decision_state=STATE_V2_ENTRY_SIGNAL,
+            primary_reason="v2_entry_signal",
+            app_mode="DRY_RUN",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=market_ticker,
+            candidate_side="YES",
+            boundary=Decimal("62000"),
+            brti_value=Decimal("62010"),
+            distance_bps=Decimal("1.61"),
+            code_commit_sha="source-commit",
+        )
+    )
     intents.insert_intent_if_absent(
         StrategyTradeIntentInput(
             intent_id="v2-pending-no-current-candidate",
@@ -440,6 +456,10 @@ def test_v2_pending_intent_resolves_without_current_candidate_side(session) -> N
             strategy_id=V2_STRATEGY_ID,
             market_ticker=market_ticker,
             candidate_side=None,
+            boundary=Decimal("63000"),
+            brti_value=Decimal("63010"),
+            distance_bps=Decimal("1.59"),
+            code_commit_sha="current-commit",
         ),
     )
 
@@ -456,6 +476,10 @@ def test_v2_pending_intent_resolves_without_current_candidate_side(session) -> N
     assert position is not None
     assert intent.position_id == position.position_id
     assert position.opened_at == fill_time.replace(tzinfo=None)
+    assert position.boundary == Decimal("62000")
+    assert position.brti_at_entry == Decimal("62010")
+    assert position.distance_bps_at_entry == Decimal("1.61")
+    assert position.code_commit_sha == "source-commit"
     assert event is not None
     assert event.occurred_at == fill_time.replace(tzinfo=None)
 
