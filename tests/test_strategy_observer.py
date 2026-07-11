@@ -30,7 +30,11 @@ from ape.repositories.strategy_v2 import StrategyV2Repository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import assess_startup_safety
 from ape.strategy import observer as observer_module
-from ape.strategy.momentum_v2 import STATE_V2_ENTRY_SIGNAL, V2_STRATEGY_ID
+from ape.strategy.momentum_v2 import (
+    STATE_V2_ENTRY_SIGNAL,
+    STATE_V2_HARD_GATE_BLOCKED,
+    V2_STRATEGY_ID,
+)
 from ape.strategy.observer import (
     CHALLENGER_STRATEGY_ID,
     CONTROL_STRATEGY_ID,
@@ -97,6 +101,38 @@ def test_strategy_observer_evaluates_observer_only_market(session) -> None:
     assert decision.measurements["desired_side_ask"] == "0.62"
     assert decision.measurements["config"]["strategy_max_spread_cents"] == 4
     assert "ENTER" not in decision.decision_state
+
+
+def test_v2_boundary_cross_decision_does_not_create_an_entry_intent(session) -> None:
+    now = datetime(2026, 7, 11, 12, 10, tzinfo=UTC)
+
+    observer_module._apply_v2_hypothetical_lifecycle(
+        config=load_config({}),
+        session=session,
+        decision=StrategyDecisionInput(
+            decision_id="v2-boundary-cross-research-only",
+            evaluated_at=now,
+            decision_state=STATE_V2_HARD_GATE_BLOCKED,
+            primary_reason="v2_candidate_mode_not_enabled",
+            app_mode="DRY_RUN",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker="KXBTC15M-BOUNDARY",
+            candidate_side="YES",
+            measurements={
+                "candidate_mode": "BOUNDARY_CROSS_HOLD",
+                "intended_entry_price": "0.62",
+            },
+        ),
+    )
+
+    assert (
+        StrategyV2Repository(session).list_recent_intents(
+            strategy_id=V2_STRATEGY_ID,
+            limit=10,
+            action="ENTRY",
+        )
+        == []
+    )
 
 
 def test_strategy_blocks_on_market_protocol_readiness_failures() -> None:
@@ -657,7 +693,7 @@ def test_shared_context_trims_orderbook_history_to_variant_lookback(session, mon
     )
 
 
-def test_v2_causal_exit_fill_closes_once_and_persists_outcome(session) -> None:
+def test_v2_causal_exit_fill_uses_the_first_qualifying_book_and_persists_outcome(session) -> None:
     now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
     market_ticker = "KXBTC15M-V2-EXIT"
     positions = StrategyDryRunRepository(session)
@@ -674,7 +710,7 @@ def test_v2_causal_exit_fill_closes_once_and_persists_outcome(session) -> None:
             contract_count=1,
             entry_reason="v2_causal_hypothetical_fill",
             status="OPEN",
-            lifecycle_version="momentum_v2_lifecycle_v1",
+            lifecycle_version="momentum_v2_lifecycle_v2",
             entry_time_stop_seconds=30,
             entry_max_hold_seconds=60,
         )
@@ -727,8 +763,8 @@ def test_v2_causal_exit_fill_closes_once_and_persists_outcome(session) -> None:
         OrderbookSnapshotInput(
             market_ticker=market_ticker,
             received_at=now + timedelta(milliseconds=750),
-            yes_bid=Decimal("0.72"),
-            yes_ask=Decimal("0.73"),
+            yes_bid=Decimal("0.74"),
+            yes_ask=Decimal("0.75"),
             yes_bid_count=Decimal("1"),
             yes_ask_count=Decimal("1"),
             no_bid=Decimal("0.27"),
@@ -777,8 +813,8 @@ def test_v2_causal_exit_fill_closes_once_and_persists_outcome(session) -> None:
     position = positions.get_position_by_id("v2-open-exit")
     assert position is not None
     assert position.status == "CLOSED"
-    assert position.close_price == Decimal("0.75")
-    assert position.realized_pnl_cents == Decimal("12")
+    assert position.close_price == Decimal("0.74")
+    assert position.realized_pnl_cents == Decimal("11")
     resolved_exit_intent = next(
         intent
         for intent in intents.list_recent_intents(
@@ -787,14 +823,318 @@ def test_v2_causal_exit_fill_closes_once_and_persists_outcome(session) -> None:
         )
         if intent.intent_id == exit_intent.intent_id
     )
-    assert resolved_exit_intent.fill_snapshot_id == second_future_book.id
-    assert resolved_exit_intent.fill_snapshot_id != first_future_book.id
+    assert resolved_exit_intent.fill_snapshot_id == first_future_book.id
+    assert resolved_exit_intent.fill_snapshot_id != second_future_book.id
+    assert resolved_exit_intent.fill_timestamp == first_future_book.received_at
+    assert resolved_exit_intent.simulated_fill_price == Decimal("0.74")
+    assert resolved_exit_intent.simulated_fill_size == Decimal("1")
     outcomes = intents.list_recent_outcomes(strategy_id=V2_STRATEGY_ID, limit=10)
     assert len(outcomes) == 1
     assert outcomes[0].exit_intent_id == exit_intent.intent_id
-    assert outcomes[0].mfe_cents == Decimal("12")
+    assert outcomes[0].mfe_cents == Decimal("11")
     assert outcomes[0].mae_cents == Decimal("0")
-    assert outcomes[0].time_to_mfe_ms == 11000
+    assert outcomes[0].time_to_mfe_ms == 10000
+
+
+def test_v2_exit_price_failure_does_not_use_later_qualifying_book(session) -> None:
+    now = datetime(2026, 7, 11, 12, 10, tzinfo=UTC)
+    market_ticker = "KXBTC15M-EXIT-FIRST-PRICE"
+    positions = StrategyDryRunRepository(session)
+    positions.insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="v2-first-price-open",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=market_ticker,
+            decision_id="v2-first-price-entry",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now - timedelta(seconds=10),
+            open_price=Decimal("0.70"),
+            contract_count=1,
+            entry_reason="v2_causal_hypothetical_fill",
+            status="OPEN",
+        )
+    )
+    intents = StrategyV2Repository(session)
+    pending = intents.insert_intent_if_absent(
+        StrategyTradeIntentInput(
+            intent_id="v2-first-price-exit",
+            strategy_id=V2_STRATEGY_ID,
+            decision_id="v2-first-price-decision",
+            position_id="v2-first-price-open",
+            market_ticker=market_ticker,
+            side_candidate="YES",
+            action="EXIT",
+            created_at=now - timedelta(seconds=4),
+            effective_after=now - timedelta(seconds=3),
+            expires_at=now - timedelta(seconds=1),
+            intended_limit_price=Decimal("0.72"),
+            quantity=Decimal("1"),
+        )
+    )
+    orderbooks = OrderbookRepository(session)
+    orderbooks.insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker=market_ticker,
+            received_at=now - timedelta(seconds=2),
+            yes_bid=Decimal("0.71"),
+            yes_bid_count=Decimal("1"),
+            yes_ask=Decimal("0.72"),
+            yes_ask_count=Decimal("1"),
+            book_status="ok",
+        )
+    )
+    orderbooks.insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker=market_ticker,
+            received_at=now - timedelta(milliseconds=1500),
+            yes_bid=Decimal("0.75"),
+            yes_bid_count=Decimal("1"),
+            yes_ask=Decimal("0.76"),
+            yes_ask_count=Decimal("1"),
+            book_status="ok",
+        )
+    )
+
+    result, _ = observer_module._resolve_v2_pending_exit(
+        session=session,
+        intents=intents,
+        positions=positions,
+        pending=pending,
+        resolved_at=now,
+        decision=None,
+    )
+
+    assert result == "V2_EXIT_NO_FILL"
+    assert pending.status == "NO_FILL"
+    assert positions.get_position_by_id("v2-first-price-open").status == "OPEN"
+    assert intents.list_recent_outcomes(strategy_id=V2_STRATEGY_ID, limit=10) == []
+    assert all(
+        event.event_type != "V2_EXIT_FILLED"
+        for event in positions.list_recent_events(strategy_id=V2_STRATEGY_ID, limit=10)
+    )
+
+
+def test_v2_exit_depth_failure_does_not_use_later_qualifying_book(session) -> None:
+    now = datetime(2026, 7, 11, 12, 10, tzinfo=UTC)
+    market_ticker = "KXBTC15M-EXIT-FIRST-DEPTH"
+    positions = StrategyDryRunRepository(session)
+    positions.insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="v2-first-depth-open",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=market_ticker,
+            decision_id="v2-first-depth-entry",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now - timedelta(seconds=10),
+            open_price=Decimal("0.70"),
+            contract_count=1,
+            entry_reason="v2_causal_hypothetical_fill",
+            status="OPEN",
+        )
+    )
+    intents = StrategyV2Repository(session)
+    pending = intents.insert_intent_if_absent(
+        StrategyTradeIntentInput(
+            intent_id="v2-first-depth-exit",
+            strategy_id=V2_STRATEGY_ID,
+            decision_id="v2-first-depth-decision",
+            position_id="v2-first-depth-open",
+            market_ticker=market_ticker,
+            side_candidate="YES",
+            action="EXIT",
+            created_at=now - timedelta(seconds=4),
+            effective_after=now - timedelta(seconds=3),
+            expires_at=now - timedelta(seconds=1),
+            intended_limit_price=Decimal("0.72"),
+            quantity=Decimal("1"),
+        )
+    )
+    orderbooks = OrderbookRepository(session)
+    orderbooks.insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker=market_ticker,
+            received_at=now - timedelta(seconds=2),
+            yes_bid=Decimal("0.75"),
+            yes_bid_count=Decimal("0"),
+            yes_ask=Decimal("0.76"),
+            yes_ask_count=Decimal("1"),
+            book_status="ok",
+        )
+    )
+    orderbooks.insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker=market_ticker,
+            received_at=now - timedelta(milliseconds=1500),
+            yes_bid=Decimal("0.75"),
+            yes_bid_count=Decimal("1"),
+            yes_ask=Decimal("0.76"),
+            yes_ask_count=Decimal("1"),
+            book_status="ok",
+        )
+    )
+
+    result, _ = observer_module._resolve_v2_pending_exit(
+        session=session,
+        intents=intents,
+        positions=positions,
+        pending=pending,
+        resolved_at=now,
+        decision=None,
+    )
+
+    assert result == "V2_EXIT_NO_FILL"
+    assert pending.status == "NO_FILL"
+    assert positions.get_position_by_id("v2-first-depth-open").status == "OPEN"
+    assert intents.list_recent_outcomes(strategy_id=V2_STRATEGY_ID, limit=10) == []
+
+
+def test_v2_exit_without_a_book_expires_and_keeps_position_open(session) -> None:
+    now = datetime(2026, 7, 11, 12, 10, tzinfo=UTC)
+    market_ticker = "KXBTC15M-EXIT-NO-BOOK"
+    positions = StrategyDryRunRepository(session)
+    positions.insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="v2-no-book-open",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=market_ticker,
+            decision_id="v2-no-book-entry",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now - timedelta(seconds=10),
+            open_price=Decimal("0.70"),
+            contract_count=1,
+            entry_reason="v2_causal_hypothetical_fill",
+            status="OPEN",
+        )
+    )
+    intents = StrategyV2Repository(session)
+    pending = intents.insert_intent_if_absent(
+        StrategyTradeIntentInput(
+            intent_id="v2-no-book-exit",
+            strategy_id=V2_STRATEGY_ID,
+            decision_id="v2-no-book-decision",
+            position_id="v2-no-book-open",
+            market_ticker=market_ticker,
+            side_candidate="YES",
+            action="EXIT",
+            created_at=now - timedelta(seconds=4),
+            effective_after=now - timedelta(seconds=3),
+            expires_at=now - timedelta(seconds=1),
+            intended_limit_price=Decimal("0.72"),
+            quantity=Decimal("1"),
+        )
+    )
+
+    result, _ = observer_module._resolve_v2_pending_exit(
+        session=session,
+        intents=intents,
+        positions=positions,
+        pending=pending,
+        resolved_at=now,
+        decision=None,
+    )
+
+    assert result == "V2_EXIT_EXPIRED"
+    assert pending.status == "EXPIRED"
+    assert positions.get_position_by_id("v2-no-book-open").status == "OPEN"
+    assert intents.list_recent_outcomes(strategy_id=V2_STRATEGY_ID, limit=10) == []
+
+
+def test_v2_exit_retries_apply_first_book_only_independently(session) -> None:
+    now = datetime(2026, 7, 11, 12, 10, tzinfo=UTC)
+    market_ticker = "KXBTC15M-EXIT-RETRY"
+    positions = StrategyDryRunRepository(session)
+    positions.insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="v2-retry-open",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=market_ticker,
+            decision_id="v2-retry-entry",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now - timedelta(seconds=10),
+            open_price=Decimal("0.70"),
+            contract_count=1,
+            entry_reason="v2_causal_hypothetical_fill",
+            status="OPEN",
+        )
+    )
+    intents = StrategyV2Repository(session)
+    first_attempt = intents.insert_intent_if_absent(
+        StrategyTradeIntentInput(
+            intent_id="v2-retry-one",
+            strategy_id=V2_STRATEGY_ID,
+            decision_id="v2-retry-one-decision",
+            position_id="v2-retry-open",
+            market_ticker=market_ticker,
+            side_candidate="YES",
+            action="EXIT",
+            created_at=now - timedelta(seconds=8),
+            effective_after=now - timedelta(seconds=7),
+            expires_at=now - timedelta(seconds=5),
+            intended_limit_price=Decimal("0.72"),
+            quantity=Decimal("1"),
+        )
+    )
+    second_attempt = intents.insert_intent_if_absent(
+        StrategyTradeIntentInput(
+            intent_id="v2-retry-two",
+            strategy_id=V2_STRATEGY_ID,
+            decision_id="v2-retry-two-decision",
+            position_id="v2-retry-open",
+            market_ticker=market_ticker,
+            side_candidate="YES",
+            action="EXIT",
+            created_at=now - timedelta(seconds=4),
+            effective_after=now - timedelta(seconds=3),
+            expires_at=now - timedelta(seconds=1),
+            intended_limit_price=Decimal("0.72"),
+            quantity=Decimal("1"),
+        )
+    )
+    orderbooks = OrderbookRepository(session)
+    for received_at, bid in (
+        (now - timedelta(seconds=6), Decimal("0.71")),
+        (now - timedelta(milliseconds=5500), Decimal("0.75")),
+        (now - timedelta(seconds=2), Decimal("0.71")),
+        (now - timedelta(milliseconds=1500), Decimal("0.75")),
+    ):
+        orderbooks.insert_snapshot(
+            OrderbookSnapshotInput(
+                market_ticker=market_ticker,
+                received_at=received_at,
+                yes_bid=bid,
+                yes_bid_count=Decimal("1"),
+                yes_ask=bid + Decimal("0.01"),
+                yes_ask_count=Decimal("1"),
+                book_status="ok",
+            )
+        )
+
+    first_result, _ = observer_module._resolve_v2_pending_exit(
+        session=session,
+        intents=intents,
+        positions=positions,
+        pending=first_attempt,
+        resolved_at=now,
+        decision=None,
+    )
+    second_result, _ = observer_module._resolve_v2_pending_exit(
+        session=session,
+        intents=intents,
+        positions=positions,
+        pending=second_attempt,
+        resolved_at=now,
+        decision=None,
+    )
+
+    assert first_result == "V2_EXIT_NO_FILL"
+    assert second_result == "V2_EXIT_NO_FILL"
+    assert first_attempt.status == "NO_FILL"
+    assert second_attempt.status == "NO_FILL"
+    assert positions.get_position_by_id("v2-retry-open").status == "OPEN"
 
 
 def test_v2_intent_uses_recorded_timing_parameters(session, monkeypatch) -> None:

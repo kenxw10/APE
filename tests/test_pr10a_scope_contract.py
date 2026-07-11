@@ -27,9 +27,9 @@ from ape.strategy.observer import (
 
 def test_pr10a_versions_states_schema_and_endpoint_contract() -> None:
     assert CURRENT_SCHEMA_VERSION == "0009_momentum_v2_scope_completion"
-    assert V2_ARCHITECTURE_VERSION == "momentum_v2_heuristic_v2"
+    assert V2_ARCHITECTURE_VERSION == "momentum_v2_heuristic_v3"
     assert V2_FEATURE_SCHEMA_VERSION == "momentum_v2_features_v2"
-    assert V2_LIFECYCLE_SCHEMA_VERSION == "momentum_v2_lifecycle_v1"
+    assert V2_LIFECYCLE_SCHEMA_VERSION == "momentum_v2_lifecycle_v2"
     assert StrategyPositionOutcome.__tablename__ == "strategy_position_outcomes"
     assert {
         STATE_V2_MANAGE_POSITION,

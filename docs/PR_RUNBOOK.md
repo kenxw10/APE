@@ -20,7 +20,7 @@ Rules:
 - BRTI/CF Benchmarks PRs may add observer-only reference-feed capture only when explicitly scoped; they must not add strategy decisions, paper trading, live trading, order placement, private/user channels, or execution controls.
 - Dry-run strategy PRs may add hypothetical ledger simulation only when explicitly scoped; they must not add paper trading, live trading, Kalshi order placement, account reads, private/user channels, or execution controls.
 - Database schema/repository changes are allowed only in PRs that explicitly authorize storage or ledger work.
-- PR 10a validation must confirm V2 outcome and intent endpoints remain read-only, and that `strategy_position_outcomes` is durable evidence rather than short-retention market telemetry.
+- PR 10a/10b validation must confirm V2 outcome and intent endpoints remain read-only, `BOUNDARY_CROSS_HOLD` remains research-only, EXIT attempts use first-book-only causal semantics, and `strategy_position_outcomes` is durable status-visible evidence rather than short-retention market telemetry.
 - Railway worker services should be always-on processes, not cron jobs, unless a later PR explicitly changes that decision.
 
 PR 5 post-merge checkpoint:
@@ -228,6 +228,24 @@ PR 10 post-merge checkpoint:
 - Confirm no order placement/cancellation, private/user WebSocket,
   account/balance/order/fill read, paper, live, or dashboard trading control
   exists.
+
+PR 10b post-merge checkpoint:
+
+1. Keep STRATEGY_V2_ENABLED=false.
+2. Redeploy ape-api.
+3. Redeploy ape-maintenance-worker.
+4. Redeploy ape-strategy-worker.
+5. Run initial API/storage/safety preflight.
+6. Set STRATEGY_V2_ENABLED=true only on ape-strategy-worker.
+7. Redeploy ape-strategy-worker.
+8. Run full PR 10b production validation.
+
+Verify that `BOUNDARY_CROSS_HOLD` is recorded as research-only evidence, every
+EXIT intent uses only its first persisted in-window orderbook, and
+`/storage/status` exposes `strategy_position_outcomes` with null retention
+fields. The deployed attribution must be `momentum_v2_heuristic_v3` and
+`momentum_v2_lifecycle_v2` with `momentum_v2_features_v2` unchanged. No
+migration, Railway service, or environment variable is part of PR 10b.
 
 PR 9b post-merge checkpoint:
 

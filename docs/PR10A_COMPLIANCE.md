@@ -16,3 +16,10 @@
 | R10 safety and compatibility | `src/ape/strategy/observer.py`, `src/ape/strategy/momentum_v2.py`, `README.md`, `docs/RAILWAY.md`, `docs/PR_RUNBOOK.md` | full `pytest`, `ruff`, `compileall`, `pip check` | COMPLIANT |
 
 This change remains DRY_RUN-only. It adds no execution credentials, private Kalshi channels, account reads, order placement, cancellation, paper trading, live trading, service, environment-variable, position-sizing, or dashboard-control behavior.
+
+## Post-Merge Correction Note
+
+The R6, R8, and R9 rows above described the PR 10a implementation at merge time,
+but are not an unqualified assertion of the final V2 semantics. PR 10b remediates
+the boundary-cross mode eligibility, first-book-only EXIT fill behavior, and
+durable outcome-table status observability required after PR 10a.

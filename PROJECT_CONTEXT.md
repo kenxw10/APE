@@ -100,7 +100,7 @@ This ladder is directional and should be reviewed before each PR.
 9g. Market worker persistence backpressure hardening. Completed by PR 9g.
 9h. Maintenance worker liveness/status and retention load smoothing. Completed by PR 9h.
 9i. DRY_RUN control versus fast momentum challenger comparison, hypothetical-only. Completed by PR 9i.
-10. Momentum v2 feature, score, and lifecycle architecture. Current PR: immutable shared feature/config records, compact top-five ladders, DRY_RUN-only v2, causal hypothetical intents, read-only evidence routes, and bounded retention.
+10. Momentum v2 feature, score, and lifecycle architecture. Completed through PR 10b: immutable shared feature/config records, compact top-five ladders, DRY_RUN-only V2, causal hypothetical intents, read-only evidence routes, `BOUNDARY_CROSS_HOLD` research-only gating, first-book-only EXIT fills, and status-visible but unretained outcomes. Current V2 attribution is `momentum_v2_heuristic_v3` with `momentum_v2_lifecycle_v2`; the `momentum_v2_features_v2` schema is unchanged and no migration was added.
 11. Local replay fixtures.
 12. Deterministic replay harness for captured market/reference data.
 13. Spread, depth, liquidity, and anti-chop calibration diagnostics.

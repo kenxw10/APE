@@ -53,6 +53,14 @@ class RetentionPolicy:
     raw_payload_condition_sql: str | None = None
 
 
+@dataclass(frozen=True)
+class StorageStatusTable:
+    table_name: str
+    timestamp_expression: str
+    retention_config_key: str | None = None
+    raw_payload_retention_config_key: str | None = None
+
+
 RETENTION_POLICIES: tuple[RetentionPolicy, ...] = (
     RetentionPolicy(
         table_name="orderbook_snapshots",
@@ -141,6 +149,20 @@ RETENTION_POLICIES: tuple[RetentionPolicy, ...] = (
 )
 
 RETENTION_TABLE_NAMES = tuple(policy.table_name for policy in RETENTION_POLICIES)
+STATUS_TABLES: tuple[StorageStatusTable, ...] = tuple(
+    StorageStatusTable(
+        table_name=policy.table_name,
+        timestamp_expression=policy.timestamp_expression,
+        retention_config_key=policy.retention_config_key,
+        raw_payload_retention_config_key=policy.raw_payload_retention_config_key,
+    )
+    for policy in RETENTION_POLICIES
+) + (
+    StorageStatusTable(
+        table_name="strategy_position_outcomes",
+        timestamp_expression="closed_at",
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -235,6 +257,7 @@ class StorageRetentionRuntimeStatus:
 @dataclass(frozen=True)
 class StorageTableStats:
     table_name: str
+    timestamp_basis: str
     row_count: int | None
     approximate_total_bytes: int | None
     approximate_table_bytes: int | None
@@ -244,7 +267,7 @@ class StorageTableStats:
     oldest_row_at: datetime | None
     newest_row_at: datetime | None
     raw_payload_non_null_count: int | None
-    retention_seconds: int
+    retention_seconds: int | None
     raw_payload_retention_seconds: int | None
 
 
@@ -646,7 +669,7 @@ def build_storage_status(
                         policy=policy,
                         warnings=warnings,
                     )
-                    for policy in RETENTION_POLICIES
+                    for policy in STATUS_TABLES
                 ]
                 database_total_bytes = retention_repository.database_total_bytes()
         finally:
@@ -1150,7 +1173,7 @@ def _table_stats_for_policy(
     *,
     config: AppConfig,
     repository: StorageRetentionRepository,
-    policy: RetentionPolicy,
+    policy: StorageStatusTable,
     warnings: list[str],
 ) -> StorageTableStats:
     try:
@@ -1176,6 +1199,7 @@ def _table_stats_for_policy(
     total_bytes = size.get("approximate_total_bytes")
     return StorageTableStats(
         table_name=policy.table_name,
+        timestamp_basis=policy.timestamp_expression,
         row_count=row_count,
         approximate_total_bytes=total_bytes,
         approximate_table_bytes=size.get("approximate_table_bytes"),
@@ -1185,8 +1209,16 @@ def _table_stats_for_policy(
         oldest_row_at=oldest_row_at,
         newest_row_at=newest_row_at,
         raw_payload_non_null_count=raw_payload_non_null_count,
-        retention_seconds=_policy_retention_seconds(config, policy),
-        raw_payload_retention_seconds=_policy_raw_payload_retention_seconds(config, policy),
+        retention_seconds=(
+            int(getattr(config, policy.retention_config_key))
+            if policy.retention_config_key is not None
+            else None
+        ),
+        raw_payload_retention_seconds=(
+            int(getattr(config, policy.raw_payload_retention_config_key))
+            if policy.raw_payload_retention_config_key is not None
+            else None
+        ),
     )
 
 

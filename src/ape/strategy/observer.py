@@ -4716,12 +4716,12 @@ def _resolve_v2_pending_exit(
         start=pending.effective_after,
         end=pending.expires_at,
     )
-    future_book: OrderbookSnapshot | None = None
+    future_book = future_books[0] if future_books else None
     fill_bid: Decimal | None = None
-    for candidate_book in future_books:
-        candidate_bid, _, _ = _desired_book(candidate_book, position.side_candidate)
+    if future_book is not None:
+        candidate_bid, _, _ = _desired_book(future_book, position.side_candidate)
         candidate_bid_depth = _desired_exit_book_size(
-            candidate_book,
+            future_book,
             position.side_candidate,
         )
         if (
@@ -4730,9 +4730,7 @@ def _resolve_v2_pending_exit(
             and candidate_bid >= Decimal(pending.intended_limit_price)
             and candidate_bid_depth >= Decimal(pending.quantity)
         ):
-            future_book = candidate_book
             fill_bid = candidate_bid
-            break
     if future_book is not None and fill_bid is not None:
         bid = fill_bid
         fill_time = future_book.received_at

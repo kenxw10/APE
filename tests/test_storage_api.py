@@ -13,6 +13,7 @@ from ape.repositories.inputs import StorageRetentionRunInput, WorkerHeartbeatInp
 from ape.repositories.storage_retention import StorageRetentionRepository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.storage import retention as retention_module
+from ape.storage.retention import RETENTION_TABLE_NAMES
 
 
 def test_storage_status_works_without_database_url() -> None:
@@ -48,7 +49,9 @@ def test_storage_status_reports_tables_without_retention_run(tmp_path) -> None:
     body = response.json()
     assert body["database_configured"] is True
     assert body["latest_run_found"] is False
-    assert {stat["table_name"] for stat in body["table_stats"]} >= {
+    table_names = [stat["table_name"] for stat in body["table_stats"]]
+    assert set(RETENTION_TABLE_NAMES) <= set(table_names)
+    assert set(table_names) >= {
         "orderbook_snapshots",
         "public_trades",
         "reference_ticks",
@@ -58,6 +61,13 @@ def test_storage_status_reports_tables_without_retention_run(tmp_path) -> None:
         "strategy_dry_run_positions",
         "markets",
     }
+    assert table_names.count("strategy_position_outcomes") == 1
+    outcome_stats = next(
+        stat for stat in body["table_stats"] if stat["table_name"] == "strategy_position_outcomes"
+    )
+    assert outcome_stats["timestamp_basis"] == "closed_at"
+    assert outcome_stats["retention_seconds"] is None
+    assert outcome_stats["raw_payload_retention_seconds"] is None
     assert "large-secret-payload" not in response.text
 
 

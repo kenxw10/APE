@@ -56,7 +56,7 @@ def test_v2_feature_snapshot_includes_microstructure_flow_and_pressure_metrics()
     }
 
 
-def test_low_edge_uses_dedicated_v2_edge_state(monkeypatch) -> None:
+def test_boundary_cross_hold_is_research_only_and_continuation_can_enter(monkeypatch) -> None:
     evaluated_at = datetime(2026, 7, 11, 12, 10, tzinfo=UTC)
     context = StrategyEvaluationContext(
         evaluated_at=evaluated_at,
@@ -116,17 +116,30 @@ def test_low_edge_uses_dedicated_v2_edge_state(monkeypatch) -> None:
 
     held_cross_result = momentum_v2.evaluate_momentum_v2(context, config=load_config({}))
 
-    assert held_cross_result.state == momentum_v2.STATE_V2_ENTRY_SIGNAL
-    assert held_cross_result.reason == "v2_entry_signal"
+    assert held_cross_result.state == momentum_v2.STATE_V2_HARD_GATE_BLOCKED
+    assert held_cross_result.reason == "v2_candidate_mode_not_enabled"
+    assert held_cross_result.blockers == ["v2_candidate_mode_not_enabled"]
+    assert held_cross_result.intended_entry_price is None
     assert held_cross_result.candidate_mode == "BOUNDARY_CROSS_HOLD"
 
     features["fast_impulse_active"] = False
 
     slow_held_cross_result = momentum_v2.evaluate_momentum_v2(context, config=load_config({}))
 
-    assert slow_held_cross_result.state == momentum_v2.STATE_V2_ENTRY_SIGNAL
-    assert slow_held_cross_result.reason == "v2_entry_signal"
+    assert slow_held_cross_result.state == momentum_v2.STATE_V2_HARD_GATE_BLOCKED
+    assert slow_held_cross_result.reason == "v2_candidate_mode_not_enabled"
+    assert slow_held_cross_result.blockers == ["v2_candidate_mode_not_enabled"]
+    assert slow_held_cross_result.intended_entry_price is None
     assert slow_held_cross_result.candidate_mode == "BOUNDARY_CROSS_HOLD"
+
+    features["candidate_mode"] = "CONTINUATION"
+    features["fast_impulse_active"] = True
+
+    continuation_result = momentum_v2.evaluate_momentum_v2(context, config=load_config({}))
+
+    assert continuation_result.state == momentum_v2.STATE_V2_ENTRY_SIGNAL
+    assert continuation_result.reason == "v2_entry_signal"
+    assert continuation_result.intended_entry_price is not None
 
 
 def test_v2_blocks_stale_persisted_reference_and_orderbook() -> None:
