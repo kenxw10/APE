@@ -25,6 +25,7 @@ from ape.db.models import (
     StrategyDecision,
     StrategyDryRunEvent,
     StrategyDryRunPosition,
+    StrategyTradeIntent,
 )
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.kalshi.reference_messages import BRTI_SOURCE
@@ -1547,7 +1548,7 @@ def evaluate_strategy_variants(
         session=session,
         evaluated_at=evaluated_at,
     )
-    v2_evaluation = evaluate_momentum_v2(context)
+    v2_evaluation = evaluate_momentum_v2(context, config=config)
     v2_repository = StrategyV2Repository(session)
     feature_snapshot = v2_repository.ensure_feature_snapshot(v2_evaluation.feature_snapshot)
     results: list[tuple[AppConfig, StrategyDecisionInput]] = []
@@ -4424,6 +4425,114 @@ def _dry_run_runtime_enabled(config: AppConfig, safety: SafetyAssessment) -> boo
     )
 
 
+def _resolve_v2_pending_intent(
+    *,
+    session: Session,
+    intents: StrategyV2Repository,
+    positions: StrategyDryRunRepository,
+    pending: StrategyTradeIntent,
+    resolved_at: datetime,
+    decision: StrategyDecisionInput | StrategyDecision | None,
+) -> tuple[str | None, str | None]:
+    future_books = OrderbookRepository(session).get_snapshots_between(
+        pending.market_ticker,
+        start=pending.effective_after,
+        end=pending.expires_at,
+    )
+    future_book: OrderbookSnapshot | None = None
+    for candidate_book in future_books:
+        _, candidate_ask, _ = _desired_book(candidate_book, pending.side_candidate)
+        candidate_ask_depth = _desired_top_book_size(candidate_book, pending.side_candidate)
+        if (
+            candidate_ask is not None
+            and candidate_ask_depth is not None
+            and candidate_ask <= Decimal(pending.intended_limit_price)
+            and candidate_ask_depth >= Decimal(pending.quantity)
+        ):
+            future_book = candidate_book
+            break
+
+    if future_book is not None:
+        _, ask, _ = _desired_book(future_book, pending.side_candidate)
+        ask_depth = _desired_top_book_size(future_book, pending.side_candidate)
+        if (
+            ask is not None
+            and ask_depth is not None
+            and ask <= Decimal(pending.intended_limit_price)
+            and ask_depth >= Decimal(pending.quantity)
+        ):
+            intents.resolve_intent(
+                pending,
+                status="FILLED",
+                resolved_at=resolved_at,
+                reason="v2_entry_future_book_fill",
+                fill_snapshot_id=future_book.id,
+                fill_price=ask,
+                fill_size=Decimal(pending.quantity),
+            )
+            fill_time = future_book.received_at
+            position_id = f"v2-pos-{_stable_hash({'intent': pending.intent_id})[:24]}"
+            position = positions.insert_position_if_absent(
+                StrategyDryRunPositionInput(
+                    position_id=position_id,
+                    strategy_id=V2_STRATEGY_ID,
+                    market_ticker=pending.market_ticker,
+                    decision_id=pending.decision_id,
+                    side_candidate=pending.side_candidate,
+                    economic_side=pending.side_candidate,
+                    opened_at=fill_time,
+                    open_price=ask,
+                    contract_count=int(Decimal(pending.quantity)),
+                    entry_reason="v2_causal_hypothetical_fill",
+                    status=OPEN_POSITION_STATUS,
+                    boundary=decision.boundary if decision is not None else None,
+                    brti_at_entry=decision.brti_value if decision is not None else None,
+                    distance_bps_at_entry=(decision.distance_bps if decision is not None else None),
+                    feature_snapshot_id=pending.feature_snapshot_id,
+                    strategy_config_version_id=pending.strategy_config_version_id,
+                    code_commit_sha=decision.code_commit_sha if decision is not None else None,
+                    measurements={
+                        "intent_id": pending.intent_id,
+                        "fill_snapshot_id": future_book.id,
+                    },
+                )
+            )
+            fill_event_id = _stable_hash({"intent": pending.intent_id, "event": "fill"})[:24]
+            positions.insert_event_if_absent(
+                StrategyDryRunEventInput(
+                    event_id=f"v2-event-{fill_event_id}",
+                    event_type="ENTER_DRY_RUN",
+                    occurred_at=fill_time,
+                    strategy_id=V2_STRATEGY_ID,
+                    position_id=position.position_id,
+                    decision_id=pending.decision_id,
+                    market_ticker=pending.market_ticker,
+                    side_candidate=pending.side_candidate,
+                    price=ask,
+                    contract_count=int(Decimal(pending.quantity)),
+                    reason="v2_causal_hypothetical_fill",
+                    feature_snapshot_id=pending.feature_snapshot_id,
+                    strategy_config_version_id=pending.strategy_config_version_id,
+                    code_commit_sha=decision.code_commit_sha if decision is not None else None,
+                )
+            )
+            return "ENTER_DRY_RUN", position.position_id
+
+    if _as_utc(resolved_at) > _as_utc(pending.expires_at):
+        intents.resolve_intent(
+            pending,
+            status="NO_FILL" if future_books else "EXPIRED",
+            resolved_at=resolved_at,
+            reason=(
+                "v2_entry_future_book_price_or_depth_unavailable"
+                if future_books
+                else "v2_entry_no_future_book_before_expiry"
+            ),
+        )
+        return ("NO_FILL" if future_books else "EXPIRED"), None
+    return None, None
+
+
 def _apply_v2_hypothetical_lifecycle(
     *,
     session: Session,
@@ -4435,10 +4544,35 @@ def _apply_v2_hypothetical_lifecycle(
     now = decision.evaluated_at
     latest_event_type: str | None = None
     latest_position_id: str | None = None
+    decisions = StrategyDecisionsRepository(session)
+    for expired_pending in intents.list_expired_pending_intents(
+        strategy_id=V2_STRATEGY_ID,
+        before=now,
+        limit=100,
+    ):
+        source_decision = (
+            decision
+            if expired_pending.decision_id == decision.decision_id
+            else decisions.get_decision_by_id(expired_pending.decision_id)
+        )
+        event_type, position_id = _resolve_v2_pending_intent(
+            session=session,
+            intents=intents,
+            positions=positions,
+            pending=expired_pending,
+            resolved_at=now,
+            decision=source_decision,
+        )
+        if event_type is not None:
+            latest_event_type = event_type
+            latest_position_id = position_id
+
     market_ticker = decision.market_ticker
     if market_ticker is None:
         return DryRunLedgerResult(
-            open_position_count=positions.count_open_positions(strategy_id=V2_STRATEGY_ID)
+            open_position_count=positions.count_open_positions(strategy_id=V2_STRATEGY_ID),
+            latest_event_type=latest_event_type,
+            latest_position_id=latest_position_id,
         )
 
     pending = intents.get_pending_intent(
@@ -4447,108 +4581,17 @@ def _apply_v2_hypothetical_lifecycle(
     )
 
     if pending is not None:
-        future_books = OrderbookRepository(session).get_snapshots_between(
-            market_ticker,
-            start=pending.effective_after,
-            end=pending.expires_at,
+        event_type, position_id = _resolve_v2_pending_intent(
+            session=session,
+            intents=intents,
+            positions=positions,
+            pending=pending,
+            resolved_at=now,
+            decision=decision,
         )
-        future_book: OrderbookSnapshot | None = None
-        for candidate_book in future_books:
-            _, candidate_ask, _ = _desired_book(
-                candidate_book,
-                pending.side_candidate,
-            )
-            candidate_ask_depth = _desired_top_book_size(
-                candidate_book,
-                pending.side_candidate,
-            )
-            if (
-                candidate_ask is not None
-                and candidate_ask_depth is not None
-                and candidate_ask <= Decimal(pending.intended_limit_price)
-                and candidate_ask_depth >= Decimal(pending.quantity)
-            ):
-                future_book = candidate_book
-                break
-        if future_book is not None:
-            bid, ask, _ = _desired_book(future_book, pending.side_candidate)
-            ask_depth = _desired_top_book_size(future_book, pending.side_candidate)
-            del bid
-            if (
-                ask is not None
-                and ask_depth is not None
-                and ask <= Decimal(pending.intended_limit_price)
-                and ask_depth >= Decimal(pending.quantity)
-            ):
-                intents.resolve_intent(
-                    pending,
-                    status="FILLED",
-                    resolved_at=now,
-                    reason="v2_entry_future_book_fill",
-                    fill_snapshot_id=future_book.id,
-                    fill_price=ask,
-                    fill_size=Decimal(pending.quantity),
-                )
-                fill_time = future_book.received_at
-                position_id = f"v2-pos-{_stable_hash({'intent': pending.intent_id})[:24]}"
-                position = positions.insert_position_if_absent(
-                    StrategyDryRunPositionInput(
-                        position_id=position_id,
-                        strategy_id=V2_STRATEGY_ID,
-                        market_ticker=market_ticker,
-                        decision_id=pending.decision_id,
-                        side_candidate=pending.side_candidate,
-                        economic_side=pending.side_candidate,
-                        opened_at=fill_time,
-                        open_price=ask,
-                        contract_count=int(Decimal(pending.quantity)),
-                        entry_reason="v2_causal_hypothetical_fill",
-                        status=OPEN_POSITION_STATUS,
-                        boundary=decision.boundary,
-                        brti_at_entry=decision.brti_value,
-                        distance_bps_at_entry=decision.distance_bps,
-                        feature_snapshot_id=pending.feature_snapshot_id,
-                        strategy_config_version_id=pending.strategy_config_version_id,
-                        code_commit_sha=decision.code_commit_sha,
-                        measurements={
-                            "intent_id": pending.intent_id,
-                            "fill_snapshot_id": future_book.id,
-                        },
-                    )
-                )
-                fill_event_id = _stable_hash({"intent": pending.intent_id, "event": "fill"})[:24]
-                positions.insert_event_if_absent(
-                    StrategyDryRunEventInput(
-                        event_id=f"v2-event-{fill_event_id}",
-                        event_type="ENTER_DRY_RUN",
-                        occurred_at=fill_time,
-                        strategy_id=V2_STRATEGY_ID,
-                        position_id=position.position_id,
-                        decision_id=pending.decision_id,
-                        market_ticker=market_ticker,
-                        side_candidate=pending.side_candidate,
-                        price=ask,
-                        contract_count=int(Decimal(pending.quantity)),
-                        reason="v2_causal_hypothetical_fill",
-                        feature_snapshot_id=pending.feature_snapshot_id,
-                        strategy_config_version_id=pending.strategy_config_version_id,
-                        code_commit_sha=decision.code_commit_sha,
-                    )
-                )
-                latest_event_type = "ENTER_DRY_RUN"
-                latest_position_id = position.position_id
-        elif now > pending.expires_at:
-            intents.resolve_intent(
-                pending,
-                status="NO_FILL" if future_books else "EXPIRED",
-                resolved_at=now,
-                reason=(
-                    "v2_entry_future_book_price_or_depth_unavailable"
-                    if future_books
-                    else "v2_entry_no_future_book_before_expiry"
-                ),
-            )
-            latest_event_type = "NO_FILL" if future_books else "EXPIRED"
+        if event_type is not None:
+            latest_event_type = event_type
+            latest_position_id = position_id
 
     if (
         decision.decision_state == STATE_V2_ENTRY_SIGNAL

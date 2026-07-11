@@ -104,6 +104,26 @@ class StrategyV2Repository:
             .limit(1)
         )
 
+    def list_expired_pending_intents(
+        self,
+        *,
+        strategy_id: str,
+        before: datetime,
+        limit: int,
+    ) -> list[StrategyTradeIntent]:
+        return list(
+            self.session.scalars(
+                select(StrategyTradeIntent)
+                .where(
+                    StrategyTradeIntent.strategy_id == strategy_id,
+                    StrategyTradeIntent.status == "PENDING",
+                    StrategyTradeIntent.expires_at < before,
+                )
+                .order_by(StrategyTradeIntent.expires_at.asc(), StrategyTradeIntent.id.asc())
+                .limit(limit)
+            )
+        )
+
     def has_entry_intent_for_market(self, *, strategy_id: str, market_ticker: str) -> bool:
         return (
             self.session.scalar(

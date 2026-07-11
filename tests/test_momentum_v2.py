@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from ape.db.models import Market
+from ape.config import load_config
+from ape.db.models import Market, OrderbookSnapshot, ReferenceTick
 from ape.strategy import momentum_v2
 from ape.strategy.context import StrategyEvaluationContext
 
@@ -48,7 +49,7 @@ def test_low_edge_uses_dedicated_v2_edge_state(monkeypatch) -> None:
         "desired_spread_cents": Decimal("2"),
         "desired_ask_depth": Decimal("2"),
     }
-    monkeypatch.setattr(momentum_v2, "_features", lambda _context: features)
+    monkeypatch.setattr(momentum_v2, "_features", lambda _context, *, config: features)
     monkeypatch.setattr(
         momentum_v2,
         "_score",
@@ -57,11 +58,54 @@ def test_low_edge_uses_dedicated_v2_edge_state(monkeypatch) -> None:
     monkeypatch.setattr(momentum_v2, "_edge", lambda _features: Decimal("1.49"))
     monkeypatch.setattr(momentum_v2, "_timing_tier", lambda _open, _left: "normal")
 
-    result = momentum_v2.evaluate_momentum_v2(context)
+    result = momentum_v2.evaluate_momentum_v2(context, config=load_config({}))
 
     assert result.state == momentum_v2.STATE_V2_EDGE_BELOW_THRESHOLD
     assert result.reason == "v2_edge_below_threshold"
     assert result.blockers == []
+
+
+def test_v2_blocks_stale_persisted_reference_and_orderbook() -> None:
+    evaluated_at = datetime(2026, 7, 11, 12, 10, tzinfo=UTC)
+    stale_at = evaluated_at - timedelta(milliseconds=2_001)
+    market = Market(
+        market_ticker="KXBTC15M-TEST",
+        open_time=evaluated_at - timedelta(minutes=5),
+        close_time=evaluated_at + timedelta(minutes=10),
+    )
+    reference_tick = ReferenceTick(
+        source="kalshi_cfbenchmarks_brti",
+        received_at=stale_at,
+        source_ts=stale_at,
+        parsed_value=Decimal("62010"),
+        parse_status="valid",
+    )
+    orderbook = OrderbookSnapshot(
+        market_ticker=market.market_ticker,
+        received_at=stale_at,
+        yes_bid=Decimal("0.60"),
+        yes_ask=Decimal("0.62"),
+        no_bid=Decimal("0.38"),
+        no_ask=Decimal("0.40"),
+        book_status="ok",
+    )
+    context = StrategyEvaluationContext(
+        evaluated_at=evaluated_at,
+        market=market,
+        boundary=Decimal("62000"),
+        boundary_source=None,
+        reference_tick=reference_tick,
+        orderbook=orderbook,
+        latest_trade=None,
+        reference_ticks=(reference_tick,),
+        orderbook_history=(orderbook,),
+        recent_trades=(),
+    )
+
+    result = momentum_v2.evaluate_momentum_v2(context, config=load_config({}))
+
+    assert result.state == momentum_v2.STATE_V2_FEATURES_NOT_READY
+    assert "v2_prerequisite_data_missing_or_stale" in result.blockers
 
 
 def test_builtin_config_version_changes_with_code_revision(monkeypatch) -> None:

@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
+from ape.config import AppConfig
 from ape.db.models import OrderbookSnapshot
 from ape.repositories.inputs import (
     JsonPayload,
@@ -111,8 +112,12 @@ def resolve_code_version() -> str:
     return "unknown-local"
 
 
-def evaluate_momentum_v2(context: StrategyEvaluationContext) -> V2Evaluation:
-    features = _features(context)
+def evaluate_momentum_v2(
+    context: StrategyEvaluationContext,
+    *,
+    config: AppConfig,
+) -> V2Evaluation:
+    features = _features(context, config=config)
     snapshot = _feature_snapshot(context, features)
     candidate_side = features["candidate_side"]
     mode = features["candidate_mode"]
@@ -284,7 +289,7 @@ def clip01(value: Decimal | float) -> Decimal:
     return max(Decimal("0"), min(Decimal("1"), Decimal(str(value))))
 
 
-def _features(context: StrategyEvaluationContext) -> dict[str, Any]:
+def _features(context: StrategyEvaluationContext, *, config: AppConfig) -> dict[str, Any]:
     latest = context.brti_value
     side = context.candidate_side
     returns = {
@@ -403,10 +408,25 @@ def _features(context: StrategyEvaluationContext) -> dict[str, Any]:
         and trade_ratio <= Decimal("0.35"),
         "quality_state": {
             "market_ready": context.market is not None and context.boundary is not None,
-            "reference_ready": latest is not None,
+            "reference_ready": latest is not None
+            and _timestamp_within_age(
+                getattr(context.reference_tick, "received_at", None),
+                context.evaluated_at,
+                config.strategy_reference_max_age_ms,
+            )
+            and (
+                getattr(context.reference_tick, "source_age_ms", None) is None
+                or context.reference_tick.source_age_ms
+                <= config.strategy_reference_source_max_age_ms
+            ),
             "book_ready": desired_bid is not None
             and desired_ask is not None
-            and desired_bid < desired_ask,
+            and desired_bid < desired_ask
+            and _timestamp_within_age(
+                getattr(context.orderbook, "received_at", None),
+                context.evaluated_at,
+                config.strategy_kalshi_book_max_age_ms,
+            ),
         },
     }
 
@@ -790,3 +810,13 @@ def _json_safe(value: Any) -> Any:
 
 def _utc(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _timestamp_within_age(
+    value: datetime | None,
+    evaluated_at: datetime,
+    max_age_ms: int,
+) -> bool:
+    if value is None:
+        return False
+    return (_utc(evaluated_at) - _utc(value)).total_seconds() * 1000 <= max_age_ms

@@ -459,6 +459,62 @@ def test_v2_pending_intent_resolves_without_current_candidate_side(session) -> N
     assert event.occurred_at == fill_time.replace(tzinfo=None)
 
 
+def test_v2_sweeps_expired_intents_without_an_active_market(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    intents = StrategyV2Repository(session)
+    for intent_id, market_ticker in (
+        ("v2-expired-after-rollover", "KXBTC15M-EXPIRED"),
+        ("v2-no-fill-after-rollover", "KXBTC15M-NO-FILL"),
+    ):
+        intents.insert_intent_if_absent(
+            StrategyTradeIntentInput(
+                intent_id=intent_id,
+                strategy_id=V2_STRATEGY_ID,
+                decision_id=f"{intent_id}-decision",
+                market_ticker=market_ticker,
+                side_candidate="YES",
+                action="ENTRY",
+                created_at=now - timedelta(seconds=4),
+                effective_after=now - timedelta(seconds=3),
+                expires_at=now - timedelta(seconds=1),
+                intended_limit_price=Decimal("0.62"),
+                quantity=Decimal("1"),
+            )
+        )
+    OrderbookRepository(session).insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker="KXBTC15M-NO-FILL",
+            received_at=now - timedelta(seconds=2),
+            sequence_number=1,
+            yes_bid=Decimal("0.64"),
+            yes_ask=Decimal("0.65"),
+            yes_ask_count=Decimal("1"),
+            book_status="ok",
+        )
+    )
+
+    observer_module._apply_v2_hypothetical_lifecycle(
+        session=session,
+        decision=StrategyDecisionInput(
+            decision_id="v2-no-active-market-decision",
+            evaluated_at=now,
+            decision_state="V2_HARD_GATE_BLOCKED",
+            primary_reason="no_active_market",
+            app_mode="DRY_RUN",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=None,
+            candidate_side=None,
+        ),
+    )
+
+    expired = intents.get_intent("v2-expired-after-rollover")
+    no_fill = intents.get_intent("v2-no-fill-after-rollover")
+    assert expired is not None
+    assert expired.status == "EXPIRED"
+    assert no_fill is not None
+    assert no_fill.status == "NO_FILL"
+
+
 def test_v2_position_mark_uses_the_held_side_bid(session) -> None:
     now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
     market_ticker = "KXBTC15M-ACTIVE"
