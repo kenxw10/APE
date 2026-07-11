@@ -396,6 +396,7 @@ def test_strategy_observer_persists_one_feature_snapshot_and_config_attribution(
 
 def test_v2_pending_intent_resolves_without_current_candidate_side(session) -> None:
     now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    fill_time = now - timedelta(milliseconds=500)
     market_ticker = "KXBTC15M-ACTIVE"
     intents = StrategyV2Repository(session)
     intents.insert_intent_if_absent(
@@ -416,7 +417,7 @@ def test_v2_pending_intent_resolves_without_current_candidate_side(session) -> N
     OrderbookRepository(session).insert_snapshot(
         OrderbookSnapshotInput(
             market_ticker=market_ticker,
-            received_at=now,
+            received_at=fill_time,
             sequence_number=1,
             yes_bid=Decimal("0.60"),
             yes_ask=Decimal("0.61"),
@@ -445,9 +446,17 @@ def test_v2_pending_intent_resolves_without_current_candidate_side(session) -> N
     intent = intents.get_intent("v2-pending-no-current-candidate")
     assert intent is not None
     assert intent.status == "FILLED"
-    assert StrategyDryRunRepository(session).count_open_positions(
-        strategy_id=V2_STRATEGY_ID
-    ) == 1
+    assert intent.resolved_at == now.replace(tzinfo=None)
+    positions = StrategyDryRunRepository(session)
+    position = positions.get_open_position_by_market(
+        strategy_id=V2_STRATEGY_ID,
+        market_ticker=market_ticker,
+    )
+    event = positions.get_latest_event(strategy_id=V2_STRATEGY_ID)
+    assert position is not None
+    assert position.opened_at == fill_time.replace(tzinfo=None)
+    assert event is not None
+    assert event.occurred_at == fill_time.replace(tzinfo=None)
 
 
 def test_v2_position_mark_uses_the_held_side_bid(session) -> None:

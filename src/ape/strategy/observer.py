@@ -4489,6 +4489,7 @@ def _apply_v2_hypothetical_lifecycle(
                     fill_price=ask,
                     fill_size=Decimal(pending.quantity),
                 )
+                fill_time = future_book.received_at
                 position_id = f"v2-pos-{_stable_hash({'intent': pending.intent_id})[:24]}"
                 position = positions.insert_position_if_absent(
                     StrategyDryRunPositionInput(
@@ -4498,7 +4499,7 @@ def _apply_v2_hypothetical_lifecycle(
                         decision_id=pending.decision_id,
                         side_candidate=pending.side_candidate,
                         economic_side=pending.side_candidate,
-                        opened_at=now,
+                        opened_at=fill_time,
                         open_price=ask,
                         contract_count=int(Decimal(pending.quantity)),
                         entry_reason="v2_causal_hypothetical_fill",
@@ -4520,7 +4521,7 @@ def _apply_v2_hypothetical_lifecycle(
                     StrategyDryRunEventInput(
                         event_id=f"v2-event-{fill_event_id}",
                         event_type="ENTER_DRY_RUN",
-                        occurred_at=now,
+                        occurred_at=fill_time,
                         strategy_id=V2_STRATEGY_ID,
                         position_id=position.position_id,
                         decision_id=pending.decision_id,
