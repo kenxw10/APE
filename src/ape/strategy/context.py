@@ -70,6 +70,7 @@ def load_strategy_evaluation_context(
     evaluated_at: datetime,
     reference_lookback_seconds: int = 130,
     trade_lookback_seconds: int = 30,
+    orderbook_lookback_seconds: int = 95,
 ) -> StrategyEvaluationContext:
     market = MarketsRepository(session).get_active_market(
         now=evaluated_at,
@@ -119,7 +120,7 @@ def load_strategy_evaluation_context(
     orderbook_history = tuple(
         orderbook_repository.get_snapshots_since(
             market.market_ticker,
-            evaluated_at - timedelta(seconds=95),
+            evaluated_at - timedelta(seconds=orderbook_lookback_seconds),
             limit=512,
         )
     )

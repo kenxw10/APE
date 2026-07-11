@@ -1299,7 +1299,12 @@ def evaluate_strategy_observer(
 
     reference_since = evaluated_at - timedelta(seconds=config.strategy_brti_lookback_long_seconds)
     reference_ticks = (
-        list(shared_context.reference_ticks)
+        [
+            tick
+            for tick in shared_context.reference_ticks
+            if tick.received_at is not None
+            and _as_utc(tick.received_at) >= _as_utc(reference_since)
+        ]
         if shared_context is not None
         else ReferenceTicksRepository(session).get_ticks_since(
             BRTI_SOURCE,
@@ -1621,12 +1626,23 @@ def evaluate_strategy_variants(
     shared_trade_lookback_seconds = max(
         variant.strategy_trade_confirmation_lookback_seconds for variant in variant_configs
     )
+    shared_orderbook_lookback_seconds = max(
+        95,
+        *(
+            max(
+                variant.strategy_contract_lookback_seconds,
+                variant.strategy_contract_ask_pullback_lookback_seconds,
+            )
+            for variant in variant_configs
+        ),
+    )
     context = load_strategy_evaluation_context(
         config=config,
         session=session,
         evaluated_at=evaluated_at,
         reference_lookback_seconds=shared_reference_lookback_seconds,
         trade_lookback_seconds=shared_trade_lookback_seconds,
+        orderbook_lookback_seconds=shared_orderbook_lookback_seconds,
     )
     v2_evaluation = evaluate_momentum_v2(context, config=config)
     v2_repository = StrategyV2Repository(session)

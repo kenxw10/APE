@@ -498,6 +498,7 @@ def test_variants_receive_one_shared_context_per_iteration(session, monkeypatch)
             "STRATEGY_V2_ENABLED": "true",
             "STRATEGY_BRTI_LOOKBACK_LONG_SECONDS": "240",
             "STRATEGY_TRADE_CONFIRMATION_LOOKBACK_SECONDS": "45",
+            "STRATEGY_CONTRACT_LOOKBACK_SECONDS": "120",
         }
     )
     _seed_observable_context(session, now=now)
@@ -506,12 +507,14 @@ def test_variants_receive_one_shared_context_per_iteration(session, monkeypatch)
     contexts = []
     reference_lookbacks = []
     trade_lookbacks = []
+    orderbook_lookbacks = []
 
     def load_once(**kwargs):
         nonlocal load_count
         load_count += 1
         reference_lookbacks.append(kwargs["reference_lookback_seconds"])
         trade_lookbacks.append(kwargs["trade_lookback_seconds"])
+        orderbook_lookbacks.append(kwargs["orderbook_lookback_seconds"])
         return original_loader(**kwargs)
 
     def capture_context(*, config, safety, session, now, shared_context=None):
@@ -541,6 +544,7 @@ def test_variants_receive_one_shared_context_per_iteration(session, monkeypatch)
     assert load_count == 1
     assert reference_lookbacks == [240]
     assert trade_lookbacks == [45]
+    assert orderbook_lookbacks == [120]
     assert len(contexts) == 2
     assert contexts[0] is contexts[1]
     assert [variant.strategy_id for variant, _ in results] == [
@@ -581,6 +585,16 @@ def test_shared_context_trims_orderbook_history_to_variant_lookback(session, mon
             side_inferred="YES",
         )
     )
+    old_reference_tick = ReferenceTicksRepository(session).insert_tick(
+        ReferenceTickInput(
+            source="kalshi_cfbenchmarks_brti",
+            received_at=now - timedelta(seconds=90),
+            source_ts=now - timedelta(seconds=90),
+            raw_value="62010",
+            parsed_value=Decimal("62010"),
+            parse_status="valid",
+        )
+    )
     shared_context = observer_module.load_strategy_evaluation_context(
         config=config,
         session=session,
@@ -588,8 +602,10 @@ def test_shared_context_trims_orderbook_history_to_variant_lookback(session, mon
         reference_lookback_seconds=config.strategy_brti_lookback_long_seconds,
     )
     captured: dict[str, object] = {}
+    variant_config = replace(config, strategy_brti_lookback_long_seconds=60)
     original_metrics = observer_module._contract_confirmation_metrics
     original_trade_metrics = observer_module._trade_confirmation_metrics
+    original_impulse_metrics = observer_module._brti_impulse_metrics
 
     def capture_metrics(**kwargs):
         captured["orderbook_history"] = kwargs["orderbook_history"]
@@ -599,11 +615,16 @@ def test_shared_context_trims_orderbook_history_to_variant_lookback(session, mon
         captured["recent_trades"] = kwargs["trades"]
         return original_trade_metrics(**kwargs)
 
+    def capture_impulse_metrics(**kwargs):
+        captured["reference_ticks"] = kwargs["ticks"]
+        return original_impulse_metrics(**kwargs)
+
     monkeypatch.setattr(observer_module, "_contract_confirmation_metrics", capture_metrics)
     monkeypatch.setattr(observer_module, "_trade_confirmation_metrics", capture_trade_metrics)
+    monkeypatch.setattr(observer_module, "_brti_impulse_metrics", capture_impulse_metrics)
 
     evaluate_strategy_observer(
-        config=config,
+        config=variant_config,
         safety=safety,
         session=session,
         now=now,
@@ -625,6 +646,14 @@ def test_shared_context_trims_orderbook_history_to_variant_lookback(session, mon
         observer_module._as_utc(trade.received_at)
         >= now - timedelta(seconds=config.strategy_trade_confirmation_lookback_seconds)
         for trade in recent_trades
+    )
+    reference_ticks = captured["reference_ticks"]
+    assert isinstance(reference_ticks, list)
+    assert old_reference_tick.id not in {tick.id for tick in reference_ticks}
+    assert all(
+        observer_module._as_utc(tick.received_at)
+        >= now - timedelta(seconds=variant_config.strategy_brti_lookback_long_seconds)
+        for tick in reference_ticks
     )
 
 
