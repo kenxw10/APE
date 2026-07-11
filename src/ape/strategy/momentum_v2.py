@@ -547,7 +547,17 @@ def _feature_snapshot(
             {
                 key: value
                 for key, value in features.items()
-                if "imbalance" in key or key in {"trade_ratio", "trade_count"}
+                if "imbalance" in key
+                or key
+                in {
+                    "trade_ratio",
+                    "trade_count",
+                    "order_flow_5s",
+                    "order_flow_15s",
+                    "desired_bid_replenishment",
+                    "opposing_ask_depletion",
+                    "depth_withdrawal_pressure",
+                }
             }
         ),
         execution_features=execution,

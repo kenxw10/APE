@@ -18,6 +18,44 @@ def test_v2_json_safe_serializes_boundary_cross_timestamp() -> None:
     }
 
 
+def test_v2_feature_snapshot_includes_microstructure_flow_and_pressure_metrics() -> None:
+    evaluated_at = datetime(2026, 7, 11, 12, 10, tzinfo=UTC)
+    context = StrategyEvaluationContext(
+        evaluated_at=evaluated_at,
+        market=None,
+        boundary=None,
+        boundary_source=None,
+        reference_tick=None,
+        orderbook=None,
+        latest_trade=None,
+        reference_ticks=(),
+        orderbook_history=(),
+        recent_trades=(),
+    )
+
+    snapshot = momentum_v2._feature_snapshot(
+        context,
+        {
+            "candidate_side": "YES",
+            "candidate_mode": "CONTINUATION",
+            "quality_state": {},
+            "order_flow_5s": Decimal("0.11"),
+            "order_flow_15s": Decimal("0.22"),
+            "desired_bid_replenishment": Decimal("0.33"),
+            "opposing_ask_depletion": Decimal("0.44"),
+            "depth_withdrawal_pressure": Decimal("0.55"),
+        },
+    )
+
+    assert snapshot.microstructure_features == {
+        "order_flow_5s": "0.11",
+        "order_flow_15s": "0.22",
+        "desired_bid_replenishment": "0.33",
+        "opposing_ask_depletion": "0.44",
+        "depth_withdrawal_pressure": "0.55",
+    }
+
+
 def test_low_edge_uses_dedicated_v2_edge_state(monkeypatch) -> None:
     evaluated_at = datetime(2026, 7, 11, 12, 10, tzinfo=UTC)
     context = StrategyEvaluationContext(
