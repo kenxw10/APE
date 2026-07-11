@@ -4454,7 +4454,11 @@ def _apply_v2_hypothetical_lifecycle(
         )
         future_book: OrderbookSnapshot | None = None
         for candidate_book in future_books:
-            _, candidate_ask, _, _, candidate_ask_depth = _desired_book(
+            _, candidate_ask, _ = _desired_book(
+                candidate_book,
+                pending.side_candidate,
+            )
+            candidate_ask_depth = _desired_top_book_size(
                 candidate_book,
                 pending.side_candidate,
             )
@@ -4467,7 +4471,8 @@ def _apply_v2_hypothetical_lifecycle(
                 future_book = candidate_book
                 break
         if future_book is not None:
-            bid, ask, _, _, ask_depth = _desired_book(future_book, pending.side_candidate)
+            bid, ask, _ = _desired_book(future_book, pending.side_candidate)
+            ask_depth = _desired_top_book_size(future_book, pending.side_candidate)
             del bid
             if (
                 ask is not None
