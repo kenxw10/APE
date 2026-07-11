@@ -13,8 +13,10 @@ from ape.repositories.inputs import (
     OrderbookSnapshotInput,
     PublicTradeInput,
     ReferenceTickInput,
+    StrategyDecisionInput,
     StrategyDryRunEventInput,
     StrategyDryRunPositionInput,
+    StrategyTradeIntentInput,
     WorkerHeartbeatInput,
 )
 from ape.repositories.markets import MarketsRepository
@@ -27,6 +29,7 @@ from ape.repositories.strategy_v2 import StrategyV2Repository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import assess_startup_safety
 from ape.strategy import observer as observer_module
+from ape.strategy.momentum_v2 import V2_STRATEGY_ID
 from ape.strategy.observer import (
     CHALLENGER_STRATEGY_ID,
     CONTROL_STRATEGY_ID,
@@ -389,6 +392,116 @@ def test_strategy_observer_persists_one_feature_snapshot_and_config_attribution(
         assert stored.code_commit_sha is not None
     finally:
         engine.dispose()
+
+
+def test_v2_pending_intent_resolves_without_current_candidate_side(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    market_ticker = "KXBTC15M-ACTIVE"
+    intents = StrategyV2Repository(session)
+    intents.insert_intent_if_absent(
+        StrategyTradeIntentInput(
+            intent_id="v2-pending-no-current-candidate",
+            strategy_id=V2_STRATEGY_ID,
+            decision_id="v2-entry-decision",
+            market_ticker=market_ticker,
+            side_candidate="YES",
+            action="ENTRY",
+            created_at=now - timedelta(seconds=2),
+            effective_after=now - timedelta(seconds=1),
+            expires_at=now + timedelta(seconds=1),
+            intended_limit_price=Decimal("0.62"),
+            quantity=Decimal("1"),
+        )
+    )
+    OrderbookRepository(session).insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker=market_ticker,
+            received_at=now,
+            sequence_number=1,
+            yes_bid=Decimal("0.60"),
+            yes_ask=Decimal("0.61"),
+            yes_ask_count=Decimal("1"),
+            no_bid=Decimal("0.39"),
+            no_ask=Decimal("0.40"),
+            no_ask_count=Decimal("1"),
+            book_status="ok",
+        )
+    )
+
+    observer_module._apply_v2_hypothetical_lifecycle(
+        session=session,
+        decision=StrategyDecisionInput(
+            decision_id="v2-no-current-candidate-decision",
+            evaluated_at=now,
+            decision_state="V2_HARD_GATE_BLOCKED",
+            primary_reason="reference_stale",
+            app_mode="DRY_RUN",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=market_ticker,
+            candidate_side=None,
+        ),
+    )
+
+    intent = intents.get_intent("v2-pending-no-current-candidate")
+    assert intent is not None
+    assert intent.status == "FILLED"
+    assert StrategyDryRunRepository(session).count_open_positions(
+        strategy_id=V2_STRATEGY_ID
+    ) == 1
+
+
+def test_v2_position_mark_uses_the_held_side_bid(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    market_ticker = "KXBTC15M-ACTIVE"
+    StrategyDryRunRepository(session).insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="v2-held-yes-position",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=market_ticker,
+            decision_id="v2-entry-decision",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now - timedelta(seconds=1),
+            open_price=Decimal("0.62"),
+            contract_count=1,
+            entry_reason="v2_causal_hypothetical_fill",
+            status="OPEN",
+        )
+    )
+    OrderbookRepository(session).insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker=market_ticker,
+            received_at=now,
+            sequence_number=1,
+            yes_bid=Decimal("0.64"),
+            yes_ask=Decimal("0.66"),
+            no_bid=Decimal("0.34"),
+            no_ask=Decimal("0.36"),
+            book_status="ok",
+        )
+    )
+
+    observer_module._apply_v2_hypothetical_lifecycle(
+        session=session,
+        decision=StrategyDecisionInput(
+            decision_id="v2-current-no-candidate-decision",
+            evaluated_at=now,
+            decision_state="V2_HARD_GATE_BLOCKED",
+            primary_reason="reference_stale",
+            app_mode="DRY_RUN",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=market_ticker,
+            candidate_side="NO",
+            measurements={"features": {"desired_bid": "0.34"}},
+        ),
+    )
+
+    marks = StrategyV2Repository(session).list_recent_marks(
+        strategy_id=V2_STRATEGY_ID,
+        limit=1,
+    )
+    assert marks[0].position_id == "v2-held-yes-position"
+    assert marks[0].executable_bid == Decimal("0.64")
 
 
 def test_dry_run_status_reports_disabled_challenger_without_worker_metadata(

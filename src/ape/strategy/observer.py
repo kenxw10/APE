@@ -4436,7 +4436,7 @@ def _apply_v2_hypothetical_lifecycle(
     latest_event_type: str | None = None
     latest_position_id: str | None = None
     market_ticker = decision.market_ticker
-    if market_ticker is None or decision.candidate_side not in {"YES", "NO"}:
+    if market_ticker is None:
         return DryRunLedgerResult(
             open_position_count=positions.count_open_positions(strategy_id=V2_STRATEGY_ID)
         )
@@ -4551,6 +4551,7 @@ def _apply_v2_hypothetical_lifecycle(
 
     if (
         decision.decision_state == STATE_V2_ENTRY_SIGNAL
+        and decision.candidate_side in {"YES", "NO"}
         and pending is None
         and not positions.has_any_position_for_market(
             strategy_id=V2_STRATEGY_ID,
@@ -4597,9 +4598,13 @@ def _apply_v2_hypothetical_lifecycle(
 
     open_position = positions.get_latest_open_position(strategy_id=V2_STRATEGY_ID)
     if open_position is not None and open_position.market_ticker == market_ticker:
-        features = (decision.measurements or {}).get("features")
-        desired_bid = _decimal_or_none(
-            features.get("desired_bid") if isinstance(features, dict) else None
+        mark_orderbook = OrderbookRepository(session).get_latest_snapshot(
+            open_position.market_ticker
+        )
+        desired_bid, _, _ = (
+            _desired_book(mark_orderbook, open_position.side_candidate)
+            if mark_orderbook is not None
+            else (None, None, None)
         )
         score = _decimal_or_none(
             (decision.measurements or {}).get("score", {}).get("total")
