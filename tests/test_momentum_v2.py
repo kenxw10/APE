@@ -111,6 +111,15 @@ def test_low_edge_uses_dedicated_v2_edge_state(monkeypatch) -> None:
     assert result.reason == "v2_edge_below_threshold"
     assert result.blockers == []
 
+    features["candidate_mode"] = "BOUNDARY_CROSS_HOLD"
+    monkeypatch.setattr(momentum_v2, "_edge", lambda _features: Decimal("2"))
+
+    held_cross_result = momentum_v2.evaluate_momentum_v2(context, config=load_config({}))
+
+    assert held_cross_result.state == momentum_v2.STATE_V2_ENTRY_SIGNAL
+    assert held_cross_result.reason == "v2_entry_signal"
+    assert held_cross_result.candidate_mode == "BOUNDARY_CROSS_HOLD"
+
 
 def test_v2_blocks_stale_persisted_reference_and_orderbook() -> None:
     evaluated_at = datetime(2026, 7, 11, 12, 10, tzinfo=UTC)

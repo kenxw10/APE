@@ -243,7 +243,7 @@ def evaluate_momentum_v2(
             snapshot,
             measurements,
         )
-    if mode != "CONTINUATION":
+    if mode not in {"BOUNDARY_CROSS_HOLD", "CONTINUATION"}:
         return V2Evaluation(
             STATE_V2_HARD_GATE_BLOCKED,
             "v2_candidate_mode_not_enabled",
