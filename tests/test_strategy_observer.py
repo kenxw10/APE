@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -496,16 +495,19 @@ def test_variants_receive_one_shared_context_per_iteration(session, monkeypatch)
             "STRATEGY_DRY_RUN_ENABLED": "true",
             "STRATEGY_CHALLENGER_ENABLED": "true",
             "STRATEGY_V2_ENABLED": "true",
+            "STRATEGY_BRTI_LOOKBACK_LONG_SECONDS": "240",
         }
     )
     _seed_observable_context(session, now=now)
     original_loader = observer_module.load_strategy_evaluation_context
     load_count = 0
     contexts = []
+    reference_lookbacks = []
 
     def load_once(**kwargs):
         nonlocal load_count
         load_count += 1
+        reference_lookbacks.append(kwargs["reference_lookback_seconds"])
         return original_loader(**kwargs)
 
     def capture_context(*, config, safety, session, now, shared_context=None):
@@ -533,6 +535,7 @@ def test_variants_receive_one_shared_context_per_iteration(session, monkeypatch)
     )
 
     assert load_count == 1
+    assert reference_lookbacks == [240]
     assert len(contexts) == 2
     assert contexts[0] is contexts[1]
     assert [variant.strategy_id for variant, _ in results] == [
@@ -605,6 +608,8 @@ def test_v2_causal_exit_fill_closes_once_and_persists_outcome(session) -> None:
     assert exit_intent is not None
     assert exit_intent.action == "EXIT"
     assert exit_intent.status == "PENDING"
+    marks_before_exit = intents.list_marks_for_position(position_id="v2-open-exit")
+    assert [mark.executable_bid for mark in marks_before_exit] == [Decimal("0.74")]
 
     first_future_book = OrderbookRepository(session).insert_snapshot(
         OrderbookSnapshotInput(
@@ -625,28 +630,33 @@ def test_v2_causal_exit_fill_closes_once_and_persists_outcome(session) -> None:
         OrderbookSnapshotInput(
             market_ticker=market_ticker,
             received_at=now + timedelta(seconds=1),
-            yes_bid=Decimal("0.74"),
-            yes_ask=Decimal("0.75"),
+            yes_bid=Decimal("0.75"),
+            yes_ask=Decimal("0.76"),
             yes_bid_count=Decimal("1"),
             yes_ask_count=Decimal("1"),
-            no_bid=Decimal("0.25"),
-            no_ask=Decimal("0.26"),
+            no_bid=Decimal("0.24"),
+            no_ask=Decimal("0.25"),
             no_bid_count=Decimal("1"),
             no_ask_count=Decimal("1"),
             book_status="ok",
         )
     )
-    observer_module._apply_v2_hypothetical_lifecycle(
-        config=load_config({}),
+    event_type, position_id = observer_module._resolve_v2_pending_exit(
         session=session,
-        decision=replace(decision, evaluated_at=now + timedelta(seconds=2)),
+        intents=intents,
+        positions=positions,
+        pending=exit_intent,
+        resolved_at=now + timedelta(seconds=2),
+        decision=decision,
     )
+    assert event_type == "V2_EXIT_FILLED"
+    assert position_id == "v2-open-exit"
 
     position = positions.get_position_by_id("v2-open-exit")
     assert position is not None
     assert position.status == "CLOSED"
-    assert position.close_price == Decimal("0.74")
-    assert position.realized_pnl_cents == Decimal("11")
+    assert position.close_price == Decimal("0.75")
+    assert position.realized_pnl_cents == Decimal("12")
     resolved_exit_intent = next(
         intent
         for intent in intents.list_recent_intents(
@@ -660,6 +670,7 @@ def test_v2_causal_exit_fill_closes_once_and_persists_outcome(session) -> None:
     outcomes = intents.list_recent_outcomes(strategy_id=V2_STRATEGY_ID, limit=10)
     assert len(outcomes) == 1
     assert outcomes[0].exit_intent_id == exit_intent.intent_id
+    assert outcomes[0].mfe_cents == Decimal("12")
 
 
 def test_v2_intent_uses_recorded_timing_parameters(session, monkeypatch) -> None:

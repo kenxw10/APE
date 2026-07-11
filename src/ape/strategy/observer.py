@@ -1600,17 +1600,24 @@ def evaluate_strategy_variants(
     if session.bind is not None and session.bind.dialect.name == "postgresql":
         # Keep both variants on the same committed market/reference snapshot.
         session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+    variant_configs = strategy_variant_configs(config, safety)
+    # V2 needs 130 seconds of reference history; control/challenger variants may need more.
+    shared_reference_lookback_seconds = max(
+        130,
+        *(variant.strategy_brti_lookback_long_seconds for variant in variant_configs),
+    )
     context = load_strategy_evaluation_context(
         config=config,
         session=session,
         evaluated_at=evaluated_at,
+        reference_lookback_seconds=shared_reference_lookback_seconds,
     )
     v2_evaluation = evaluate_momentum_v2(context, config=config)
     v2_repository = StrategyV2Repository(session)
     feature_snapshot = v2_repository.ensure_feature_snapshot(v2_evaluation.feature_snapshot)
     results: list[tuple[AppConfig, StrategyDecisionInput]] = []
 
-    for variant_config in strategy_variant_configs(config, safety):
+    for variant_config in variant_configs:
         decision = evaluate_strategy_observer(
             config=variant_config,
             safety=safety,
@@ -5077,12 +5084,14 @@ def _persist_v2_outcome(
         ((Decimal(mark.executable_bid) - entry) * Decimal("100") * quantity, mark.marked_at)
         for mark in marks
     ]
-    if excursions:
-        mfe, mfe_at = max(excursions, key=lambda item: item[0])
-        mae, mae_at = min(excursions, key=lambda item: item[0])
-    else:
-        mfe = mae = Decimal("0")
-        mfe_at = mae_at = position.closed_at
+    excursions.append(
+        (
+            (Decimal(position.close_price) - entry) * Decimal("100") * quantity,
+            exit_intent.fill_timestamp or position.closed_at,
+        )
+    )
+    mfe, mfe_at = max(excursions, key=lambda item: item[0])
+    mae, mae_at = min(excursions, key=lambda item: item[0])
     entry_intent = intents.get_intent(position.entry_intent_id or "")
     intents.insert_outcome_if_absent(
         StrategyPositionOutcomeInput(

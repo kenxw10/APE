@@ -64,7 +64,11 @@ class StrategyEvaluationContext:
 
 
 def load_strategy_evaluation_context(
-    *, config: AppConfig, session: Session, evaluated_at: datetime
+    *,
+    config: AppConfig,
+    session: Session,
+    evaluated_at: datetime,
+    reference_lookback_seconds: int = 130,
 ) -> StrategyEvaluationContext:
     market = MarketsRepository(session).get_active_market(
         now=evaluated_at,
@@ -104,8 +108,8 @@ def load_strategy_evaluation_context(
     reference_ticks = tuple(
         reference_repository.get_ticks_since(
             BRTI_SOURCE,
-            evaluated_at - timedelta(seconds=130),
-            limit=512,
+            evaluated_at - timedelta(seconds=reference_lookback_seconds),
+            limit=max(reference_lookback_seconds * 4, 512),
         )
     )
     orderbook = market_liveness.latest_orderbook or orderbook_repository.get_latest_snapshot(
