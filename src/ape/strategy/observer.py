@@ -430,6 +430,7 @@ class StrategyObserver:
         self.status.variants = {
             variant_decision.strategy_id: _variant_runtime_metadata(
                 config=variant_config,
+                safety=self.safety,
                 decision=variant_decision,
                 ledger_result=ledger_results[variant_decision.strategy_id],
             )
@@ -1604,12 +1605,13 @@ def strategy_variant_configs(
 def _variant_runtime_metadata(
     *,
     config: AppConfig,
+    safety: SafetyAssessment,
     decision: StrategyDecisionInput,
     ledger_result: DryRunLedgerResult,
 ) -> dict[str, Any]:
     return {
         "strategy_id": decision.strategy_id,
-        "enabled": True,
+        "enabled": _dry_run_runtime_enabled(config, safety),
         "thresholds": _thresholds(config),
         "latest_decision_id": decision.decision_id,
         "latest_evaluated_at": _isoformat_or_none(decision.evaluated_at),

@@ -356,6 +356,46 @@ def test_strategy_challenger_is_disabled_without_the_opt_in_flag() -> None:
     assert [variant.strategy_id for variant in variants] == [CONTROL_STRATEGY_ID]
 
 
+def test_strategy_variant_metadata_reports_disabled_when_dry_run_is_off(tmp_path) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_strategy_disabled.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "false",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        with session_factory() as session:
+            _seed_observable_context(session, now=now)
+
+        observer = StrategyObserver(
+            config=config,
+            safety=assess_startup_safety(config),
+            session_factory=session_factory,
+            started_at=now - timedelta(minutes=1),
+            now=lambda: now,
+        )
+        observer.evaluate_once()
+
+        with session_factory() as session:
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                "ape-worker"
+            )
+
+        assert heartbeat is not None
+        assert (
+            heartbeat.metadata_["strategy"]["variants"][CONTROL_STRATEGY_ID]["enabled"]
+            is False
+        )
+    finally:
+        engine.dispose()
+
+
 def test_dry_run_comparison_excludes_old_closed_positions_from_window(session) -> None:
     now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
     repository = StrategyDryRunRepository(session)
