@@ -38,6 +38,7 @@ from ape.repositories.orderbook import OrderbookRepository
 from ape.repositories.public_trades import PublicTradesRepository
 from ape.repositories.reference_ticks import ReferenceTicksRepository
 from ape.repositories.storage_retention import (
+    ALLOWED_RAW_PAYLOAD_READ_TABLES,
     ALLOWED_RETENTION_TABLES,
     ALLOWED_STATUS_READ_TABLES,
     StorageRetentionRepository,
@@ -75,6 +76,7 @@ def test_all_retention_policy_tables_are_repository_allowlisted() -> None:
     assert "strategy_position_outcomes" not in RETENTION_TABLE_NAMES
     assert "strategy_position_outcomes" not in ALLOWED_RETENTION_TABLES
     assert "strategy_position_outcomes" in ALLOWED_STATUS_READ_TABLES
+    assert "strategy_position_outcomes" not in ALLOWED_RAW_PAYLOAD_READ_TABLES
 
 
 def test_storage_status_reads_outcomes_without_authorizing_retention_mutation(
@@ -101,12 +103,27 @@ def test_storage_status_reads_outcomes_without_authorizing_retention_mutation(
                 parameters={"cutoff": datetime.now(UTC)},
             )
         with pytest.raises(ValueError, match="Unsupported retention table"):
+            repository.has_matching(
+                table_name="strategy_position_outcomes",
+                condition_sql="closed_at < :cutoff",
+                parameters={"cutoff": datetime.now(UTC)},
+            )
+        with pytest.raises(ValueError, match="Unsupported retention table"):
             repository.delete_batch(
                 table_name="strategy_position_outcomes",
                 condition_sql="closed_at < :cutoff",
                 parameters={"cutoff": datetime.now(UTC)},
                 batch_size=1,
             )
+        with pytest.raises(ValueError, match="Unsupported retention table"):
+            repository.strip_raw_payload_batch(
+                table_name="strategy_position_outcomes",
+                condition_sql="closed_at < :cutoff",
+                parameters={"cutoff": datetime.now(UTC)},
+                batch_size=1,
+            )
+        with pytest.raises(ValueError, match="Unsupported raw payload storage table"):
+            repository.raw_payload_non_null_count("strategy_position_outcomes")
 
 
 def test_storage_retention_keeps_old_position_outcomes_durable(retention_db) -> None:

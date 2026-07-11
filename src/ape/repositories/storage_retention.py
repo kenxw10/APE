@@ -29,6 +29,11 @@ ALLOWED_RETENTION_TABLES = {
 ALLOWED_STATUS_READ_TABLES = ALLOWED_RETENTION_TABLES | {
     "strategy_position_outcomes",
 }
+ALLOWED_RAW_PAYLOAD_READ_TABLES = {
+    "orderbook_snapshots",
+    "public_trades",
+    "reference_ticks",
+}
 JSON_FIELDS = {
     "deleted_rows",
     "raw_payload_stripped_rows",
@@ -264,7 +269,7 @@ class StorageRetentionRepository:
         return _datetime_or_none(row.oldest_row_at), _datetime_or_none(row.newest_row_at)
 
     def raw_payload_non_null_count(self, table_name: str) -> int | None:
-        _validate_status_read_table(table_name)
+        _validate_raw_payload_read_table(table_name)
         if self.session.bind is not None and self.session.bind.dialect.name == "postgresql":
             value = self.session.scalar(
                 text(
@@ -307,6 +312,11 @@ def _validate_retention_table(table_name: str) -> None:
 def _validate_status_read_table(table_name: str) -> None:
     if table_name not in ALLOWED_STATUS_READ_TABLES:
         raise ValueError(f"Unsupported storage status table: {table_name}")
+
+
+def _validate_raw_payload_read_table(table_name: str) -> None:
+    if table_name not in ALLOWED_RAW_PAYLOAD_READ_TABLES:
+        raise ValueError(f"Unsupported raw payload storage table: {table_name}")
 
 
 def _run_values(run: StorageRetentionRunInput) -> dict[str, Any]:

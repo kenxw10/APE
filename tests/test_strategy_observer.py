@@ -693,7 +693,7 @@ def test_shared_context_trims_orderbook_history_to_variant_lookback(session, mon
     )
 
 
-def test_v2_causal_exit_fill_uses_the_first_qualifying_book_and_persists_outcome(session) -> None:
+def test_v2_causal_exit_fill_uses_the_first_in_window_book_and_persists_outcome(session) -> None:
     now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
     market_ticker = "KXBTC15M-V2-EXIT"
     positions = StrategyDryRunRepository(session)

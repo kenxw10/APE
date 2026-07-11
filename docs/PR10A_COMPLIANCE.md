@@ -19,7 +19,8 @@ This change remains DRY_RUN-only. It adds no execution credentials, private Kals
 
 ## Post-Merge Correction Note
 
-The R6, R8, and R9 rows above described the PR 10a implementation at merge time,
-but are not an unqualified assertion of the final V2 semantics. PR 10b remediates
-the boundary-cross mode eligibility, first-book-only EXIT fill behavior, and
-durable outcome-table status observability required after PR 10a.
+The post-merge audit found the PR 10a R6, R8, and R9 compliance claims
+incomplete and noncompliant. PR 10b was required to correct boundary-cross mode
+eligibility, first-in-window-book EXIT fill behavior, and durable
+outcome-table status observability. The R6, R8, and R9 claims above are
+superseded by PR 10b for final V2 semantic compliance.
