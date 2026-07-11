@@ -141,6 +141,9 @@ class OrderbookSnapshot(Base):
     yes_ask_count: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
     no_bid_count: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
     no_ask_count: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    ladder_schema_version: Mapped[str | None] = mapped_column(String(64))
+    yes_bid_ladder: Mapped[Any | None] = mapped_column(JSON)
+    no_bid_ladder: Mapped[Any | None] = mapped_column(JSON)
     book_status: Mapped[str | None] = mapped_column(String(64))
     raw_payload_hash: Mapped[str | None] = mapped_column(String(128))
     raw_payload: Mapped[Any | None] = mapped_column(JSON)
@@ -227,9 +230,7 @@ class KalshiWsProtocolEvent(Base):
     round_trip_ms: Mapped[int | None] = mapped_column(Integer)
     ping_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     pong_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    server_ping_received_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True)
-    )
+    server_ping_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     client_pong_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     subscription_state_before: Mapped[str | None] = mapped_column(String(128))
     subscription_state_after: Mapped[str | None] = mapped_column(String(128))
@@ -269,6 +270,10 @@ class StrategyDecision(Base):
     brti_value: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
     distance_bps: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
     seconds_left: Mapped[int | None] = mapped_column(Integer)
+    feature_snapshot_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    strategy_config_version_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    code_commit_sha: Mapped[str | None] = mapped_column(String(128))
+    calibration_run_id: Mapped[str | None] = mapped_column(String(128))
     measurements: Mapped[Any | None] = mapped_column(JSON)
     blockers: Mapped[Any | None] = mapped_column(JSON)
     warnings: Mapped[Any | None] = mapped_column(JSON)
@@ -313,6 +318,9 @@ class StrategyDryRunPosition(Base):
     close_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
     close_reason: Mapped[str | None] = mapped_column(Text)
     realized_pnl_cents: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    feature_snapshot_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    strategy_config_version_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    code_commit_sha: Mapped[str | None] = mapped_column(String(128))
     measurements: Mapped[Any | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -348,12 +356,136 @@ class StrategyDryRunEvent(Base):
     price: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
     contract_count: Mapped[int | None] = mapped_column(Integer)
     reason: Mapped[str | None] = mapped_column(Text)
+    feature_snapshot_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    strategy_config_version_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    code_commit_sha: Mapped[str | None] = mapped_column(String(128))
     measurements: Mapped[Any | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,
         nullable=False,
     )
+
+
+class StrategyFeatureSnapshot(Base):
+    __tablename__ = "strategy_feature_snapshots"
+    __table_args__ = (
+        UniqueConstraint("feature_snapshot_id", name="uq_strategy_feature_snapshots_id"),
+        Index(
+            "ix_strategy_feature_snapshots_market_evaluated",
+            "market_ticker",
+            "evaluated_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    feature_snapshot_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    market_ticker: Mapped[str | None] = mapped_column(String(128), index=True)
+    evaluated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    feature_schema_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    candidate_side: Mapped[str | None] = mapped_column(String(32))
+    candidate_mode: Mapped[str | None] = mapped_column(String(64))
+    boundary: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    current_brti: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    seconds_since_open: Mapped[int | None] = mapped_column(Integer)
+    seconds_left: Mapped[int | None] = mapped_column(Integer)
+    reference_tick_id: Mapped[int | None] = mapped_column(Integer)
+    orderbook_snapshot_id: Mapped[int | None] = mapped_column(Integer)
+    public_trade_id: Mapped[int | None] = mapped_column(Integer)
+    context_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    quality_state: Mapped[Any | None] = mapped_column(JSON)
+    reference_features: Mapped[Any | None] = mapped_column(JSON)
+    contract_features: Mapped[Any | None] = mapped_column(JSON)
+    microstructure_features: Mapped[Any | None] = mapped_column(JSON)
+    execution_features: Mapped[Any | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class StrategyConfigVersion(Base):
+    __tablename__ = "strategy_config_versions"
+    __table_args__ = (
+        UniqueConstraint("strategy_config_version_id", name="uq_strategy_config_versions_id"),
+        Index("ix_strategy_config_versions_strategy_created", "strategy_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    strategy_config_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    architecture_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    feature_schema_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    parameter_snapshot: Mapped[Any] = mapped_column(JSON, nullable=False)
+    parameter_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    code_commit_sha: Mapped[str] = mapped_column(String(128), nullable=False)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class StrategyTradeIntent(Base):
+    __tablename__ = "strategy_trade_intents"
+    __table_args__ = (
+        UniqueConstraint("intent_id", name="uq_strategy_trade_intents_id"),
+        Index(
+            "ix_strategy_trade_intents_strategy_market_created",
+            "strategy_id",
+            "market_ticker",
+            "created_at",
+        ),
+        Index("ix_strategy_trade_intents_status_effective", "status", "effective_after"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    intent_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    strategy_config_version_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    feature_snapshot_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    decision_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    position_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    market_ticker: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    side_candidate: Mapped[str] = mapped_column(String(32), nullable=False)
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    effective_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    intended_limit_price: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    optimistic_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    optimistic_snapshot_id: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fill_snapshot_id: Mapped[int | None] = mapped_column(Integer)
+    simulated_fill_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    simulated_fill_size: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    resolution_reason: Mapped[str | None] = mapped_column(Text)
+    measurements: Mapped[Any | None] = mapped_column(JSON)
+
+
+class StrategyPositionMark(Base):
+    __tablename__ = "strategy_position_marks"
+    __table_args__ = (
+        UniqueConstraint("mark_id", name="uq_strategy_position_marks_id"),
+        Index("ix_strategy_position_marks_position_marked", "position_id", "marked_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    mark_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    position_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    market_ticker: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    marked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    feature_snapshot_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    strategy_config_version_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    executable_bid: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    score: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    edge_lower_bound_cents: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    boundary_state: Mapped[Any | None] = mapped_column(JSON)
+    management_reason: Mapped[str | None] = mapped_column(Text)
+    measurements: Mapped[Any | None] = mapped_column(JSON)
 
 
 class WorkerHeartbeat(Base):

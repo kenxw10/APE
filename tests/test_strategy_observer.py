@@ -13,8 +13,10 @@ from ape.repositories.inputs import (
     OrderbookSnapshotInput,
     PublicTradeInput,
     ReferenceTickInput,
+    StrategyDecisionInput,
     StrategyDryRunEventInput,
     StrategyDryRunPositionInput,
+    StrategyTradeIntentInput,
     WorkerHeartbeatInput,
 )
 from ape.repositories.markets import MarketsRepository
@@ -23,9 +25,11 @@ from ape.repositories.public_trades import PublicTradesRepository
 from ape.repositories.reference_ticks import ReferenceTicksRepository
 from ape.repositories.strategy_decisions import StrategyDecisionsRepository
 from ape.repositories.strategy_dry_run import StrategyDryRunRepository
+from ape.repositories.strategy_v2 import StrategyV2Repository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import assess_startup_safety
 from ape.strategy import observer as observer_module
+from ape.strategy.momentum_v2 import STATE_V2_ENTRY_SIGNAL, V2_STRATEGY_ID
 from ape.strategy.observer import (
     CHALLENGER_STRATEGY_ID,
     CONTROL_STRATEGY_ID,
@@ -141,31 +145,28 @@ def test_strategy_blocks_on_market_protocol_readiness_failures() -> None:
     assert stale_reason({**base_metadata, "orderbook_sid_confirmed": False}) == (
         "kalshi_orderbook_orderbook_sid_unconfirmed"
     )
-    assert stale_reason(
-        {
-            **base_metadata,
-            "in_flight_snapshot_request": True,
-            "snapshot_request_age_ms": 11_000,
-        }
-    ) == "kalshi_orderbook_snapshot_resync_timeout"
+    assert (
+        stale_reason(
+            {
+                **base_metadata,
+                "in_flight_snapshot_request": True,
+                "snapshot_request_age_ms": 11_000,
+            }
+        )
+        == "kalshi_orderbook_snapshot_resync_timeout"
+    )
     assert stale_reason({**base_metadata, "db_writer_critical_queue_depth": 1500}) == (
         "kalshi_orderbook_db_writer_backpressure"
     )
-    assert stale_reason(
-        {**base_metadata, "db_writer_critical_queue_oldest_age_ms": 10_000}
-    ) == (
+    assert stale_reason({**base_metadata, "db_writer_critical_queue_oldest_age_ms": 10_000}) == (
         "kalshi_orderbook_db_writer_backpressure"
     )
-    assert stale_reason(
-        {**base_metadata, "blockers": ["market_critical_persistence_failed"]}
-    ) == (
+    assert stale_reason({**base_metadata, "blockers": ["market_critical_persistence_failed"]}) == (
         "kalshi_orderbook_db_writer_backpressure"
     )
     assert stale_reason(
         {**base_metadata, "blockers": ["market_critical_persistence_backpressure"]}
-    ) == (
-        "kalshi_orderbook_db_writer_backpressure"
-    )
+    ) == ("kalshi_orderbook_db_writer_backpressure")
     assert (
         stale_reason(
             {
@@ -211,9 +212,7 @@ def test_strategy_dry_run_records_hypothetical_entry_and_event(tmp_path) -> None
         with session_factory() as session:
             latest_decision = StrategyDecisionsRepository(session).get_latest_decision()
             dry_run_repository = StrategyDryRunRepository(session)
-            open_positions = dry_run_repository.list_open_positions(
-                strategy_id=config.strategy_id
-            )
+            open_positions = dry_run_repository.list_open_positions(strategy_id=config.strategy_id)
             events = dry_run_repository.list_recent_events(limit=10)
             heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
 
@@ -300,19 +299,13 @@ def test_strategy_challenger_runs_on_same_timestamp_with_separate_ledgers(tmp_pa
         control = observer.evaluate_once()
 
         with session_factory() as session:
-            decisions = StrategyDecisionsRepository(session).list_recent_decisions(
-                limit=10
-            )
+            decisions = StrategyDecisionsRepository(session).list_recent_decisions(limit=10)
             dry_run = StrategyDryRunRepository(session)
-            control_open_positions = dry_run.list_open_positions(
-                strategy_id=CONTROL_STRATEGY_ID
-            )
+            control_open_positions = dry_run.list_open_positions(strategy_id=CONTROL_STRATEGY_ID)
             challenger_open_positions = dry_run.list_open_positions(
                 strategy_id=CHALLENGER_STRATEGY_ID
             )
-            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
-                "ape-worker"
-            )
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
             comparison = build_strategy_variants_comparison(
                 config,
                 window_seconds=60,
@@ -325,12 +318,10 @@ def test_strategy_challenger_runs_on_same_timestamp_with_separate_ledgers(tmp_pa
             CONTROL_STRATEGY_ID,
             CHALLENGER_STRATEGY_ID,
         }
-        assert {decision.evaluated_at for decision in decisions} == {
-            decisions[0].evaluated_at
+        assert {decision.evaluated_at for decision in decisions} == {decisions[0].evaluated_at}
+        assert {decision.measurements["brti_received_at"] for decision in decisions} == {
+            decisions[0].measurements["brti_received_at"]
         }
-        assert {
-            decision.measurements["brti_received_at"] for decision in decisions
-        } == {decisions[0].measurements["brti_received_at"]}
         assert len(control_open_positions) == 1
         assert len(challenger_open_positions) == 1
         assert heartbeat is not None
@@ -356,6 +347,405 @@ def test_strategy_challenger_is_disabled_without_the_opt_in_flag() -> None:
     variants = strategy_variant_configs(config, assess_startup_safety(config))
 
     assert [variant.strategy_id for variant in variants] == [CONTROL_STRATEGY_ID]
+
+
+def test_strategy_observer_persists_one_feature_snapshot_and_config_attribution(
+    tmp_path,
+) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_v2_feature_snapshot.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        with session_factory() as session:
+            _seed_observable_context(session, now=now)
+
+        observer = StrategyObserver(
+            config=config,
+            safety=assess_startup_safety(config),
+            session_factory=session_factory,
+            started_at=now - timedelta(minutes=1),
+            now=lambda: now,
+        )
+        first = observer.evaluate_once()
+        second = observer.evaluate_once()
+
+        assert first is not None
+        assert second is not None
+        with session_factory() as session:
+            snapshots = StrategyV2Repository(session).list_recent_feature_snapshots(limit=10)
+            stored = StrategyDecisionsRepository(session).get_decision_by_id(first.decision_id)
+
+        assert len(snapshots) == 1
+        assert stored is not None
+        assert stored.feature_snapshot_id == snapshots[0].feature_snapshot_id
+        assert stored.strategy_config_version_id is not None
+        assert stored.code_commit_sha is not None
+    finally:
+        engine.dispose()
+
+
+def test_v2_pending_intent_resolves_without_current_candidate_side(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    fill_time = now - timedelta(milliseconds=500)
+    market_ticker = "KXBTC15M-ACTIVE"
+    intents = StrategyV2Repository(session)
+    StrategyDecisionsRepository(session).insert_decision(
+        StrategyDecisionInput(
+            decision_id="v2-entry-decision",
+            evaluated_at=now - timedelta(seconds=2),
+            decision_state=STATE_V2_ENTRY_SIGNAL,
+            primary_reason="v2_entry_signal",
+            app_mode="DRY_RUN",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=market_ticker,
+            candidate_side="YES",
+            boundary=Decimal("62000"),
+            brti_value=Decimal("62010"),
+            distance_bps=Decimal("1.61"),
+            code_commit_sha="source-commit",
+        )
+    )
+    intents.insert_intent_if_absent(
+        StrategyTradeIntentInput(
+            intent_id="v2-pending-no-current-candidate",
+            strategy_id=V2_STRATEGY_ID,
+            decision_id="v2-entry-decision",
+            market_ticker=market_ticker,
+            side_candidate="YES",
+            action="ENTRY",
+            created_at=now - timedelta(seconds=2),
+            effective_after=now - timedelta(seconds=1),
+            expires_at=now + timedelta(seconds=1),
+            intended_limit_price=Decimal("0.62"),
+            quantity=Decimal("1"),
+        )
+    )
+    OrderbookRepository(session).insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker=market_ticker,
+            received_at=fill_time,
+            sequence_number=1,
+            yes_bid=Decimal("0.60"),
+            yes_ask=Decimal("0.61"),
+            yes_ask_count=Decimal("1"),
+            no_bid=Decimal("0.39"),
+            no_ask=Decimal("0.40"),
+            no_ask_count=Decimal("1"),
+            book_status="ok",
+        )
+    )
+
+    observer_module._apply_v2_hypothetical_lifecycle(
+        config=load_config({}),
+        session=session,
+        decision=StrategyDecisionInput(
+            decision_id="v2-no-current-candidate-decision",
+            evaluated_at=now,
+            decision_state="V2_HARD_GATE_BLOCKED",
+            primary_reason="reference_stale",
+            app_mode="DRY_RUN",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=market_ticker,
+            candidate_side=None,
+            boundary=Decimal("63000"),
+            brti_value=Decimal("63010"),
+            distance_bps=Decimal("1.59"),
+            code_commit_sha="current-commit",
+        ),
+    )
+
+    intent = intents.get_intent("v2-pending-no-current-candidate")
+    assert intent is not None
+    assert intent.status == "FILLED"
+    assert intent.resolved_at == now.replace(tzinfo=None)
+    positions = StrategyDryRunRepository(session)
+    position = positions.get_open_position_by_market(
+        strategy_id=V2_STRATEGY_ID,
+        market_ticker=market_ticker,
+    )
+    event = positions.get_latest_event(strategy_id=V2_STRATEGY_ID)
+    assert position is not None
+    assert intent.position_id == position.position_id
+    assert position.opened_at == fill_time.replace(tzinfo=None)
+    assert position.boundary == Decimal("62000")
+    assert position.brti_at_entry == Decimal("62010")
+    assert position.distance_bps_at_entry == Decimal("1.61")
+    assert position.code_commit_sha == "source-commit"
+    assert event is not None
+    assert event.occurred_at == fill_time.replace(tzinfo=None)
+
+
+def test_v2_intent_uses_recorded_timing_parameters(session, monkeypatch) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    market_ticker = "KXBTC15M-TIMING"
+    monkeypatch.setattr(
+        observer_module,
+        "V2_PARAMETERS",
+        {
+            **observer_module.V2_PARAMETERS,
+            "decision_to_book_latency_ms": 750,
+            "intent_expiry_seconds": 3,
+        },
+    )
+
+    observer_module._apply_v2_hypothetical_lifecycle(
+        config=load_config({}),
+        session=session,
+        decision=StrategyDecisionInput(
+            decision_id="v2-recorded-timing-decision",
+            evaluated_at=now,
+            decision_state=STATE_V2_ENTRY_SIGNAL,
+            primary_reason="v2_entry_signal",
+            app_mode="DRY_RUN",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=market_ticker,
+            candidate_side="YES",
+            measurements={
+                "intended_entry_price": "0.62",
+                "features": {"desired_ask": "0.61"},
+            },
+        ),
+    )
+
+    intent = StrategyV2Repository(session).list_recent_intents(
+        strategy_id=V2_STRATEGY_ID,
+        limit=1,
+    )[0]
+    expected_effective_after = now + timedelta(milliseconds=750)
+    assert intent.effective_after == expected_effective_after.replace(tzinfo=None)
+    assert intent.expires_at == (expected_effective_after + timedelta(seconds=3)).replace(
+        tzinfo=None
+    )
+
+
+def test_v2_intent_respects_open_position_cap_across_markets(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    StrategyDryRunRepository(session).insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="v2-open-prior-market",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker="KXBTC15M-PRIOR",
+            decision_id="v2-prior-entry",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now - timedelta(minutes=1),
+            open_price=Decimal("0.62"),
+            contract_count=1,
+            entry_reason="v2_causal_hypothetical_fill",
+            status="OPEN",
+        )
+    )
+
+    observer_module._apply_v2_hypothetical_lifecycle(
+        config=load_config({}),
+        session=session,
+        decision=StrategyDecisionInput(
+            decision_id="v2-new-market-entry",
+            evaluated_at=now,
+            decision_state=STATE_V2_ENTRY_SIGNAL,
+            primary_reason="v2_entry_signal",
+            app_mode="DRY_RUN",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker="KXBTC15M-NEXT",
+            candidate_side="YES",
+            measurements={"intended_entry_price": "0.62"},
+        ),
+    )
+
+    assert (
+        StrategyV2Repository(session).list_recent_intents(
+            strategy_id=V2_STRATEGY_ID,
+            limit=10,
+        )
+        == []
+    )
+
+
+def test_v2_sweeps_expired_intents_without_an_active_market(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    intents = StrategyV2Repository(session)
+    for intent_id, market_ticker in (
+        ("v2-expired-after-rollover", "KXBTC15M-EXPIRED"),
+        ("v2-no-fill-after-rollover", "KXBTC15M-NO-FILL"),
+    ):
+        intents.insert_intent_if_absent(
+            StrategyTradeIntentInput(
+                intent_id=intent_id,
+                strategy_id=V2_STRATEGY_ID,
+                decision_id=f"{intent_id}-decision",
+                market_ticker=market_ticker,
+                side_candidate="YES",
+                action="ENTRY",
+                created_at=now - timedelta(seconds=4),
+                effective_after=now - timedelta(seconds=3),
+                expires_at=now - timedelta(seconds=1),
+                intended_limit_price=Decimal("0.62"),
+                quantity=Decimal("1"),
+            )
+        )
+    OrderbookRepository(session).insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker="KXBTC15M-NO-FILL",
+            received_at=now - timedelta(seconds=2),
+            sequence_number=1,
+            yes_bid=Decimal("0.64"),
+            yes_ask=Decimal("0.65"),
+            yes_ask_count=Decimal("1"),
+            book_status="ok",
+        )
+    )
+
+    observer_module._apply_v2_hypothetical_lifecycle(
+        config=load_config({}),
+        session=session,
+        decision=StrategyDecisionInput(
+            decision_id="v2-no-active-market-decision",
+            evaluated_at=now,
+            decision_state="V2_HARD_GATE_BLOCKED",
+            primary_reason="no_active_market",
+            app_mode="DRY_RUN",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=None,
+            candidate_side=None,
+        ),
+    )
+
+    expired = intents.get_intent("v2-expired-after-rollover")
+    no_fill = intents.get_intent("v2-no-fill-after-rollover")
+    assert expired is not None
+    assert expired.status == "EXPIRED"
+    assert no_fill is not None
+    assert no_fill.status == "NO_FILL"
+
+
+def test_v2_resolves_only_the_first_post_delay_orderbook(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    market_ticker = "KXBTC15M-FIRST-BOOK"
+    intents = StrategyV2Repository(session)
+    intents.insert_intent_if_absent(
+        StrategyTradeIntentInput(
+            intent_id="v2-first-book-only",
+            strategy_id=V2_STRATEGY_ID,
+            decision_id="v2-first-book-decision",
+            market_ticker=market_ticker,
+            side_candidate="YES",
+            action="ENTRY",
+            created_at=now - timedelta(seconds=4),
+            effective_after=now - timedelta(seconds=3),
+            expires_at=now - timedelta(seconds=1),
+            intended_limit_price=Decimal("0.62"),
+            quantity=Decimal("1"),
+        )
+    )
+    orderbooks = OrderbookRepository(session)
+    orderbooks.insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker=market_ticker,
+            received_at=now - timedelta(milliseconds=2500),
+            sequence_number=1,
+            yes_bid=Decimal("0.64"),
+            yes_ask=Decimal("0.65"),
+            yes_ask_count=Decimal("1"),
+            book_status="ok",
+        )
+    )
+    orderbooks.insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker=market_ticker,
+            received_at=now - timedelta(seconds=2),
+            sequence_number=2,
+            yes_bid=Decimal("0.60"),
+            yes_ask=Decimal("0.61"),
+            yes_ask_count=Decimal("1"),
+            book_status="ok",
+        )
+    )
+
+    observer_module._apply_v2_hypothetical_lifecycle(
+        config=load_config({}),
+        session=session,
+        decision=StrategyDecisionInput(
+            decision_id="v2-first-book-resolution",
+            evaluated_at=now,
+            decision_state="V2_HARD_GATE_BLOCKED",
+            primary_reason="reference_stale",
+            app_mode="DRY_RUN",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=market_ticker,
+            candidate_side=None,
+        ),
+    )
+
+    intent = intents.get_intent("v2-first-book-only")
+    assert intent is not None
+    assert intent.status == "NO_FILL"
+    assert intent.position_id is None
+    assert StrategyDryRunRepository(session).count_open_positions(strategy_id=V2_STRATEGY_ID) == 0
+
+
+def test_v2_position_mark_uses_the_held_side_bid(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    market_ticker = "KXBTC15M-ACTIVE"
+    StrategyDryRunRepository(session).insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="v2-held-yes-position",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=market_ticker,
+            decision_id="v2-entry-decision",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now - timedelta(seconds=1),
+            open_price=Decimal("0.62"),
+            contract_count=1,
+            entry_reason="v2_causal_hypothetical_fill",
+            status="OPEN",
+        )
+    )
+    OrderbookRepository(session).insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker=market_ticker,
+            received_at=now,
+            sequence_number=1,
+            yes_bid=Decimal("0.64"),
+            yes_ask=Decimal("0.66"),
+            no_bid=Decimal("0.34"),
+            no_ask=Decimal("0.36"),
+            book_status="ok",
+        )
+    )
+
+    observer_module._apply_v2_hypothetical_lifecycle(
+        config=load_config({}),
+        session=session,
+        decision=StrategyDecisionInput(
+            decision_id="v2-current-no-candidate-decision",
+            evaluated_at=now,
+            decision_state="V2_HARD_GATE_BLOCKED",
+            primary_reason="reference_stale",
+            app_mode="DRY_RUN",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=market_ticker,
+            candidate_side="NO",
+            measurements={"features": {"desired_bid": "0.34"}},
+        ),
+    )
+
+    marks = StrategyV2Repository(session).list_recent_marks(
+        strategy_id=V2_STRATEGY_ID,
+        limit=1,
+    )
+    assert marks[0].position_id == "v2-held-yes-position"
+    assert marks[0].executable_bid == Decimal("0.64")
 
 
 def test_dry_run_status_reports_disabled_challenger_without_worker_metadata(
@@ -411,15 +801,10 @@ def test_strategy_variant_metadata_reports_disabled_when_dry_run_is_off(tmp_path
         observer.evaluate_once()
 
         with session_factory() as session:
-            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
-                "ape-worker"
-            )
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat("ape-worker")
 
         assert heartbeat is not None
-        assert (
-            heartbeat.metadata_["strategy"]["variants"][CONTROL_STRATEGY_ID]["enabled"]
-            is False
-        )
+        assert heartbeat.metadata_["strategy"]["variants"][CONTROL_STRATEGY_ID]["enabled"] is False
     finally:
         engine.dispose()
 
@@ -502,10 +887,7 @@ def test_strategy_entry_ask_at_max_is_eligible_and_intended_price_is_clamped(ses
     assert decision.decision_state == STATE_ENTER_DRY_RUN
     assert decision.measurements["dry_run_intended_entry_price"] == "0.78"
     assert decision.measurements["gate_results"]["entry_price"]["status"] == "pass"
-    assert (
-        decision.measurements["gate_results"]["contract_confirmation"]["status"]
-        != "block"
-    )
+    assert decision.measurements["gate_results"]["contract_confirmation"]["status"] != "block"
 
 
 def test_strategy_entry_ask_below_minimum_is_blocked_even_if_offset_reaches_minimum(
@@ -604,10 +986,7 @@ def test_strategy_warns_when_trade_confirmation_sample_too_small(session) -> Non
         decision.measurements["gate_results"]["trade_confirmation"]["reason"]
         == "recent_trade_confirmation_insufficient_trades"
     )
-    assert (
-        decision.measurements["gate_trace"]["gates"]["trade_confirmation"]["status"]
-        == "warn"
-    )
+    assert decision.measurements["gate_trace"]["gates"]["trade_confirmation"]["status"] == "warn"
 
 
 def test_strategy_warns_but_enters_when_brti_source_age_is_warning_only(
@@ -1034,9 +1413,7 @@ def test_strategy_reports_subscription_recovery_failed(session) -> None:
         orderbook_connection_state="reconnect_pending",
         orderbook_initialized=False,
         market_feed_state="BLOCKED_UNRECOVERED",
-        market_subscription_recovery_last_reason=(
-            "kalshi_orderbook_subscription_ack_timeout"
-        ),
+        market_subscription_recovery_last_reason=("kalshi_orderbook_subscription_ack_timeout"),
         market_subscription_recovery_last_action="reconnect",
         market_subscription_recovery_last_result="failed",
     )
@@ -1210,9 +1587,7 @@ def test_strategy_prefers_component_liveness_over_stale_aggregate(session) -> No
                         "enabled": True,
                         "connection_state": "subscribed",
                         "last_message_at": (now - timedelta(seconds=30)).isoformat(),
-                        "last_valid_message_at": (
-                            now - timedelta(seconds=30)
-                        ).isoformat(),
+                        "last_valid_message_at": (now - timedelta(seconds=30)).isoformat(),
                         "warnings": ["brti_reference_transport_stale"],
                         "blockers": [],
                     }
@@ -1429,10 +1804,7 @@ def test_strategy_gate_summary_blocks_contract_ask_pullback(session) -> None:
 
     assert decision.decision_state == STATE_CONTRACT_NOT_CONFIRMED
     assert decision.primary_reason == "ask_pullback_above_threshold"
-    assert (
-        decision.measurements["gate_results"]["contract_confirmation"]["status"]
-        == "block"
-    )
+    assert decision.measurements["gate_results"]["contract_confirmation"]["status"] == "block"
     assert (
         decision.measurements["gate_results"]["contract_confirmation"]["reason"]
         == "ask_pullback_above_threshold"
@@ -1459,10 +1831,7 @@ def test_strategy_gate_summary_blocks_insufficient_contract_history(session) -> 
 
     assert decision.decision_state == STATE_CONTRACT_NOT_CONFIRMED
     assert decision.primary_reason == "insufficient_contract_history"
-    assert (
-        decision.measurements["gate_results"]["contract_confirmation"]["status"]
-        == "block"
-    )
+    assert decision.measurements["gate_results"]["contract_confirmation"]["status"] == "block"
     assert (
         decision.measurements["gate_results"]["contract_confirmation"]["reason"]
         == "insufficient_contract_history"
@@ -1490,10 +1859,7 @@ def test_strategy_gate_summary_blocks_unsafe_startup(session) -> None:
         == "startup_safety_not_observer_safe"
     )
     assert decision.measurements["gate_results"]["market"]["status"] == "not_evaluated"
-    assert (
-        decision.measurements["gate_results"]["boundary"]["status"]
-        == "not_evaluated"
-    )
+    assert decision.measurements["gate_results"]["boundary"]["status"] == "not_evaluated"
 
 
 def test_strategy_gate_summary_marks_boundary_unevaluated_without_market(
@@ -1512,10 +1878,7 @@ def test_strategy_gate_summary_marks_boundary_unevaluated_without_market(
 
     assert decision.decision_state == STATE_NO_ACTIVE_MARKET
     assert decision.measurements["gate_results"]["market"]["status"] == "block"
-    assert (
-        decision.measurements["gate_results"]["boundary"]["status"]
-        == "not_evaluated"
-    )
+    assert decision.measurements["gate_results"]["boundary"]["status"] == "not_evaluated"
 
 
 def test_strategy_dry_run_allows_additional_entry_when_multi_position_enabled(
@@ -1600,9 +1963,7 @@ def test_strategy_dry_run_blocks_duplicate_entry_in_same_bucket(tmp_path) -> Non
 
         with session_factory() as session:
             dry_run_repository = StrategyDryRunRepository(session)
-            open_positions = dry_run_repository.list_open_positions(
-                strategy_id=config.strategy_id
-            )
+            open_positions = dry_run_repository.list_open_positions(strategy_id=config.strategy_id)
             events = dry_run_repository.list_recent_events(limit=10)
 
         assert first_decision is not None
@@ -1748,9 +2109,7 @@ def test_strategy_dry_run_force_exits_only_stale_position_after_roll(session) ->
 
     assert decision.decision_state == STATE_FORCE_EXIT
     assert decision.primary_reason == "dry_run_position_market_closed_or_expired"
-    assert decision.measurements["managed_position_id"] == (
-        "dryrun-only-stale-position"
-    )
+    assert decision.measurements["managed_position_id"] == ("dryrun-only-stale-position")
 
 
 def test_strategy_dry_run_prioritizes_older_profit_target_before_new_entry(
@@ -1822,9 +2181,7 @@ def test_strategy_dry_run_prioritizes_older_profit_target_before_new_entry(
 
     assert decision.decision_state == STATE_EXIT_SIGNAL
     assert decision.primary_reason == "dry_run_profit_target_reached"
-    assert decision.measurements["managed_position_id"] == (
-        "dryrun-older-profit-position"
-    )
+    assert decision.measurements["managed_position_id"] == ("dryrun-older-profit-position")
 
 
 def test_strategy_dry_run_management_uses_exit_bid_depth(session) -> None:
@@ -2011,9 +2368,7 @@ def test_strategy_dry_run_force_exits_stale_book_under_multi_position_capacity(
 
     assert decision.decision_state == STATE_FORCE_EXIT
     assert decision.primary_reason == "dry_run_position_orderbook_stale"
-    assert decision.measurements["managed_position_id"] == (
-        "dryrun-stale-book-position"
-    )
+    assert decision.measurements["managed_position_id"] == ("dryrun-stale-book-position")
 
 
 def test_strategy_dry_run_mode_without_flag_stays_observe_only(session) -> None:
@@ -2057,9 +2412,7 @@ def test_strategy_blocks_weak_brti_impulse(session) -> None:
     assert decision.measurements["brti_move_long_bps"] is not None
     assert decision.measurements["gate_trace"]["canonical_primary_gate"] == "impulse"
     assert (
-        decision.measurements["gate_trace"]["gates"]["impulse"][
-            "affects_canonical_decision"
-        ]
+        decision.measurements["gate_trace"]["gates"]["impulse"]["affects_canonical_decision"]
         is True
     )
 
@@ -2089,10 +2442,7 @@ def test_strategy_gate_trace_attributes_emitted_chop_block(session, monkeypatch)
     assert decision.primary_reason == "short_move_opposes_medium_move"
     assert decision.measurements["gate_trace"]["canonical_primary_gate"] == "chop"
     assert (
-        decision.measurements["gate_trace"]["gates"]["chop"][
-            "affects_canonical_decision"
-        ]
-        is True
+        decision.measurements["gate_trace"]["gates"]["chop"]["affects_canonical_decision"] is True
     )
 
 
@@ -2134,8 +2484,7 @@ def test_strategy_observer_prioritizes_reference_before_book(session) -> None:
     assert decision.decision_state == STATE_REFERENCE_STALE
     assert decision.primary_reason == "brti_reference_first_tick_timeout"
     assert (
-        decision.measurements["brti_reference_stale_reason"]
-        == "brti_reference_first_tick_timeout"
+        decision.measurements["brti_reference_stale_reason"] == "brti_reference_first_tick_timeout"
     )
     assert decision.measurements["brti_reference_connection_state"] == "reconnect_pending"
     assert decision.measurements["brti_reference_recovery_state"] == "reconnecting"
@@ -2195,12 +2544,8 @@ def test_strategy_observer_runtime_records_decision_and_heartbeat(tmp_path) -> N
                             "enabled": True,
                             "connection_state": "subscribed",
                             "active_market_ticker": "KXBTC15M-ACTIVE",
-                            "last_message_at": (
-                                now - timedelta(seconds=1)
-                            ).isoformat(),
-                            "last_orderbook_at": (
-                                now - timedelta(milliseconds=500)
-                            ).isoformat(),
+                            "last_message_at": (now - timedelta(seconds=1)).isoformat(),
+                            "last_orderbook_at": (now - timedelta(milliseconds=500)).isoformat(),
                             "orderbook_initialized": True,
                         },
                         "reference": {
@@ -2361,8 +2706,7 @@ def _seed_observable_context(
     orderbook_repository.insert_snapshot(
         OrderbookSnapshotInput(
             market_ticker="KXBTC15M-ACTIVE",
-            received_at=latest_orderbook_received_at
-            or now - timedelta(milliseconds=500),
+            received_at=latest_orderbook_received_at or now - timedelta(milliseconds=500),
             sequence_number=123,
             yes_bid=yes_bid,
             yes_ask=yes_ask,
@@ -2448,13 +2792,9 @@ def _record_feed_heartbeat(
         "last_market_data_message_at": stream_at.isoformat(),
         "market_data_message_age_ms": int((now - stream_at).total_seconds() * 1000),
         "market_feed_subscription_state": "subscribed",
-        "market_feed_snapshot_state": (
-            "initialized" if orderbook_initialized else "missing"
-        ),
+        "market_feed_snapshot_state": ("initialized" if orderbook_initialized else "missing"),
         "market_feed_active_ticker_state": (
-            "match"
-            if orderbook_active_market_ticker == "KXBTC15M-ACTIVE"
-            else "mismatch"
+            "match" if orderbook_active_market_ticker == "KXBTC15M-ACTIVE" else "mismatch"
         ),
         "market_feed_sequence_state": (
             "gap"
@@ -2464,9 +2804,7 @@ def _record_feed_heartbeat(
             if orderbook_initialized
             else "unknown"
         ),
-        "market_data_quiet": (
-            int((now - stream_at).total_seconds() * 1000) > 3000
-        ),
+        "market_data_quiet": (int((now - stream_at).total_seconds() * 1000) > 3000),
         "market_data_quiet_age_ms": (
             int((now - stream_at).total_seconds() * 1000)
             if int((now - stream_at).total_seconds() * 1000) > 3000
@@ -2476,19 +2814,11 @@ def _record_feed_heartbeat(
         "orderbook_recovery_action": orderbook_recovery_action,
         "market_feed_state": market_feed_state,
         "market_subscription_recovery_count": 0,
-        "market_subscription_recovery_last_reason": (
-            market_subscription_recovery_last_reason
-        ),
-        "market_subscription_recovery_last_action": (
-            market_subscription_recovery_last_action
-        ),
-        "market_subscription_recovery_last_result": (
-            market_subscription_recovery_last_result
-        ),
+        "market_subscription_recovery_last_reason": (market_subscription_recovery_last_reason),
+        "market_subscription_recovery_last_action": (market_subscription_recovery_last_action),
+        "market_subscription_recovery_last_result": (market_subscription_recovery_last_result),
         "market_subscription_recovery_last_at": (
-            stream_at.isoformat()
-            if market_subscription_recovery_last_reason is not None
-            else None
+            stream_at.isoformat() if market_subscription_recovery_last_reason is not None else None
         ),
         "market_snapshot_resync_count": 0,
         "market_snapshot_resync_last_result": None,

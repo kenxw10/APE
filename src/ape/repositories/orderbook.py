@@ -42,6 +42,45 @@ class OrderbookRepository:
             .limit(1)
         )
 
+    def get_first_snapshot_between(
+        self,
+        market_ticker: str,
+        *,
+        start: datetime,
+        end: datetime,
+    ) -> OrderbookSnapshot | None:
+        return self.session.scalar(
+            select(OrderbookSnapshot)
+            .where(
+                OrderbookSnapshot.market_ticker == market_ticker,
+                OrderbookSnapshot.received_at >= start,
+                OrderbookSnapshot.received_at <= end,
+            )
+            .order_by(OrderbookSnapshot.received_at.asc(), OrderbookSnapshot.id.asc())
+            .limit(1)
+        )
+
+    def get_snapshots_between(
+        self,
+        market_ticker: str,
+        *,
+        start: datetime,
+        end: datetime,
+        limit: int = 512,
+    ) -> list[OrderbookSnapshot]:
+        return list(
+            self.session.scalars(
+                select(OrderbookSnapshot)
+                .where(
+                    OrderbookSnapshot.market_ticker == market_ticker,
+                    OrderbookSnapshot.received_at >= start,
+                    OrderbookSnapshot.received_at <= end,
+                )
+                .order_by(OrderbookSnapshot.received_at.asc(), OrderbookSnapshot.id.asc())
+                .limit(limit)
+            )
+        )
+
     def get_snapshots_since(
         self,
         market_ticker: str,

@@ -109,6 +109,27 @@ RETENTION_POLICIES: tuple[RetentionPolicy, ...] = (
         delete_condition_sql="occurred_at < :cutoff",
     ),
     RetentionPolicy(
+        table_name="strategy_feature_snapshots",
+        retention_config_key="storage_retention_strategy_feature_snapshots_seconds",
+        timestamp_expression="evaluated_at",
+        delete_condition_sql="evaluated_at < :cutoff",
+    ),
+    RetentionPolicy(
+        table_name="strategy_trade_intents",
+        retention_config_key="storage_retention_strategy_trade_intents_seconds",
+        timestamp_expression="COALESCE(resolved_at, expires_at)",
+        delete_condition_sql=(
+            "(resolved_at IS NOT NULL AND resolved_at < :cutoff) "
+            "OR (resolved_at IS NULL AND expires_at < :cutoff)"
+        ),
+    ),
+    RetentionPolicy(
+        table_name="strategy_position_marks",
+        retention_config_key="storage_retention_strategy_position_marks_seconds",
+        timestamp_expression="marked_at",
+        delete_condition_sql="marked_at < :cutoff",
+    ),
+    RetentionPolicy(
         table_name="markets",
         retention_config_key="storage_retention_markets_seconds",
         timestamp_expression="COALESCE(close_time, updated_at, created_at)",
@@ -365,9 +386,7 @@ class StorageRetentionWorker:
                         metadata=metadata,
                     )
                 )
-                latest_heartbeat = repository.get_latest_heartbeat(
-                    WORKER_SERVICE_AGGREGATE
-                )
+                latest_heartbeat = repository.get_latest_heartbeat(WORKER_SERVICE_AGGREGATE)
                 metadata_keys = _enabled_non_storage_metadata_keys(self.config)
                 if latest_heartbeat is not None and metadata_keys:
                     _preserve_existing_worker_metadata(
@@ -470,6 +489,7 @@ def run_storage_retention_once(
             session.commit()
 
             try:
+
                 def record_policy_started(policy: RetentionPolicy) -> None:
                     table_name = policy.table_name
                     if table_name in processed_table_names:
@@ -509,11 +529,7 @@ def run_storage_retention_once(
                     run_id=run_id,
                     started_at=started_at,
                     finished_at=finished_at,
-                    status=(
-                        RETENTION_SUCCESS_PARTIAL
-                        if budget_exhausted
-                        else RETENTION_SUCCESS
-                    ),
+                    status=(RETENTION_SUCCESS_PARTIAL if budget_exhausted else RETENTION_SUCCESS),
                     dry_run=config.storage_retention_dry_run,
                     duration_ms=_duration_ms(started_at, finished_at),
                     deleted_rows=deleted_rows,
@@ -861,16 +877,12 @@ def _storage_status_snapshot(
         if latest_run is None:
             warnings.append("storage_retention_has_not_run")
         elif latest_run.finished_at is None and latest_run.status == RETENTION_RUNNING:
-            age_seconds = (
-                checked_at - _as_utc(latest_run.started_at)
-            ).total_seconds()
+            age_seconds = (checked_at - _as_utc(latest_run.started_at)).total_seconds()
             stale_running_after_seconds = max(config.storage_retention_max_run_seconds, 1.0)
             if age_seconds > stale_running_after_seconds:
                 warnings.append("storage_retention_running_run_stale")
         elif latest_run.finished_at is not None:
-            age_seconds = (
-                checked_at - _as_utc(latest_run.finished_at)
-            ).total_seconds()
+            age_seconds = (checked_at - _as_utc(latest_run.finished_at)).total_seconds()
             stale_after_seconds = max(config.storage_retention_interval_seconds * 2, 1.0)
             if age_seconds > stale_after_seconds:
                 warnings.append("storage_retention_latest_run_stale")
@@ -932,9 +944,7 @@ def _storage_status_snapshot(
         latest_tables_processed=latest_tables_processed,
         latest_tables_skipped=latest_tables_skipped,
         latest_total_deleted_rows=sum(latest_deleted_rows.values()),
-        latest_total_raw_payload_stripped_rows=sum(
-            latest_raw_payload_stripped_rows.values()
-        ),
+        latest_total_raw_payload_stripped_rows=sum(latest_raw_payload_stripped_rows.values()),
         latest_db_statement_timeout_count=timeout_counts["statement_timeout"],
         latest_db_lock_timeout_count=timeout_counts["lock_timeout"],
         latest_db_error_count=timeout_counts["db_error"],
@@ -970,13 +980,9 @@ def _load_storage_liveness(
     checked_at: datetime,
 ) -> StorageRetentionLiveness:
     component = repository.get_latest_heartbeat(WORKER_SERVICE_STORAGE_RETENTION)
-    component_metadata = _storage_worker_metadata(
-        component.metadata_ if component else None
-    )
+    component_metadata = _storage_worker_metadata(component.metadata_ if component else None)
     if component_metadata is None:
-        legacy_component = repository.get_latest_heartbeat(
-            WORKER_SERVICE_STORAGE_RETENTION_LEGACY
-        )
+        legacy_component = repository.get_latest_heartbeat(WORKER_SERVICE_STORAGE_RETENTION_LEGACY)
         legacy_component_metadata = _storage_worker_metadata(
             legacy_component.metadata_ if legacy_component else None
         )
@@ -985,9 +991,7 @@ def _load_storage_liveness(
             component_metadata = legacy_component_metadata
 
     aggregate = repository.get_latest_heartbeat(WORKER_SERVICE_AGGREGATE)
-    aggregate_metadata = _storage_worker_metadata(
-        aggregate.metadata_ if aggregate else None
-    )
+    aggregate_metadata = _storage_worker_metadata(aggregate.metadata_ if aggregate else None)
     selected, metadata, source, warnings = _select_storage_liveness(
         component=component,
         component_metadata=component_metadata,
@@ -1212,9 +1216,7 @@ def _selected_retention_policies(
     if "storage_retention_max_tables_per_run_reached" not in warnings:
         warnings.append("storage_retention_max_tables_per_run_reached")
     start_index = _next_retention_policy_index(previous_run)
-    ordered_policies = (
-        RETENTION_POLICIES[start_index:] + RETENTION_POLICIES[:start_index]
-    )
+    ordered_policies = RETENTION_POLICIES[start_index:] + RETENTION_POLICIES[:start_index]
     return ordered_policies[:max_tables], ordered_policies[max_tables:]
 
 
@@ -1253,11 +1255,14 @@ def _mark_row_cap_exhausted_if_needed(
     max_rows = config.storage_retention_max_delete_rows_per_table
     if max_rows is None or rows_processed < max_rows:
         return
-    if repository.has_matching(
-        table_name=policy.table_name,
-        condition_sql=condition_sql,
-        parameters=parameters,
-    ) and RETENTION_ROW_CAP_REACHED_WARNING not in warnings:
+    if (
+        repository.has_matching(
+            table_name=policy.table_name,
+            condition_sql=condition_sql,
+            parameters=parameters,
+        )
+        and RETENTION_ROW_CAP_REACHED_WARNING not in warnings
+    ):
         warnings.append(RETENTION_ROW_CAP_REACHED_WARNING)
 
 
@@ -1342,10 +1347,7 @@ def _enabled_non_storage_metadata_keys(config: AppConfig) -> tuple[str, ...]:
     keys: list[str] = []
     if config.kalshi_ws_enabled:
         keys.append("ws")
-    if (
-        config.kalshi_cfbenchmarks_enabled
-        and config.kalshi_cfbenchmarks_subscribe_on_worker
-    ):
+    if config.kalshi_cfbenchmarks_enabled and config.kalshi_cfbenchmarks_subscribe_on_worker:
         keys.append("reference")
     if config.strategy_observer_enabled:
         keys.append("strategy")
@@ -1374,11 +1376,7 @@ def _string_list(value: Any) -> list[str]:
 def _int_dict(value: Any) -> dict[str, int]:
     if not isinstance(value, dict):
         return {}
-    return {
-        str(key): int(item)
-        for key, item in value.items()
-        if isinstance(item, int | float)
-    }
+    return {str(key): int(item) for key, item in value.items() if isinstance(item, int | float)}
 
 
 def _unique_strings(values: list[str]) -> list[str]:

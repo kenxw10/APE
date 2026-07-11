@@ -21,6 +21,9 @@ ALLOWED_RETENTION_TABLES = {
     "strategy_decisions",
     "strategy_dry_run_events",
     "strategy_dry_run_positions",
+    "strategy_feature_snapshots",
+    "strategy_position_marks",
+    "strategy_trade_intents",
     "worker_heartbeats",
 }
 JSON_FIELDS = {
@@ -179,10 +182,7 @@ class StorageRetentionRepository:
         return len(rows)
 
     def row_counts(self, table_names: tuple[str, ...]) -> dict[str, int | None]:
-        return {
-            table_name: self.approximate_row_count(table_name)
-            for table_name in table_names
-        }
+        return {table_name: self.approximate_row_count(table_name) for table_name in table_names}
 
     def table_sizes(self, table_names: tuple[str, ...]) -> dict[str, dict[str, int | None]]:
         return {table_name: self.table_size(table_name) for table_name in table_names}

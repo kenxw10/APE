@@ -212,6 +212,22 @@ PR 9i post-merge checkpoint:
   cancels, private/user channels, account reads, balance reads, paper/live
   positions, credentials, or dashboard trading controls.
 
+PR 10 post-merge checkpoint:
+
+- Keep `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`,
+  `STRATEGY_DRY_RUN_ENABLED=true`, `TRADING_ENABLED=false`, and `EXECUTE=false`
+  on `ape-strategy-worker` only.
+- Add only `STRATEGY_V2_ENABLED=true` to that worker. Keep it absent from API,
+  market, reference, maintenance, Postgres, and Vercel services.
+- Confirm `/strategy/features/latest` exposes a `momentum_v2_features_v1`
+  snapshot and every post-PR10 decision has feature/config attribution.
+- Confirm `/strategy/dry-run/intents/recent?strategy_id=btc15_momentum_v2` only
+  records hypothetical `PENDING`, `FILLED`, `NO_FILL`, or `EXPIRED` rows and
+  `/strategy/dry-run/position-marks/recent` remains read-only.
+- Confirm no order placement/cancellation, private/user WebSocket,
+  account/balance/order/fill read, paper, live, or dashboard trading control
+  exists.
+
 PR 9b post-merge checkpoint:
 
 - Keep `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`,

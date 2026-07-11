@@ -84,15 +84,16 @@ class OrderbookState:
             yes_spread=yes_spread,
             no_spread=no_spread,
             yes_bid_size=_legacy_int_count(yes_bid.size) if yes_bid else None,
-            yes_ask_size=(
-                _legacy_int_count(yes_ask_level.size) if yes_ask_level else None
-            ),
+            yes_ask_size=(_legacy_int_count(yes_ask_level.size) if yes_ask_level else None),
             no_bid_size=_legacy_int_count(yes_ask_level.size) if yes_ask_level else None,
             no_ask_size=_legacy_int_count(yes_bid.size) if yes_bid else None,
             yes_bid_count=yes_bid.size if yes_bid else None,
             yes_ask_count=yes_ask_level.size if yes_ask_level else None,
             no_bid_count=yes_ask_level.size if yes_ask_level else None,
             no_ask_count=yes_bid.size if yes_bid else None,
+            ladder_schema_version="kalshi_yes_price_ladder_v1",
+            yes_bid_ladder=_top_ladder(self.yes_levels, complement=False),
+            no_bid_ladder=_top_ladder(self.no_levels, complement=True),
             book_status="ok" if not warnings else "|".join(warnings),
             raw_payload_hash=raw_payload_hash,
             raw_payload=raw_payload,
@@ -127,6 +128,22 @@ def _best_ask(levels: dict[Decimal, Decimal]) -> BestLevel | None:
     return BestLevel(price=price, size=size)
 
 
+def _top_ladder(
+    levels: dict[Decimal, Decimal],
+    *,
+    complement: bool,
+) -> list[dict[str, str]]:
+    normalized = [
+        (ONE_DOLLAR - price if complement else price, size)
+        for price, size in levels.items()
+        if size > 0
+    ]
+    return [
+        {"price": format(price, "f"), "count": format(size, "f")}
+        for price, size in sorted(normalized, reverse=True)[:5]
+    ]
+
+
 def _book_warnings(
     *,
     yes_bid: Decimal | None,
@@ -143,9 +160,7 @@ def _book_warnings(
     elif yes_bid is None or no_bid is None or yes_ask is None or no_ask is None:
         warnings.append("one_sided_book")
 
-    if (yes_spread is not None and yes_spread < 0) or (
-        no_spread is not None and no_spread < 0
-    ):
+    if (yes_spread is not None and yes_spread < 0) or (no_spread is not None and no_spread < 0):
         warnings.append("crossed_book")
 
     return warnings

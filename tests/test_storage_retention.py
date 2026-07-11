@@ -36,7 +36,10 @@ from ape.repositories.markets import MarketsRepository
 from ape.repositories.orderbook import OrderbookRepository
 from ape.repositories.public_trades import PublicTradesRepository
 from ape.repositories.reference_ticks import ReferenceTicksRepository
-from ape.repositories.storage_retention import StorageRetentionRepository
+from ape.repositories.storage_retention import (
+    ALLOWED_RETENTION_TABLES,
+    StorageRetentionRepository,
+)
 from ape.repositories.strategy_decisions import StrategyDecisionsRepository
 from ape.repositories.strategy_dry_run import StrategyDryRunRepository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
@@ -45,6 +48,7 @@ from ape.storage import retention as retention_module
 from ape.storage.retention import (
     RETENTION_SUCCESS,
     RETENTION_SUCCESS_PARTIAL,
+    RETENTION_TABLE_NAMES,
     StorageRetentionWorker,
     build_storage_status,
     run_storage_retention_once,
@@ -62,6 +66,10 @@ def retention_db(tmp_path):
         yield database_url, session_factory
     finally:
         engine.dispose()
+
+
+def test_all_retention_policy_tables_are_repository_allowlisted() -> None:
+    assert set(RETENTION_TABLE_NAMES) <= ALLOWED_RETENTION_TABLES
 
 
 def test_storage_retention_deletes_old_rows_in_chunks(retention_db) -> None:
@@ -302,7 +310,10 @@ def test_storage_retention_rotates_capped_tables_between_runs(retention_db) -> N
         "strategy_dry_run_positions",
         "strategy_dry_run_events",
     ]
-    assert fifth.tables_processed == ["markets", "orderbook_snapshots"]
+    assert fifth.tables_processed == [
+        "strategy_feature_snapshots",
+        "strategy_trade_intents",
+    ]
     assert "orderbook_snapshots" in second.tables_skipped
     assert "strategy_decisions" in second.tables_skipped
 
@@ -775,9 +786,7 @@ def _retention_config(
     if max_tables_per_run is not None:
         env["STORAGE_RETENTION_MAX_TABLES_PER_RUN"] = str(max_tables_per_run)
     if max_delete_rows_per_table is not None:
-        env["STORAGE_RETENTION_MAX_DELETE_ROWS_PER_TABLE"] = str(
-            max_delete_rows_per_table
-        )
+        env["STORAGE_RETENTION_MAX_DELETE_ROWS_PER_TABLE"] = str(max_delete_rows_per_table)
     return load_config(env)
 
 

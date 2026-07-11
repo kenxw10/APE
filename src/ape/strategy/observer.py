@@ -25,6 +25,7 @@ from ape.db.models import (
     StrategyDecision,
     StrategyDryRunEvent,
     StrategyDryRunPosition,
+    StrategyTradeIntent,
 )
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.kalshi.reference_messages import BRTI_SOURCE
@@ -33,6 +34,8 @@ from ape.repositories.inputs import (
     StrategyDecisionInput,
     StrategyDryRunEventInput,
     StrategyDryRunPositionInput,
+    StrategyPositionMarkInput,
+    StrategyTradeIntentInput,
     WorkerHeartbeatInput,
 )
 from ape.repositories.markets import MarketsRepository
@@ -44,8 +47,17 @@ from ape.repositories.strategy_dry_run import (
     OPEN_POSITION_STATUS,
     StrategyDryRunRepository,
 )
+from ape.repositories.strategy_v2 import StrategyV2Repository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import SafetyAssessment, assess_startup_safety
+from ape.strategy.context import load_strategy_evaluation_context
+from ape.strategy.momentum_v2 import (
+    STATE_V2_ENTRY_SIGNAL,
+    V2_PARAMETERS,
+    V2_STRATEGY_ID,
+    built_in_config_version,
+    evaluate_momentum_v2,
+)
 from ape.worker.feed_liveness import load_market_feed_liveness, load_reference_feed_liveness
 from ape.worker.services import (
     WORKER_SERVICE_AGGREGATE,
@@ -101,6 +113,11 @@ DECISION_STATES = {
     STATE_MANAGE_POSITION,
     STATE_EXIT_SIGNAL,
     STATE_FORCE_EXIT,
+    "V2_FEATURES_NOT_READY",
+    "V2_HARD_GATE_BLOCKED",
+    "V2_SCORE_BELOW_THRESHOLD",
+    "V2_EDGE_BELOW_THRESHOLD",
+    STATE_V2_ENTRY_SIGNAL,
 }
 
 
@@ -161,6 +178,9 @@ class StrategyDecisionSnapshot:
     brti_value: Decimal | None = None
     distance_bps: Decimal | None = None
     seconds_left: int | None = None
+    feature_snapshot_id: str | None = None
+    strategy_config_version_id: str | None = None
+    code_commit_sha: str | None = None
     measurements: JsonPayload | None = None
     blockers: JsonPayload | None = None
     warnings: JsonPayload | None = None
@@ -264,6 +284,9 @@ class StrategyDryRunPositionSnapshot:
     close_price: Decimal | None = None
     close_reason: str | None = None
     realized_pnl_cents: Decimal | None = None
+    feature_snapshot_id: str | None = None
+    strategy_config_version_id: str | None = None
+    code_commit_sha: str | None = None
     measurements_summary: JsonPayload | None = None
 
 
@@ -281,6 +304,9 @@ class StrategyDryRunEventSnapshot:
     price: Decimal | None = None
     contract_count: int | None = None
     reason: str | None = None
+    feature_snapshot_id: str | None = None
+    strategy_config_version_id: str | None = None
+    code_commit_sha: str | None = None
     measurements_summary: JsonPayload | None = None
 
 
@@ -396,10 +422,18 @@ class StrategyObserver:
                 for variant_config, decision in decisions:
                     if repository.get_decision_by_id(decision.decision_id) is None:
                         repository.insert_decision(decision)
-                    ledger_results[decision.strategy_id] = _apply_dry_run_ledger(
-                        config=variant_config,
-                        session=session,
-                        decision=decision,
+                    ledger_results[decision.strategy_id] = (
+                        _apply_v2_hypothetical_lifecycle(
+                            config=variant_config,
+                            session=session,
+                            decision=decision,
+                        )
+                        if decision.strategy_id == V2_STRATEGY_ID
+                        else _apply_dry_run_ledger(
+                            config=variant_config,
+                            session=session,
+                            decision=decision,
+                        )
                     )
                 session.commit()
         except IntegrityError:
@@ -465,9 +499,7 @@ class StrategyObserver:
                         metadata=metadata,
                     )
                 )
-                latest_heartbeat = repository.get_latest_heartbeat(
-                    WORKER_SERVICE_AGGREGATE
-                )
+                latest_heartbeat = repository.get_latest_heartbeat(WORKER_SERVICE_AGGREGATE)
                 metadata_keys = _enabled_collector_metadata_keys(self.config)
                 if latest_heartbeat is not None and metadata_keys:
                     _preserve_existing_worker_metadata(
@@ -648,43 +680,31 @@ def evaluate_strategy_observer(
             brti_reference_persistence_stale=brti_reference_persistence_stale,
             brti_reference_worker_heartbeat_stale=brti_reference_worker_heartbeat_stale,
             brti_reference_trade_ready_fresh=brti_reference_trade_ready_fresh,
-            brti_reference_backend_transport_lag_ms=(
-                brti_reference_backend_transport_lag_ms
-            ),
+            brti_reference_backend_transport_lag_ms=(brti_reference_backend_transport_lag_ms),
             brti_reference_time_since_last_valid_tick_ms=(
                 brti_reference_time_since_last_valid_tick_ms
             ),
             brti_reference_stale_reason=brti_reference_stale_reason,
             brti_reference_stream_age_ms=brti_reference_stream_age_ms,
-            brti_reference_last_valid_message_at=(
-                brti_reference_last_valid_message_at
-            ),
+            brti_reference_last_valid_message_at=(brti_reference_last_valid_message_at),
             brti_reference_last_valid_message_source_ts=(
                 brti_reference_last_valid_message_source_ts
             ),
-            brti_reference_last_valid_message_value=(
-                brti_reference_last_valid_message_value
-            ),
+            brti_reference_last_valid_message_value=(brti_reference_last_valid_message_value),
             brti_reference_last_duplicate_valid_message_at=(
                 brti_reference_last_duplicate_valid_message_at
             ),
             brti_reference_valid_message_carried_forward=(
                 brti_reference_valid_message_carried_forward
             ),
-            brti_reference_carry_forward_allowed=(
-                brti_reference_carry_forward_allowed
-            ),
-            brti_reference_carry_forward_age_ms=(
-                brti_reference_carry_forward_age_ms
-            ),
+            brti_reference_carry_forward_allowed=(brti_reference_carry_forward_allowed),
+            brti_reference_carry_forward_age_ms=(brti_reference_carry_forward_age_ms),
             brti_reference_liveness_reason=brti_reference_liveness_reason,
             orderbook=orderbook,
             orderbook_age_ms=orderbook_age_ms,
             orderbook_stream_age_ms=orderbook_stream_age_ms,
             orderbook_stream_connection_state=orderbook_stream_connection_state,
-            orderbook_stream_active_market_ticker=(
-                orderbook_stream_active_market_ticker
-            ),
+            orderbook_stream_active_market_ticker=(orderbook_stream_active_market_ticker),
             orderbook_stream_warnings=orderbook_stream_warnings,
             orderbook_stream_blockers=orderbook_stream_blockers,
             market_feed_transport_state=market_feed_transport_state,
@@ -815,14 +835,10 @@ def evaluate_strategy_observer(
         if market is None or candidate_side is None:
             return
 
-        exit_orderbook = OrderbookRepository(session).get_latest_snapshot(
-            market.market_ticker
-        )
+        exit_orderbook = OrderbookRepository(session).get_latest_snapshot(market.market_ticker)
         orderbook = exit_orderbook
         orderbook_age_ms = (
-            None
-            if exit_orderbook is None
-            else _age_ms(exit_orderbook.received_at, evaluated_at)
+            None if exit_orderbook is None else _age_ms(exit_orderbook.received_at, evaluated_at)
         )
         if (
             exit_orderbook is None
@@ -835,14 +851,10 @@ def evaluate_strategy_observer(
             exit_orderbook,
             candidate_side,
         )
-        desired_spread_cents = (
-            None if desired_spread is None else desired_spread * Decimal("100")
-        )
+        desired_spread_cents = None if desired_spread is None else desired_spread * Decimal("100")
         desired_mid = _midpoint(desired_bid, desired_ask)
         desired_top_book_size = _desired_exit_book_size(exit_orderbook, candidate_side)
-        latest_trade = PublicTradesRepository(session).get_latest_trade(
-            market.market_ticker
-        )
+        latest_trade = PublicTradesRepository(session).get_latest_trade(market.market_ticker)
         if latest_trade is not None:
             latest_trade_age_ms = _age_ms(latest_trade.received_at, evaluated_at)
 
@@ -876,17 +888,12 @@ def evaluate_strategy_observer(
         series_ticker=config.kalshi_btc15_series_ticker,
     )
     if _dry_run_runtime_enabled(config, safety):
-        open_positions = dry_run_repository.list_open_positions(
-            strategy_id=config.strategy_id
-        )
+        open_positions = dry_run_repository.list_open_positions(strategy_id=config.strategy_id)
         if open_positions:
             stale_positions = [
                 position
                 for position in open_positions
-                if (
-                    active_market is None
-                    or position.market_ticker != active_market.market_ticker
-                )
+                if (active_market is None or position.market_ticker != active_market.market_ticker)
             ]
             active_market_positions = [
                 position
@@ -900,12 +907,10 @@ def evaluate_strategy_observer(
                 else None
             )
             feed_failure_position = active_market_position
-            can_open_additional = (
-                len(open_positions) < config.strategy_dry_run_max_open_positions
-                and (
-                    not config.strategy_dry_run_one_entry_per_market
-                    or active_market_position is None
-                )
+            can_open_additional = len(
+                open_positions
+            ) < config.strategy_dry_run_max_open_positions and (
+                not config.strategy_dry_run_one_entry_per_market or active_market_position is None
             )
             if stale_positions:
                 managing_position = _oldest_dry_run_position(stale_positions)
@@ -915,9 +920,7 @@ def evaluate_strategy_observer(
         if managing_position is not None:
             dry_run_position_id = managing_position.position_id
             candidate_side = managing_position.side_candidate
-            market = markets_repository.get_market_by_ticker(
-                managing_position.market_ticker
-            )
+            market = markets_repository.get_market_by_ticker(managing_position.market_ticker)
             if market is None:
                 return decision(
                     STATE_FORCE_EXIT,
@@ -943,10 +946,7 @@ def evaluate_strategy_observer(
 
     if managing_position is None:
         market = active_market
-    elif (
-        active_market is None
-        or active_market.market_ticker != managing_position.market_ticker
-    ):
+    elif active_market is None or active_market.market_ticker != managing_position.market_ticker:
         return decision(
             STATE_FORCE_EXIT,
             "dry_run_position_no_longer_active_market",
@@ -1002,8 +1002,7 @@ def evaluate_strategy_observer(
         or reference_liveness.latest_component_heartbeat_mode
     )
     liveness_source_mismatch = (
-        market_liveness.liveness_source_mismatch
-        or reference_liveness.liveness_source_mismatch
+        market_liveness.liveness_source_mismatch or reference_liveness.liveness_source_mismatch
     )
     accumulated_warnings.extend(market_liveness.warnings)
     accumulated_warnings.extend(reference_liveness.warnings)
@@ -1060,19 +1059,17 @@ def evaluate_strategy_observer(
             "valid_message_carried_forward",
         )
         brti_reference_stream_age_ms = reference_liveness.stream_age_ms
-        brti_reference_backend_transport_lag_ms = (
-            _metadata_int(reference_worker_metadata, "backend_transport_lag_ms")
-            or _age_ms(
-                _metadata_datetime(reference_worker_metadata, "last_message_at"),
-                evaluated_at,
-            )
+        brti_reference_backend_transport_lag_ms = _metadata_int(
+            reference_worker_metadata, "backend_transport_lag_ms"
+        ) or _age_ms(
+            _metadata_datetime(reference_worker_metadata, "last_message_at"),
+            evaluated_at,
         )
-        brti_reference_time_since_last_valid_tick_ms = (
-            _metadata_int(reference_worker_metadata, "time_since_last_valid_tick_ms")
-            or _age_ms(
-                _metadata_datetime(reference_worker_metadata, "last_valid_tick_at"),
-                evaluated_at,
-            )
+        brti_reference_time_since_last_valid_tick_ms = _metadata_int(
+            reference_worker_metadata, "time_since_last_valid_tick_ms"
+        ) or _age_ms(
+            _metadata_datetime(reference_worker_metadata, "last_valid_tick_at"),
+            evaluated_at,
         )
         brti_reference_worker_heartbeat_stale = (
             _metadata_bool(reference_worker_metadata, "worker_heartbeat_stale")
@@ -1136,11 +1133,7 @@ def evaluate_strategy_observer(
     brti_reference_time_since_last_valid_tick_ms = (
         brti_reference_time_since_last_valid_tick_ms or brti_backend_age_ms
     )
-    brti_age_ms = max(
-        age
-        for age in (brti_backend_age_ms, brti_source_age_ms)
-        if age is not None
-    )
+    brti_age_ms = max(age for age in (brti_backend_age_ms, brti_source_age_ms) if age is not None)
     brti_reference_stale_reason = _strategy_reference_stale_reason(
         config=config,
         reference_tick=reference_tick,
@@ -1249,10 +1242,7 @@ def evaluate_strategy_observer(
         accumulated_warnings.append("kalshi_orderbook_data_quiet_carried_forward")
         orderbook_liveness_reason = "kalshi_orderbook_data_quiet_carried_forward"
 
-    if (
-        orderbook_snapshot_source == "blocked"
-        and orderbook_liveness_reason is not None
-    ):
+    if orderbook_snapshot_source == "blocked" and orderbook_liveness_reason is not None:
         if manage_feed_failure_position():
             return decision(
                 STATE_FORCE_EXIT,
@@ -1265,9 +1255,7 @@ def evaluate_strategy_observer(
     if latest_trade is not None:
         latest_trade_age_ms = _age_ms(latest_trade.received_at, evaluated_at)
 
-    reference_since = evaluated_at - timedelta(
-        seconds=config.strategy_brti_lookback_long_seconds
-    )
+    reference_since = evaluated_at - timedelta(seconds=config.strategy_brti_lookback_long_seconds)
     reference_ticks = ReferenceTicksRepository(session).get_ticks_since(
         BRTI_SOURCE,
         reference_since,
@@ -1337,16 +1325,13 @@ def evaluate_strategy_observer(
     if managing_position is None:
         candidate_side = "YES" if brti_value > boundary else "NO"
     distance_bps = (abs(brti_value - boundary) / brti_value) * Decimal("10000")
-    if (
-        managing_position is None
-        and distance_bps < Decimal(str(config.strategy_min_boundary_distance_bps))
+    if managing_position is None and distance_bps < Decimal(
+        str(config.strategy_min_boundary_distance_bps)
     ):
         return decision(STATE_TOO_CLOSE_TO_BOUNDARY, "boundary_distance_below_threshold")
 
     desired_bid, desired_ask, desired_spread = _desired_book(orderbook, candidate_side)
-    desired_spread_cents = (
-        None if desired_spread is None else desired_spread * Decimal("100")
-    )
+    desired_spread_cents = None if desired_spread is None else desired_spread * Decimal("100")
     desired_mid = _midpoint(desired_bid, desired_ask)
     desired_top_book_size = (
         _desired_exit_book_size(orderbook, candidate_side)
@@ -1368,9 +1353,8 @@ def evaluate_strategy_observer(
             )
         return decision(STATE_BOOK_UNUSABLE, "kalshi_orderbook_side_missing")
 
-    if (
-        desired_spread_cents is None
-        or desired_spread_cents > Decimal(str(config.strategy_max_spread_cents))
+    if desired_spread_cents is None or desired_spread_cents > Decimal(
+        str(config.strategy_max_spread_cents)
     ):
         if managing_position is not None:
             return decision(
@@ -1406,15 +1390,12 @@ def evaluate_strategy_observer(
             management_state,
             management_reason,
             blockers=(
-                ["dry_run_force_exit_required"]
-                if management_state == STATE_FORCE_EXIT
-                else []
+                ["dry_run_force_exit_required"] if management_state == STATE_FORCE_EXIT else []
             ),
         )
 
     dry_run_entry_bucket = int(
-        evaluated_at.timestamp()
-        / max(config.strategy_dry_run_min_seconds_between_decisions, 0.001)
+        evaluated_at.timestamp() / max(config.strategy_dry_run_min_seconds_between_decisions, 0.001)
     )
     dry_run_position_id = _dry_run_position_id(
         config=config,
@@ -1504,9 +1485,8 @@ def evaluate_strategy_observer(
     candidate_trade_ratio = trade_confirmation["candidate_trade_ratio"]
     if recent_trade_count < config.strategy_trade_confirmation_min_trades:
         accumulated_warnings.append("recent_trade_confirmation_insufficient_trades")
-    elif (
-        candidate_trade_ratio is not None
-        and candidate_trade_ratio < Decimal(str(config.strategy_trade_confirmation_min_ratio))
+    elif candidate_trade_ratio is not None and candidate_trade_ratio < Decimal(
+        str(config.strategy_trade_confirmation_min_ratio)
     ):
         return decision(
             STATE_CONTRACT_NOT_CONFIRMED,
@@ -1524,9 +1504,7 @@ def evaluate_strategy_observer(
             ),
         )
 
-    open_position_count = dry_run_repository.count_open_positions(
-        strategy_id=config.strategy_id
-    )
+    open_position_count = dry_run_repository.count_open_positions(strategy_id=config.strategy_id)
     if open_position_count >= config.strategy_dry_run_max_open_positions:
         dry_run_risk_state = "max_open_positions_reached"
         return decision(
@@ -1560,24 +1538,84 @@ def evaluate_strategy_variants(
     session: Session,
     now: datetime | None = None,
 ) -> list[tuple[AppConfig, StrategyDecisionInput]]:
-    """Evaluate configured dry-run variants on one timestamp and DB transaction."""
+    """Evaluate variants against one timestamp and one canonical v2 feature record."""
 
     evaluated_at = _as_utc(now or datetime.now(UTC))
     if session.bind is not None and session.bind.dialect.name == "postgresql":
         # Keep both variants on the same committed market/reference snapshot.
         session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
-    return [
-        (
-            variant_config,
-            evaluate_strategy_observer(
-                config=variant_config,
-                safety=safety,
-                session=session,
-                now=evaluated_at,
-            ),
+    context = load_strategy_evaluation_context(
+        config=config,
+        session=session,
+        evaluated_at=evaluated_at,
+    )
+    v2_evaluation = evaluate_momentum_v2(context, config=config)
+    v2_repository = StrategyV2Repository(session)
+    feature_snapshot = v2_repository.ensure_feature_snapshot(v2_evaluation.feature_snapshot)
+    results: list[tuple[AppConfig, StrategyDecisionInput]] = []
+
+    for variant_config in strategy_variant_configs(config, safety):
+        decision = evaluate_strategy_observer(
+            config=variant_config,
+            safety=safety,
+            session=session,
+            now=evaluated_at,
         )
-        for variant_config in strategy_variant_configs(config, safety)
-    ]
+        config_version = v2_repository.ensure_config_version(
+            built_in_config_version(variant_config.strategy_id, _thresholds(variant_config))
+        )
+        results.append(
+            (
+                variant_config,
+                replace(
+                    decision,
+                    feature_snapshot_id=feature_snapshot.feature_snapshot_id,
+                    strategy_config_version_id=config_version.strategy_config_version_id,
+                    code_commit_sha=config_version.code_commit_sha,
+                ),
+            )
+        )
+
+    if config.strategy_v2_enabled and _dry_run_runtime_enabled(config, safety):
+        v2_config = replace(config, strategy_id=V2_STRATEGY_ID)
+        config_version = v2_repository.ensure_config_version(
+            built_in_config_version(V2_STRATEGY_ID, V2_PARAMETERS)
+        )
+        measurements = dict(v2_evaluation.measurements)
+        measurements["feature_snapshot_id"] = feature_snapshot.feature_snapshot_id
+        measurements["strategy_config_version_id"] = config_version.strategy_config_version_id
+        context_hash = feature_snapshot.context_hash
+        v2_decision = StrategyDecisionInput(
+            decision_id=_decision_id(
+                evaluated_at=evaluated_at,
+                poll_seconds=config.strategy_observer_poll_seconds,
+                strategy_id=V2_STRATEGY_ID,
+                market_ticker=feature_snapshot.market_ticker,
+                context_hash=context_hash,
+            ),
+            evaluated_at=evaluated_at,
+            decision_state=v2_evaluation.state,
+            primary_reason=v2_evaluation.reason,
+            app_mode=config.app_mode.value,
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=feature_snapshot.market_ticker,
+            candidate_side=v2_evaluation.candidate_side,
+            boundary=feature_snapshot.boundary,
+            brti_value=feature_snapshot.current_brti,
+            distance_bps=_decimal_or_none(
+                v2_evaluation.measurements["features"].get("distance_bps")
+            ),
+            seconds_left=feature_snapshot.seconds_left,
+            feature_snapshot_id=feature_snapshot.feature_snapshot_id,
+            strategy_config_version_id=config_version.strategy_config_version_id,
+            code_commit_sha=config_version.code_commit_sha,
+            measurements=measurements,
+            blockers=v2_evaluation.blockers,
+            warnings=v2_evaluation.warnings,
+            raw_context_hash=context_hash,
+        )
+        results.append((v2_config, v2_decision))
+    return results
 
 
 def strategy_variant_configs(
@@ -1585,10 +1623,7 @@ def strategy_variant_configs(
     safety: SafetyAssessment,
 ) -> list[AppConfig]:
     control = replace(config, strategy_id=CONTROL_STRATEGY_ID)
-    if not (
-        config.strategy_challenger_enabled
-        and _dry_run_runtime_enabled(control, safety)
-    ):
+    if not (config.strategy_challenger_enabled and _dry_run_runtime_enabled(control, safety)):
         return [control]
 
     challenger = replace(
@@ -1671,9 +1706,7 @@ def build_strategy_status(
                     component_heartbeat.metadata_ if component_heartbeat else None
                 )
                 if worker_metadata is None:
-                    heartbeat = heartbeat_repository.get_latest_heartbeat(
-                        WORKER_SERVICE_AGGREGATE
-                    )
+                    heartbeat = heartbeat_repository.get_latest_heartbeat(WORKER_SERVICE_AGGREGATE)
                     worker_metadata = _strategy_worker_metadata(
                         heartbeat.metadata_ if heartbeat else None
                     )
@@ -1791,9 +1824,7 @@ def build_recent_strategy_gate_summary(
                     )
                     current_open_position_count = StrategyDryRunRepository(
                         session
-                    ).count_open_positions(
-                        strategy_id=effective_strategy_id
-                    )
+                    ).count_open_positions(strategy_id=effective_strategy_id)
             finally:
                 engine.dispose()
         except SQLAlchemyError:
@@ -1839,9 +1870,7 @@ def build_recent_strategy_gate_summary(
                 gate_summary["latest_reason"] = reason
 
     latest_decision = rows[0] if rows else None
-    latest_blockers = (
-        _string_list(latest_decision.blockers) if latest_decision is not None else []
-    )
+    latest_blockers = _string_list(latest_decision.blockers) if latest_decision is not None else []
     return StrategyGateSummarySnapshot(
         limit=capped_limit,
         count=len(rows),
@@ -1895,9 +1924,11 @@ def build_strategy_variants_comparison(
                 )
                 decisions = StrategyDecisionsRepository(session)
                 dry_run = StrategyDryRunRepository(session)
+                v2_records = StrategyV2Repository(session)
                 strategy_ids = set(heartbeat_variants) | {
                     CONTROL_STRATEGY_ID,
                     CHALLENGER_STRATEGY_ID,
+                    V2_STRATEGY_ID,
                 }
                 for strategy_id in sorted(strategy_ids):
                     latest = decisions.get_latest_decision(strategy_id=strategy_id)
@@ -1905,8 +1936,7 @@ def build_strategy_variants_comparison(
                         "worker": heartbeat_variants.get(strategy_id),
                         "configured_thresholds": (
                             latest.measurements.get("config")
-                            if latest is not None
-                            and isinstance(latest.measurements, dict)
+                            if latest is not None and isinstance(latest.measurements, dict)
                             else None
                         ),
                         **decisions.comparison_summary_since(
@@ -1914,6 +1944,10 @@ def build_strategy_variants_comparison(
                             since=since,
                         ),
                         **dry_run.comparison_summary_since(
+                            strategy_id=strategy_id,
+                            since=since,
+                        ),
+                        **v2_records.comparison_summary_since(
                             strategy_id=strategy_id,
                             since=since,
                         ),
@@ -1947,8 +1981,8 @@ def build_strategy_dry_run_status(
     checked_at = _as_utc(now or datetime.now(UTC))
     safety = assess_startup_safety(config)
     enabled = _dry_run_runtime_enabled(config, safety) and (
-        effective_strategy_id != CHALLENGER_STRATEGY_ID
-        or config.strategy_challenger_enabled
+        (effective_strategy_id != CHALLENGER_STRATEGY_ID or config.strategy_challenger_enabled)
+        and (effective_strategy_id != V2_STRATEGY_ID or config.strategy_v2_enabled)
     )
     worker_metadata: dict[str, Any] | None = None
     open_position_count = 0
@@ -2000,9 +2034,9 @@ def build_strategy_dry_run_status(
                     strategy_id=effective_strategy_id
                 )
                 if latest_enter_id is not None:
-                    latest_enter_decision = StrategyDecisionsRepository(
-                        session
-                    ).get_decision_by_id(latest_enter_id)
+                    latest_enter_decision = StrategyDecisionsRepository(session).get_decision_by_id(
+                        latest_enter_id
+                    )
                 heartbeat_repository = WorkerHeartbeatRepository(session)
                 component_heartbeat = heartbeat_repository.get_latest_heartbeat(
                     WORKER_SERVICE_STRATEGY
@@ -2012,9 +2046,7 @@ def build_strategy_dry_run_status(
                     strategy_id=effective_strategy_id,
                 )
                 if worker_metadata is None:
-                    heartbeat = heartbeat_repository.get_latest_heartbeat(
-                        WORKER_SERVICE_AGGREGATE
-                    )
+                    heartbeat = heartbeat_repository.get_latest_heartbeat(WORKER_SERVICE_AGGREGATE)
                     worker_metadata = _strategy_dry_run_status_worker_metadata(
                         heartbeat.metadata_ if heartbeat else None,
                         strategy_id=effective_strategy_id,
@@ -2176,6 +2208,85 @@ def build_recent_strategy_dry_run_events(
     )
 
 
+def build_v2_feature_records(
+    config: AppConfig,
+    *,
+    limit: int = 1,
+) -> dict[str, Any]:
+    return _build_v2_records(config, kind="features", limit=limit)
+
+
+def build_v2_intent_records(
+    config: AppConfig,
+    *,
+    limit: int,
+    strategy_id: str = V2_STRATEGY_ID,
+) -> dict[str, Any]:
+    return _build_v2_records(config, kind="intents", limit=limit, strategy_id=strategy_id)
+
+
+def build_v2_mark_records(
+    config: AppConfig,
+    *,
+    limit: int,
+    strategy_id: str = V2_STRATEGY_ID,
+) -> dict[str, Any]:
+    return _build_v2_records(config, kind="marks", limit=limit, strategy_id=strategy_id)
+
+
+def _build_v2_records(
+    config: AppConfig,
+    *,
+    kind: str,
+    limit: int,
+    strategy_id: str | None = None,
+) -> dict[str, Any]:
+    capped_limit = min(max(limit, 1), 500)
+    if not config.database_url:
+        return {
+            "limit": capped_limit,
+            "count": 0,
+            "records": [],
+            "warnings": ["database_not_configured"],
+        }
+    try:
+        engine = create_engine_from_config(config)
+        try:
+            with create_session_factory(engine)() as session:
+                repository = StrategyV2Repository(session)
+                if kind == "features":
+                    rows = repository.list_recent_feature_snapshots(limit=capped_limit)
+                elif kind == "intents":
+                    rows = repository.list_recent_intents(
+                        strategy_id=strategy_id,
+                        limit=capped_limit,
+                    )
+                else:
+                    rows = repository.list_recent_marks(
+                        strategy_id=strategy_id,
+                        limit=capped_limit,
+                    )
+        finally:
+            engine.dispose()
+    except SQLAlchemyError:
+        return {
+            "limit": capped_limit,
+            "count": 0,
+            "records": [],
+            "warnings": ["strategy_v2_database_error"],
+        }
+    return {
+        "limit": capped_limit,
+        "count": len(rows),
+        "records": [_v2_record(row) for row in rows],
+        "warnings": [],
+    }
+
+
+def _v2_record(row: Any) -> dict[str, Any]:
+    return {column.name: _json_safe(getattr(row, column.name)) for column in row.__table__.columns}
+
+
 def strategy_decision_snapshot(
     decision: StrategyDecision | None,
 ) -> StrategyDecisionSnapshot:
@@ -2196,6 +2307,9 @@ def strategy_decision_snapshot(
         brti_value=decision.brti_value,
         distance_bps=decision.distance_bps,
         seconds_left=decision.seconds_left,
+        feature_snapshot_id=decision.feature_snapshot_id,
+        strategy_config_version_id=decision.strategy_config_version_id,
+        code_commit_sha=decision.code_commit_sha,
         measurements=decision.measurements,
         blockers=decision.blockers,
         warnings=decision.warnings,
@@ -2227,6 +2341,9 @@ def strategy_dry_run_position_snapshot(
         close_price=position.close_price,
         close_reason=position.close_reason,
         realized_pnl_cents=position.realized_pnl_cents,
+        feature_snapshot_id=position.feature_snapshot_id,
+        strategy_config_version_id=position.strategy_config_version_id,
+        code_commit_sha=position.code_commit_sha,
         measurements_summary=_measurement_summary(position.measurements),
     )
 
@@ -2250,6 +2367,9 @@ def strategy_dry_run_event_snapshot(
         price=event.price,
         contract_count=event.contract_count,
         reason=event.reason,
+        feature_snapshot_id=event.feature_snapshot_id,
+        strategy_config_version_id=event.strategy_config_version_id,
+        code_commit_sha=event.code_commit_sha,
         measurements_summary=_measurement_summary(event.measurements),
     )
 
@@ -2303,14 +2423,11 @@ def _status_snapshot(
         connection_state = "unknown"
 
     latest_measurements_summary = (
-        _measurement_summary(latest_decision.measurements)
-        if latest_decision is not None
-        else None
+        _measurement_summary(latest_decision.measurements) if latest_decision is not None else None
     )
     gate_results_summary = (
         _gate_results_summary(latest_decision.measurements.get("gate_results"))
-        if latest_decision is not None
-        and isinstance(latest_decision.measurements, dict)
+        if latest_decision is not None and isinstance(latest_decision.measurements, dict)
         else None
     )
 
@@ -2571,9 +2688,7 @@ def _measurements(
         brti_reference_stream_age_ms=brti_reference_stream_age_ms,
         brti_reference_carry_forward_allowed=brti_reference_carry_forward_allowed,
         brti_reference_carry_forward_age_ms=brti_reference_carry_forward_age_ms,
-        brti_reference_valid_message_carried_forward=(
-            brti_reference_valid_message_carried_forward
-        ),
+        brti_reference_valid_message_carried_forward=(brti_reference_valid_message_carried_forward),
         brti_reference_transport_stale=brti_reference_transport_stale,
         brti_reference_persistence_stale=brti_reference_persistence_stale,
         brti_reference_worker_heartbeat_stale=brti_reference_worker_heartbeat_stale,
@@ -2635,13 +2750,9 @@ def _measurements(
         "brti_reference_status_category": brti_reference_status_category,
         "brti_reference_transport_stale": brti_reference_transport_stale,
         "brti_reference_persistence_stale": brti_reference_persistence_stale,
-        "brti_reference_worker_heartbeat_stale": (
-            brti_reference_worker_heartbeat_stale
-        ),
+        "brti_reference_worker_heartbeat_stale": (brti_reference_worker_heartbeat_stale),
         "brti_reference_trade_ready_fresh": brti_reference_trade_ready_fresh,
-        "brti_reference_backend_transport_lag_ms": (
-            brti_reference_backend_transport_lag_ms
-        ),
+        "brti_reference_backend_transport_lag_ms": (brti_reference_backend_transport_lag_ms),
         "brti_reference_time_since_last_valid_tick_ms": (
             brti_reference_time_since_last_valid_tick_ms
         ),
@@ -2652,18 +2763,14 @@ def _measurements(
         "brti_reference_last_valid_message_source_ts": _isoformat_or_none(
             brti_reference_last_valid_message_source_ts
         ),
-        "brti_reference_last_valid_message_value": (
-            brti_reference_last_valid_message_value
-        ),
+        "brti_reference_last_valid_message_value": (brti_reference_last_valid_message_value),
         "brti_reference_last_duplicate_valid_message_at": _isoformat_or_none(
             brti_reference_last_duplicate_valid_message_at
         ),
         "brti_reference_valid_message_carried_forward": (
             brti_reference_valid_message_carried_forward
         ),
-        "brti_reference_carry_forward_allowed": (
-            brti_reference_carry_forward_allowed
-        ),
+        "brti_reference_carry_forward_allowed": (brti_reference_carry_forward_allowed),
         "brti_reference_carry_forward_age_ms": brti_reference_carry_forward_age_ms,
         "brti_reference_carry_forward_max_age_ms": (
             config.strategy_reference_carry_forward_max_age_ms
@@ -2713,18 +2820,12 @@ def _measurements(
             reference_worker_metadata,
             "consecutive_reconnect_count",
         ),
-        "brti_reference_worker_heartbeat_at": _isoformat_or_none(
-            reference_worker_heartbeat_at
-        ),
+        "brti_reference_worker_heartbeat_at": _isoformat_or_none(reference_worker_heartbeat_at),
         "brti_reference_worker_heartbeat_age_ms": reference_worker_heartbeat_age_ms,
         "market_liveness_source": market_liveness_source,
         "reference_liveness_source": reference_liveness_source,
-        "market_component_heartbeat_at": _isoformat_or_none(
-            market_component_heartbeat_at
-        ),
-        "reference_component_heartbeat_at": _isoformat_or_none(
-            reference_component_heartbeat_at
-        ),
+        "market_component_heartbeat_at": _isoformat_or_none(market_component_heartbeat_at),
+        "reference_component_heartbeat_at": _isoformat_or_none(reference_component_heartbeat_at),
         "market_component_heartbeat_age_ms": market_component_heartbeat_age_ms,
         "reference_component_heartbeat_age_ms": reference_component_heartbeat_age_ms,
         "latest_aggregate_heartbeat_mode": latest_aggregate_heartbeat_mode,
@@ -2909,9 +3010,7 @@ def _measurements(
         ),
         "orderbook_liveness_reason": orderbook_liveness_reason,
         "orderbook_snapshot_source": orderbook_snapshot_source,
-        "latest_trade_received_at": _isoformat_or_none(
-            getattr(latest_trade, "received_at", None)
-        ),
+        "latest_trade_received_at": _isoformat_or_none(getattr(latest_trade, "received_at", None)),
         "latest_trade_age_ms": latest_trade_age_ms,
         "brti_lookback_short_price": _decimal_text(brti_short_price),
         "brti_lookback_medium_price": _decimal_text(brti_medium_price),
@@ -2933,12 +3032,8 @@ def _measurements(
         "strategy_id": config.strategy_id,
         "dry_run_risk_state": dry_run_risk_state,
         "dry_run_intended_entry_price": _decimal_text(dry_run_intended_entry_price),
-        "strategy_dry_run_min_entry_price": _decimal_text(
-            config.strategy_dry_run_min_entry_price
-        ),
-        "strategy_dry_run_max_entry_price": _decimal_text(
-            config.strategy_dry_run_max_entry_price
-        ),
+        "strategy_dry_run_min_entry_price": _decimal_text(config.strategy_dry_run_min_entry_price),
+        "strategy_dry_run_max_entry_price": _decimal_text(config.strategy_dry_run_max_entry_price),
         "dry_run_intended_contract_count": dry_run_intended_contract_count,
         "dry_run_position_id": dry_run_position_id,
         "managed_position_id": getattr(managing_position, "position_id", None),
@@ -2963,9 +3058,7 @@ def _thresholds(config: AppConfig) -> dict[str, Any]:
         "strategy_dry_run_enabled": config.strategy_dry_run_enabled,
         "strategy_id": config.strategy_id,
         "strategy_dry_run_max_open_positions": config.strategy_dry_run_max_open_positions,
-        "strategy_dry_run_one_entry_per_market": (
-            config.strategy_dry_run_one_entry_per_market
-        ),
+        "strategy_dry_run_one_entry_per_market": (config.strategy_dry_run_one_entry_per_market),
         "strategy_dry_run_position_size_contracts": (
             config.strategy_dry_run_position_size_contracts
         ),
@@ -2984,14 +3077,10 @@ def _thresholds(config: AppConfig) -> dict[str, Any]:
         "strategy_brti_directional_tick_ratio_min": (
             config.strategy_brti_directional_tick_ratio_min
         ),
-        "strategy_brti_max_boundary_crosses_90s": (
-            config.strategy_brti_max_boundary_crosses_90s
-        ),
+        "strategy_brti_max_boundary_crosses_90s": (config.strategy_brti_max_boundary_crosses_90s),
         "strategy_brti_max_retrace_fraction": config.strategy_brti_max_retrace_fraction,
         "strategy_contract_lookback_seconds": config.strategy_contract_lookback_seconds,
-        "strategy_contract_min_mid_move_cents": (
-            config.strategy_contract_min_mid_move_cents
-        ),
+        "strategy_contract_min_mid_move_cents": (config.strategy_contract_min_mid_move_cents),
         "strategy_contract_ask_pullback_lookback_seconds": (
             config.strategy_contract_ask_pullback_lookback_seconds
         ),
@@ -3001,27 +3090,19 @@ def _thresholds(config: AppConfig) -> dict[str, Any]:
         "strategy_trade_confirmation_lookback_seconds": (
             config.strategy_trade_confirmation_lookback_seconds
         ),
-        "strategy_trade_confirmation_min_ratio": (
-            config.strategy_trade_confirmation_min_ratio
-        ),
-        "strategy_trade_confirmation_min_trades": (
-            config.strategy_trade_confirmation_min_trades
-        ),
+        "strategy_trade_confirmation_min_ratio": (config.strategy_trade_confirmation_min_ratio),
+        "strategy_trade_confirmation_min_trades": (config.strategy_trade_confirmation_min_trades),
         "strategy_min_top_book_size_contracts": config.strategy_min_top_book_size_contracts,
         "strategy_dry_run_max_entry_price": config.strategy_dry_run_max_entry_price,
         "strategy_dry_run_min_entry_price": config.strategy_dry_run_min_entry_price,
         "strategy_min_boundary_distance_bps": config.strategy_min_boundary_distance_bps,
         "strategy_reference_max_age_ms": config.strategy_reference_max_age_ms,
-        "strategy_reference_source_max_age_ms": (
-            config.strategy_reference_source_max_age_ms
-        ),
+        "strategy_reference_source_max_age_ms": (config.strategy_reference_source_max_age_ms),
         "strategy_reference_source_warn_ms": config.strategy_reference_source_warn_ms,
         "strategy_reference_require_trade_ready_fresh": (
             config.strategy_reference_require_trade_ready_fresh
         ),
-        "strategy_reference_stream_max_age_ms": (
-            config.strategy_reference_stream_max_age_ms
-        ),
+        "strategy_reference_stream_max_age_ms": (config.strategy_reference_stream_max_age_ms),
         "strategy_reference_carry_forward_max_age_ms": (
             config.strategy_reference_carry_forward_max_age_ms
         ),
@@ -3029,9 +3110,7 @@ def _thresholds(config: AppConfig) -> dict[str, Any]:
             config.strategy_reference_allow_duplicate_source_ts_carry_forward
         ),
         "strategy_kalshi_book_max_age_ms": config.strategy_kalshi_book_max_age_ms,
-        "strategy_kalshi_book_stream_max_age_ms": (
-            config.strategy_kalshi_book_stream_max_age_ms
-        ),
+        "strategy_kalshi_book_stream_max_age_ms": (config.strategy_kalshi_book_stream_max_age_ms),
         "strategy_kalshi_book_carry_forward_max_age_ms": (
             config.strategy_kalshi_book_carry_forward_max_age_ms
         ),
@@ -3278,9 +3357,7 @@ def _gate_results(
         book_status = "warn"
         book_reason = "kalshi_orderbook_data_quiet_carried_forward"
 
-    entry_price_status = (
-        "not_evaluated" if dry_run_intended_entry_price is None else "pass"
-    )
+    entry_price_status = "not_evaluated" if dry_run_intended_entry_price is None else "pass"
     entry_price_reason = None
     if primary_reason in {
         "dry_run_intended_entry_price_too_low",
@@ -3325,12 +3402,8 @@ def _gate_results(
     dry_run_risk_status = "not_evaluated" if dry_run_risk_state is None else "pass"
     dry_run_risk_reason = None
     if dry_run_risk_state == "dry_run_disabled":
-        dry_run_risk_status = (
-            "block" if config.app_mode is AppMode.DRY_RUN else "not_evaluated"
-        )
-        dry_run_risk_reason = (
-            primary_reason if dry_run_risk_status == "block" else None
-        )
+        dry_run_risk_status = "block" if config.app_mode is AppMode.DRY_RUN else "not_evaluated"
+        dry_run_risk_reason = primary_reason if dry_run_risk_status == "block" else None
     elif decision_state == STATE_RISK_BLOCKED:
         dry_run_risk_status = "block"
         dry_run_risk_reason = primary_reason
@@ -3347,7 +3420,9 @@ def _gate_results(
             "status": (
                 "block"
                 if decision_state == STATE_NO_ACTIVE_MARKET
-                else "not_evaluated" if market is None else "pass"
+                else "not_evaluated"
+                if market is None
+                else "pass"
             ),
             "reason": primary_reason if decision_state == STATE_NO_ACTIVE_MARKET else None,
             "ticker": getattr(market, "market_ticker", None),
@@ -3356,11 +3431,11 @@ def _gate_results(
             "status": (
                 "block"
                 if decision_state == STATE_MARKET_NOT_PARSEABLE
-                else "not_evaluated" if boundary is None else "pass"
+                else "not_evaluated"
+                if boundary is None
+                else "pass"
             ),
-            "reason": (
-                primary_reason if decision_state == STATE_MARKET_NOT_PARSEABLE else None
-            ),
+            "reason": (primary_reason if decision_state == STATE_MARKET_NOT_PARSEABLE else None),
             "boundary": _decimal_text(boundary),
             "source": boundary_source,
         },
@@ -3600,13 +3675,10 @@ def _strategy_orderbook_stale_reason(
         return None
     if market_feed_transport_state == "stale":
         return "kalshi_orderbook_transport_stale"
-    if (
-        market_feed_transport_state == "unknown"
-        and not _legacy_orderbook_stream_live(
-            stream_age_ms=orderbook_stream_age_ms,
-            stream_max_age_ms=config.strategy_kalshi_book_stream_max_age_ms,
-            connection_state=orderbook_stream_connection_state,
-        )
+    if market_feed_transport_state == "unknown" and not _legacy_orderbook_stream_live(
+        stream_age_ms=orderbook_stream_age_ms,
+        stream_max_age_ms=config.strategy_kalshi_book_stream_max_age_ms,
+        connection_state=orderbook_stream_connection_state,
     ):
         return "kalshi_orderbook_transport_stale"
     if orderbook_age_ms > config.strategy_kalshi_book_carry_forward_max_age_ms:
@@ -3834,10 +3906,7 @@ def _metadata_has_warning(
 ) -> bool:
     metadata_warnings = set(_metadata_string_list(metadata, "warnings"))
     metadata_blockers = set(_metadata_string_list(metadata, "blockers"))
-    return any(
-        warning in metadata_warnings or warning in metadata_blockers
-        for warning in warnings
-    )
+    return any(warning in metadata_warnings or warning in metadata_blockers for warning in warnings)
 
 
 def _metadata_status_category_is(
@@ -3891,13 +3960,9 @@ def _desired_top_book_size(
     candidate_side: str | None,
 ) -> Decimal | None:
     if candidate_side == "YES":
-        return _decimal_or_none(orderbook.yes_ask_count) or _decimal_or_none(
-            orderbook.yes_ask_size
-        )
+        return _decimal_or_none(orderbook.yes_ask_count) or _decimal_or_none(orderbook.yes_ask_size)
     if candidate_side == "NO":
-        return _decimal_or_none(orderbook.no_ask_count) or _decimal_or_none(
-            orderbook.no_ask_size
-        )
+        return _decimal_or_none(orderbook.no_ask_count) or _decimal_or_none(orderbook.no_ask_size)
     return None
 
 
@@ -3906,13 +3971,9 @@ def _desired_exit_book_size(
     candidate_side: str | None,
 ) -> Decimal | None:
     if candidate_side == "YES":
-        return _decimal_or_none(orderbook.yes_bid_count) or _decimal_or_none(
-            orderbook.yes_bid_size
-        )
+        return _decimal_or_none(orderbook.yes_bid_count) or _decimal_or_none(orderbook.yes_bid_size)
     if candidate_side == "NO":
-        return _decimal_or_none(orderbook.no_bid_count) or _decimal_or_none(
-            orderbook.no_bid_size
-        )
+        return _decimal_or_none(orderbook.no_bid_count) or _decimal_or_none(orderbook.no_bid_size)
     return None
 
 
@@ -3934,9 +3995,7 @@ def _brti_impulse_metrics(
     candidate_side: str | None,
 ) -> dict[str, Any]:
     valid_ticks = [
-        tick
-        for tick in ticks
-        if _valid_reference_tick(tick) and tick.parsed_value is not None
+        tick for tick in ticks if _valid_reference_tick(tick) and tick.parsed_value is not None
     ]
     metrics: dict[str, Any] = {
         "short_price": None,
@@ -4052,8 +4111,7 @@ def _contract_confirmation_metrics(
         return metrics
 
     mids = [
-        _midpoint(*_desired_book(snapshot, candidate_side)[:2])
-        for snapshot in orderbook_history
+        _midpoint(*_desired_book(snapshot, candidate_side)[:2]) for snapshot in orderbook_history
     ]
     valid_mids = [mid for mid in mids if mid is not None]
     if len(valid_mids) < 2:
@@ -4078,9 +4136,7 @@ def _contract_confirmation_metrics(
     if valid_asks:
         ask_pullback_cents = (max(valid_asks) - desired_ask) * Decimal("100")
         metrics["ask_pullback_cents"] = ask_pullback_cents
-        if ask_pullback_cents > Decimal(
-            str(config.strategy_contract_max_ask_pullback_cents)
-        ):
+        if ask_pullback_cents > Decimal(str(config.strategy_contract_max_ask_pullback_cents)):
             metrics["reason"] = "ask_pullback_above_threshold"
     return metrics
 
@@ -4090,11 +4146,7 @@ def _trade_confirmation_metrics(
     trades: list[PublicTrade],
     candidate_side: str | None,
 ) -> dict[str, Any]:
-    relevant = [
-        trade
-        for trade in trades
-        if _trade_side(trade) in {"YES", "NO"}
-    ]
+    relevant = [trade for trade in trades if _trade_side(trade) in {"YES", "NO"}]
     if not relevant:
         return {
             "trade_count": 0,
@@ -4131,9 +4183,7 @@ def _select_active_dry_run_position_needing_management(
     brti_value: Decimal,
 ) -> StrategyDryRunPosition | None:
     active_positions = [
-        position
-        for position in positions
-        if position.market_ticker == active_market_ticker
+        position for position in positions if position.market_ticker == active_market_ticker
     ]
     for position in sorted(
         active_positions,
@@ -4203,17 +4253,9 @@ def _dry_run_management_decision(
     if desired_bid <= entry_price - Decimal("0.12"):
         return STATE_EXIT_SIGNAL, "dry_run_stop_loss_reached"
     adverse_distance_bps = (abs(brti_value - boundary) / brti_value) * Decimal("10000")
-    if (
-        candidate_side == "YES"
-        and brti_value < boundary
-        and adverse_distance_bps >= Decimal("1.5")
-    ):
+    if candidate_side == "YES" and brti_value < boundary and adverse_distance_bps >= Decimal("1.5"):
         return STATE_EXIT_SIGNAL, "dry_run_brti_crossed_boundary_against_yes"
-    if (
-        candidate_side == "NO"
-        and brti_value > boundary
-        and adverse_distance_bps >= Decimal("1.5")
-    ):
+    if candidate_side == "NO" and brti_value > boundary and adverse_distance_bps >= Decimal("1.5"):
         return STATE_EXIT_SIGNAL, "dry_run_brti_crossed_boundary_against_no"
     return STATE_MANAGE_POSITION, "dry_run_position_open"
 
@@ -4297,9 +4339,7 @@ def _moves_oppose(
 ) -> bool:
     if short_move_bps is None or medium_move_bps is None:
         return False
-    return (short_move_bps > 0 > medium_move_bps) or (
-        short_move_bps < 0 < medium_move_bps
-    )
+    return (short_move_bps > 0 > medium_move_bps) or (short_move_bps < 0 < medium_move_bps)
 
 
 def _retrace_fraction(
@@ -4386,6 +4426,280 @@ def _dry_run_runtime_enabled(config: AppConfig, safety: SafetyAssessment) -> boo
     )
 
 
+def _resolve_v2_pending_intent(
+    *,
+    session: Session,
+    intents: StrategyV2Repository,
+    positions: StrategyDryRunRepository,
+    pending: StrategyTradeIntent,
+    resolved_at: datetime,
+    decision: StrategyDecisionInput | StrategyDecision | None,
+) -> tuple[str | None, str | None]:
+    future_books = OrderbookRepository(session).get_snapshots_between(
+        pending.market_ticker,
+        start=pending.effective_after,
+        end=pending.expires_at,
+    )
+    future_book = future_books[0] if future_books else None
+
+    if future_book is not None:
+        _, ask, _ = _desired_book(future_book, pending.side_candidate)
+        ask_depth = _desired_top_book_size(future_book, pending.side_candidate)
+        if (
+            ask is not None
+            and ask_depth is not None
+            and ask <= Decimal(pending.intended_limit_price)
+            and ask_depth >= Decimal(pending.quantity)
+        ):
+            position_id = f"v2-pos-{_stable_hash({'intent': pending.intent_id})[:24]}"
+            intents.resolve_intent(
+                pending,
+                status="FILLED",
+                resolved_at=resolved_at,
+                reason="v2_entry_future_book_fill",
+                position_id=position_id,
+                fill_snapshot_id=future_book.id,
+                fill_price=ask,
+                fill_size=Decimal(pending.quantity),
+            )
+            fill_time = future_book.received_at
+            position = positions.insert_position_if_absent(
+                StrategyDryRunPositionInput(
+                    position_id=position_id,
+                    strategy_id=V2_STRATEGY_ID,
+                    market_ticker=pending.market_ticker,
+                    decision_id=pending.decision_id,
+                    side_candidate=pending.side_candidate,
+                    economic_side=pending.side_candidate,
+                    opened_at=fill_time,
+                    open_price=ask,
+                    contract_count=int(Decimal(pending.quantity)),
+                    entry_reason="v2_causal_hypothetical_fill",
+                    status=OPEN_POSITION_STATUS,
+                    boundary=decision.boundary if decision is not None else None,
+                    brti_at_entry=decision.brti_value if decision is not None else None,
+                    distance_bps_at_entry=(decision.distance_bps if decision is not None else None),
+                    feature_snapshot_id=pending.feature_snapshot_id,
+                    strategy_config_version_id=pending.strategy_config_version_id,
+                    code_commit_sha=decision.code_commit_sha if decision is not None else None,
+                    measurements={
+                        "intent_id": pending.intent_id,
+                        "fill_snapshot_id": future_book.id,
+                    },
+                )
+            )
+            fill_event_id = _stable_hash({"intent": pending.intent_id, "event": "fill"})[:24]
+            positions.insert_event_if_absent(
+                StrategyDryRunEventInput(
+                    event_id=f"v2-event-{fill_event_id}",
+                    event_type="ENTER_DRY_RUN",
+                    occurred_at=fill_time,
+                    strategy_id=V2_STRATEGY_ID,
+                    position_id=position.position_id,
+                    decision_id=pending.decision_id,
+                    market_ticker=pending.market_ticker,
+                    side_candidate=pending.side_candidate,
+                    price=ask,
+                    contract_count=int(Decimal(pending.quantity)),
+                    reason="v2_causal_hypothetical_fill",
+                    feature_snapshot_id=pending.feature_snapshot_id,
+                    strategy_config_version_id=pending.strategy_config_version_id,
+                    code_commit_sha=decision.code_commit_sha if decision is not None else None,
+                )
+            )
+            return "ENTER_DRY_RUN", position.position_id
+
+    if _as_utc(resolved_at) > _as_utc(pending.expires_at):
+        intents.resolve_intent(
+            pending,
+            status="NO_FILL" if future_books else "EXPIRED",
+            resolved_at=resolved_at,
+            reason=(
+                "v2_entry_future_book_price_or_depth_unavailable"
+                if future_books
+                else "v2_entry_no_future_book_before_expiry"
+            ),
+        )
+        return ("NO_FILL" if future_books else "EXPIRED"), None
+    return None, None
+
+
+def _apply_v2_hypothetical_lifecycle(
+    *,
+    config: AppConfig,
+    session: Session,
+    decision: StrategyDecisionInput,
+) -> DryRunLedgerResult:
+    """Resolve v2 intents only from later persisted books; never from a signal book."""
+    intents = StrategyV2Repository(session)
+    positions = StrategyDryRunRepository(session)
+    now = decision.evaluated_at
+    latest_event_type: str | None = None
+    latest_position_id: str | None = None
+    decisions = StrategyDecisionsRepository(session)
+    for expired_pending in intents.list_expired_pending_intents(
+        strategy_id=V2_STRATEGY_ID,
+        before=now,
+        limit=100,
+    ):
+        source_decision = (
+            decision
+            if expired_pending.decision_id == decision.decision_id
+            else decisions.get_decision_by_id(expired_pending.decision_id)
+        )
+        event_type, position_id = _resolve_v2_pending_intent(
+            session=session,
+            intents=intents,
+            positions=positions,
+            pending=expired_pending,
+            resolved_at=now,
+            decision=source_decision,
+        )
+        if event_type is not None:
+            latest_event_type = event_type
+            latest_position_id = position_id
+
+    market_ticker = decision.market_ticker
+    if market_ticker is None:
+        return DryRunLedgerResult(
+            open_position_count=positions.count_open_positions(strategy_id=V2_STRATEGY_ID),
+            latest_event_type=latest_event_type,
+            latest_position_id=latest_position_id,
+        )
+
+    pending = intents.get_pending_intent(
+        strategy_id=V2_STRATEGY_ID,
+        market_ticker=market_ticker,
+    )
+
+    if pending is not None:
+        source_decision = (
+            decision
+            if pending.decision_id == decision.decision_id
+            else decisions.get_decision_by_id(pending.decision_id)
+        )
+        event_type, position_id = _resolve_v2_pending_intent(
+            session=session,
+            intents=intents,
+            positions=positions,
+            pending=pending,
+            resolved_at=now,
+            decision=source_decision,
+        )
+        if event_type is not None:
+            latest_event_type = event_type
+            latest_position_id = position_id
+
+    if (
+        decision.decision_state == STATE_V2_ENTRY_SIGNAL
+        and decision.candidate_side in {"YES", "NO"}
+        and pending is None
+        and positions.count_open_positions(strategy_id=V2_STRATEGY_ID)
+        < config.strategy_dry_run_max_open_positions
+        and not positions.has_any_position_for_market(
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=market_ticker,
+        )
+        and not intents.has_entry_intent_for_market(
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker=market_ticker,
+        )
+    ):
+        intended_price = _decimal_or_none((decision.measurements or {}).get("intended_entry_price"))
+        if intended_price is not None:
+            intent_id = f"v2-intent-{_stable_hash({'decision': decision.decision_id})[:24]}"
+            effective_after = now + timedelta(
+                milliseconds=int(V2_PARAMETERS["decision_to_book_latency_ms"])
+            )
+            expires_at = effective_after + timedelta(
+                seconds=int(V2_PARAMETERS["intent_expiry_seconds"])
+            )
+            intents.insert_intent_if_absent(
+                StrategyTradeIntentInput(
+                    intent_id=intent_id,
+                    strategy_id=V2_STRATEGY_ID,
+                    decision_id=decision.decision_id,
+                    market_ticker=market_ticker,
+                    side_candidate=decision.candidate_side,
+                    action="ENTRY",
+                    created_at=now,
+                    effective_after=effective_after,
+                    expires_at=expires_at,
+                    intended_limit_price=intended_price,
+                    quantity=Decimal("1"),
+                    strategy_config_version_id=decision.strategy_config_version_id,
+                    feature_snapshot_id=decision.feature_snapshot_id,
+                    optimistic_price=_decimal_or_none(
+                        (decision.measurements or {}).get("features", {}).get("desired_ask")
+                        if isinstance((decision.measurements or {}).get("features"), dict)
+                        else None
+                    ),
+                    optimistic_snapshot_id=None,
+                    measurements={
+                        "score": (decision.measurements or {}).get("score", {}).get("total"),
+                        "edge_lower_bound_cents": (decision.measurements or {})
+                        .get("edge", {})
+                        .get("lower_bound_cents"),
+                    },
+                )
+            )
+            latest_event_type = "ENTRY_INTENT_PENDING"
+
+    open_position = positions.get_latest_open_position(strategy_id=V2_STRATEGY_ID)
+    if open_position is not None and open_position.market_ticker == market_ticker:
+        mark_orderbook = OrderbookRepository(session).get_latest_snapshot(
+            open_position.market_ticker
+        )
+        desired_bid, _, _ = (
+            _desired_book(mark_orderbook, open_position.side_candidate)
+            if mark_orderbook is not None
+            else (None, None, None)
+        )
+        score = _decimal_or_none(
+            (decision.measurements or {}).get("score", {}).get("total")
+            if isinstance((decision.measurements or {}).get("score"), dict)
+            else None
+        )
+        edge = _decimal_or_none(
+            (decision.measurements or {}).get("edge", {}).get("lower_bound_cents")
+            if isinstance((decision.measurements or {}).get("edge"), dict)
+            else None
+        )
+        mark_key = _stable_hash(
+            {
+                "position": open_position.position_id,
+                "bucket": int(now.timestamp()),
+            }
+        )[:24]
+        mark_id = f"v2-mark-{mark_key}"
+        intents.insert_mark_if_absent(
+            StrategyPositionMarkInput(
+                mark_id=mark_id,
+                strategy_id=V2_STRATEGY_ID,
+                position_id=open_position.position_id,
+                market_ticker=open_position.market_ticker,
+                marked_at=now,
+                feature_snapshot_id=decision.feature_snapshot_id,
+                strategy_config_version_id=decision.strategy_config_version_id,
+                executable_bid=desired_bid,
+                score=score,
+                edge_lower_bound_cents=edge,
+                boundary_state={
+                    "boundary": _decimal_text(decision.boundary),
+                    "distance_bps": _decimal_text(decision.distance_bps),
+                },
+                management_reason=decision.primary_reason,
+            )
+        )
+        latest_position_id = open_position.position_id
+
+    return DryRunLedgerResult(
+        open_position_count=positions.count_open_positions(strategy_id=V2_STRATEGY_ID),
+        latest_event_type=latest_event_type,
+        latest_position_id=latest_position_id,
+    )
+
+
 def _apply_dry_run_ledger(
     *,
     config: AppConfig,
@@ -4417,6 +4731,9 @@ def _apply_dry_run_ledger(
                     distance_bps_at_entry=decision.distance_bps,
                     entry_reason=decision.primary_reason,
                     status=OPEN_POSITION_STATUS,
+                    feature_snapshot_id=decision.feature_snapshot_id,
+                    strategy_config_version_id=decision.strategy_config_version_id,
+                    code_commit_sha=decision.code_commit_sha,
                     measurements=decision.measurements,
                 )
             )
@@ -4437,6 +4754,9 @@ def _apply_dry_run_ledger(
                     price=entry_price,
                     contract_count=config.strategy_dry_run_position_size_contracts,
                     reason=decision.primary_reason,
+                    feature_snapshot_id=decision.feature_snapshot_id,
+                    strategy_config_version_id=decision.strategy_config_version_id,
+                    code_commit_sha=decision.code_commit_sha,
                     measurements=decision.measurements,
                 )
             )
@@ -4449,9 +4769,7 @@ def _apply_dry_run_ledger(
             )
             if decision.decision_state in {STATE_EXIT_SIGNAL, STATE_FORCE_EXIT}:
                 close_status = (
-                    "FORCE_CLOSED"
-                    if decision.decision_state == STATE_FORCE_EXIT
-                    else "CLOSED"
+                    "FORCE_CLOSED" if decision.decision_state == STATE_FORCE_EXIT else "CLOSED"
                 )
                 realized_pnl_cents = _realized_pnl_cents(position, close_price)
                 repository.close_position(
@@ -4478,10 +4796,11 @@ def _apply_dry_run_ledger(
                     occurred_at=decision.evaluated_at,
                     side_candidate=decision.candidate_side,
                     price=close_price,
-                    contract_count=(
-                        None if position is None else int(position.contract_count)
-                    ),
+                    contract_count=(None if position is None else int(position.contract_count)),
                     reason=decision.primary_reason,
+                    feature_snapshot_id=decision.feature_snapshot_id,
+                    strategy_config_version_id=decision.strategy_config_version_id,
+                    code_commit_sha=decision.code_commit_sha,
                     measurements=decision.measurements,
                 )
             )
@@ -4653,8 +4972,7 @@ def _full_gate_trace(
     """Record every pure entry gate without changing the canonical decision."""
 
     prerequisite_ready = all(
-        value is not None
-        for value in (market, boundary, brti_value, orderbook)
+        value is not None for value in (market, boundary, brti_value, orderbook)
     ) and bool(brti_value and brti_value > 0)
     base: dict[str, Any] = {
         "strategy_id": config.strategy_id,
@@ -4678,9 +4996,7 @@ def _full_gate_trace(
     distance_bps = abs(brti_value - boundary) / brti_value * Decimal("10000")
     desired_bid, desired_ask, desired_spread = _desired_book(orderbook, candidate_side)
     desired_mid = _midpoint(desired_bid, desired_ask)
-    desired_spread_cents = (
-        desired_spread * Decimal("100") if desired_spread is not None else None
-    )
+    desired_spread_cents = desired_spread * Decimal("100") if desired_spread is not None else None
     desired_top_book_size = _desired_top_book_size(orderbook, candidate_side)
     gates: dict[str, dict[str, Any]] = {}
 
@@ -4724,17 +5040,13 @@ def _full_gate_trace(
             "after_open_seconds": (
                 None if seconds_since_open is None else seconds_since_open - first_seconds
             ),
-            "before_close_seconds": (
-                None if seconds_left is None else seconds_left - last_seconds
-            ),
+            "before_close_seconds": (None if seconds_left is None else seconds_left - last_seconds),
         },
         canonical_reasons={"entry_window_too_early", "entry_window_too_late"},
     )
     boundary_threshold = Decimal(str(config.strategy_min_boundary_distance_bps))
     boundary_reason = (
-        "boundary_distance_below_threshold"
-        if distance_bps < boundary_threshold
-        else None
+        "boundary_distance_below_threshold" if distance_bps < boundary_threshold else None
     )
     add_gate(
         "boundary_distance",
@@ -4844,9 +5156,7 @@ def _full_gate_trace(
         reason=None,
         actual={"intended_entry_price": intended_entry},
         thresholds={"max_entry_price": max_entry},
-        margins={
-            "below_max": None if intended_entry is None else max_entry - intended_entry
-        },
+        margins={"below_max": None if intended_entry is None else max_entry - intended_entry},
         canonical_reasons=set(),
     )
     impulse = _brti_impulse_metrics(
@@ -4927,8 +5237,7 @@ def _full_gate_trace(
             "boundary_crosses": (
                 None
                 if chop["boundary_cross_count"] is None
-                else config.strategy_brti_max_boundary_crosses_90s
-                - chop["boundary_cross_count"]
+                else config.strategy_brti_max_boundary_crosses_90s - chop["boundary_cross_count"]
             ),
             "retrace_fraction": _margin(
                 config.strategy_brti_max_retrace_fraction,
@@ -4987,9 +5296,8 @@ def _full_gate_trace(
     if trade_count < config.strategy_trade_confirmation_min_trades:
         trade_status = "warn"
         trade_reason = "recent_trade_confirmation_insufficient_trades"
-    elif (
-        trade_ratio is not None
-        and trade_ratio < Decimal(str(config.strategy_trade_confirmation_min_ratio))
+    elif trade_ratio is not None and trade_ratio < Decimal(
+        str(config.strategy_trade_confirmation_min_ratio)
     ):
         trade_status = "block"
         trade_reason = "recent_trade_confirmation_weak"
@@ -5012,18 +5320,10 @@ def _full_gate_trace(
         canonical_reasons={"recent_trade_confirmation_weak"},
     )
     base["gates"] = gates
-    base["passing_gate_count"] = sum(
-        1 for gate in gates.values() if gate["status"] == "pass"
-    )
-    base["blocking_gate_count"] = sum(
-        1 for gate in gates.values() if gate["status"] == "block"
-    )
+    base["passing_gate_count"] = sum(1 for gate in gates.values() if gate["status"] == "pass")
+    base["blocking_gate_count"] = sum(1 for gate in gates.values() if gate["status"] == "block")
     base["canonical_primary_gate"] = next(
-        (
-            name
-            for name, gate in gates.items()
-            if gate["affects_canonical_decision"]
-        ),
+        (name for name, gate in gates.items() if gate["affects_canonical_decision"]),
         None,
     )
     return base
@@ -5072,10 +5372,7 @@ def _enabled_collector_metadata_keys(config: AppConfig) -> tuple[str, ...]:
     keys: list[str] = []
     if config.kalshi_ws_enabled:
         keys.append("ws")
-    if (
-        config.kalshi_cfbenchmarks_enabled
-        and config.kalshi_cfbenchmarks_subscribe_on_worker
-    ):
+    if config.kalshi_cfbenchmarks_enabled and config.kalshi_cfbenchmarks_subscribe_on_worker:
         keys.append("reference")
     if config.storage_retention_enabled:
         keys.append("storage")
