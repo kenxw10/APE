@@ -152,7 +152,11 @@ def test_strategy_routes_filter_variants_and_return_bounded_comparison(tmp_path)
                             "observer": {"enabled": True, "connection_state": "running"},
                             "variants": {
                                 "btc15_momentum_v1": {"enabled": True},
-                                "btc15_momentum_v1_fast": {"enabled": True},
+                                "btc15_momentum_v1_fast": {
+                                    "enabled": False,
+                                    "warnings": ["fast_warning"],
+                                    "blockers": ["fast_blocker"],
+                                },
                             },
                         }
                     },
@@ -168,6 +172,9 @@ def test_strategy_routes_filter_variants_and_return_bounded_comparison(tmp_path)
             recent = client.get("/strategy/decisions/recent")
             latest = client.get("/strategy/decisions/latest")
             gates = client.get("/strategy/gates/recent")
+            fast_dry_run = client.get(
+                "/strategy/dry-run/status?strategy_id=btc15_momentum_v1_fast"
+            )
             comparison = client.get("/strategy/variants/comparison?window_seconds=60")
             status = client.get("/strategy/status")
 
@@ -182,9 +189,13 @@ def test_strategy_routes_filter_variants_and_return_bounded_comparison(tmp_path)
         assert gates.status_code == 200
         assert gates.json()["count"] == 1
         assert gates.json()["latest_decision"]["strategy_id"] == "btc15_momentum_v1"
+        assert fast_dry_run.status_code == 200
+        assert fast_dry_run.json()["enabled"] is False
+        assert "fast_warning" in fast_dry_run.json()["warnings"]
+        assert "fast_blocker" in fast_dry_run.json()["blockers"]
         assert comparison.status_code == 200
         assert comparison.json()["variants"]["btc15_momentum_v1"]["total_decisions"] == 1
-        assert comparison.json()["challenger_enabled"] is True
+        assert comparison.json()["challenger_enabled"] is False
         assert status.status_code == 200
         assert "btc15_momentum_v1_fast" in status.json()["variants"]
     finally:

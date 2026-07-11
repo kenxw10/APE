@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import case, desc, func, select
+from sqlalchemy import case, desc, func, or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -256,16 +256,22 @@ class StrategyDryRunRepository:
                         else_=0,
                     )
                 ),
-                func.sum(
-                    case(
-                        (StrategyDryRunPosition.status == OPEN_POSITION_STATUS, 1),
-                        else_=0,
-                    )
-                ),
                 func.max(StrategyDryRunPosition.opened_at),
                 func.max(StrategyDryRunPosition.closed_at),
-            ).where(StrategyDryRunPosition.strategy_id == strategy_id)
+            ).where(
+                StrategyDryRunPosition.strategy_id == strategy_id,
+                or_(
+                    StrategyDryRunPosition.opened_at >= since,
+                    StrategyDryRunPosition.closed_at >= since,
+                ),
+            )
         ).one()
+        current_open_positions = self.session.scalar(
+            select(func.count()).where(
+                StrategyDryRunPosition.strategy_id == strategy_id,
+                StrategyDryRunPosition.status == OPEN_POSITION_STATUS,
+            )
+        ) or 0
         event_rows = self.session.execute(
             select(StrategyDryRunEvent.event_type, func.count())
             .where(
@@ -282,9 +288,9 @@ class StrategyDryRunRepository:
         return {
             "opened_positions": int(position_window[0] or 0),
             "closed_positions": int(position_window[1] or 0),
-            "current_open_positions": int(position_window[2] or 0),
-            "latest_position_opened_at": position_window[3],
-            "latest_position_closed_at": position_window[4],
+            "current_open_positions": int(current_open_positions),
+            "latest_position_opened_at": position_window[2],
+            "latest_position_closed_at": position_window[3],
             "event_counts": dict(event_rows),
             "latest_event_at": latest_event_at,
         }

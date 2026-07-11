@@ -2002,15 +2002,17 @@ def build_strategy_dry_run_status(
                 component_heartbeat = heartbeat_repository.get_latest_heartbeat(
                     WORKER_SERVICE_STRATEGY
                 )
-                worker_metadata = _strategy_dry_run_worker_metadata(
-                    component_heartbeat.metadata_ if component_heartbeat else None
+                worker_metadata = _strategy_dry_run_status_worker_metadata(
+                    component_heartbeat.metadata_ if component_heartbeat else None,
+                    strategy_id=effective_strategy_id,
                 )
                 if worker_metadata is None:
                     heartbeat = heartbeat_repository.get_latest_heartbeat(
                         WORKER_SERVICE_AGGREGATE
                     )
-                    worker_metadata = _strategy_dry_run_worker_metadata(
-                        heartbeat.metadata_ if heartbeat else None
+                    worker_metadata = _strategy_dry_run_status_worker_metadata(
+                        heartbeat.metadata_ if heartbeat else None,
+                        strategy_id=effective_strategy_id,
                     )
                     if worker_metadata is not None:
                         warnings.append("feed_liveness_legacy_aggregate_fallback")
@@ -4596,6 +4598,19 @@ def _strategy_dry_run_worker_metadata(metadata: Any) -> dict[str, Any] | None:
         return None
     dry_run_metadata = strategy_metadata.get("dry_run")
     return dry_run_metadata if isinstance(dry_run_metadata, dict) else None
+
+
+def _strategy_dry_run_status_worker_metadata(
+    metadata: Any,
+    *,
+    strategy_id: str,
+) -> dict[str, Any] | None:
+    variant_metadata = _strategy_variants_worker_metadata(metadata).get(strategy_id)
+    if isinstance(variant_metadata, dict):
+        return variant_metadata
+    if strategy_id == CONTROL_STRATEGY_ID:
+        return _strategy_dry_run_worker_metadata(metadata)
+    return None
 
 
 def _strategy_variants_worker_metadata(metadata: Any) -> dict[str, Any]:

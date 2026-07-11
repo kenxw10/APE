@@ -356,6 +356,46 @@ def test_strategy_challenger_is_disabled_without_the_opt_in_flag() -> None:
     assert [variant.strategy_id for variant in variants] == [CONTROL_STRATEGY_ID]
 
 
+def test_dry_run_comparison_excludes_old_closed_positions_from_window(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    repository = StrategyDryRunRepository(session)
+    strategy_id = CONTROL_STRATEGY_ID
+    for position_id, status, closed_at in (
+        ("old-closed-position", "CLOSED", now - timedelta(days=1)),
+        ("old-open-position", "OPEN", None),
+    ):
+        repository.insert_position_if_absent(
+            StrategyDryRunPositionInput(
+                position_id=position_id,
+                strategy_id=strategy_id,
+                market_ticker="KXBTC15M-ACTIVE",
+                decision_id=f"decision-{position_id}",
+                side_candidate="YES",
+                economic_side="YES",
+                opened_at=now - timedelta(days=2),
+                open_price=Decimal("0.62"),
+                contract_count=1,
+                entry_reason="dry_run_entry_signal",
+                status=status,
+                closed_at=closed_at,
+                close_price=Decimal("0.63") if closed_at else None,
+                close_reason="test_close" if closed_at else None,
+                realized_pnl_cents=Decimal("0.01") if closed_at else None,
+            )
+        )
+
+    summary = repository.comparison_summary_since(
+        strategy_id=strategy_id,
+        since=now - timedelta(hours=1),
+    )
+
+    assert summary["opened_positions"] == 0
+    assert summary["closed_positions"] == 0
+    assert summary["current_open_positions"] == 1
+    assert summary["latest_position_opened_at"] is None
+    assert summary["latest_position_closed_at"] is None
+
+
 def test_strategy_entry_ask_at_max_is_eligible_and_intended_price_is_clamped(session) -> None:
     now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
     config = load_config(
