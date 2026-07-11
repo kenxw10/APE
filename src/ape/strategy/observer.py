@@ -1772,6 +1772,7 @@ def build_recent_strategy_gate_summary(
     strategy_id: str | None = None,
     now: datetime | None = None,
 ) -> StrategyGateSummarySnapshot:
+    effective_strategy_id = strategy_id or CONTROL_STRATEGY_ID
     capped_limit = min(max(limit, 1), 500)
     checked_at = _as_utc(now or datetime.now(UTC))
     rows: list[StrategyDecision] = []
@@ -1784,12 +1785,12 @@ def build_recent_strategy_gate_summary(
                 with session_factory() as session:
                     rows = StrategyDecisionsRepository(session).list_recent_decisions(
                         limit=capped_limit,
-                        strategy_id=strategy_id,
+                        strategy_id=effective_strategy_id,
                     )
                     current_open_position_count = StrategyDryRunRepository(
                         session
                     ).count_open_positions(
-                        strategy_id=strategy_id or config.strategy_id
+                        strategy_id=effective_strategy_id
                     )
             finally:
                 engine.dispose()
@@ -4916,7 +4917,8 @@ def _full_gate_trace(
         },
         canonical_reasons={
             "boundary_cross_count_above_threshold",
-            "brti_retrace_fraction_above_threshold",
+            "short_move_opposes_medium_move",
+            "retrace_fraction_above_threshold",
         },
     )
     contract = _contract_confirmation_metrics(

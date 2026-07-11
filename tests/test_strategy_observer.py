@@ -28,6 +28,7 @@ from ape.strategy import observer as observer_module
 from ape.strategy.observer import (
     CHALLENGER_STRATEGY_ID,
     CONTROL_STRATEGY_ID,
+    STATE_CHOP_FILTER_BLOCKED,
     STATE_CONTRACT_NOT_CONFIRMED,
     STATE_ENTER_DRY_RUN,
     STATE_EXIT_SIGNAL,
@@ -1939,6 +1940,38 @@ def test_strategy_blocks_weak_brti_impulse(session) -> None:
     assert decision.measurements["gate_trace"]["canonical_primary_gate"] == "impulse"
     assert (
         decision.measurements["gate_trace"]["gates"]["impulse"][
+            "affects_canonical_decision"
+        ]
+        is True
+    )
+
+
+def test_strategy_gate_trace_attributes_emitted_chop_block(session, monkeypatch) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({})
+    _seed_observable_context(session, now=now)
+    monkeypatch.setattr(
+        observer_module,
+        "_brti_chop_metrics",
+        lambda **_: {
+            "boundary_cross_count": 0,
+            "retrace_fraction": None,
+            "reason": "short_move_opposes_medium_move",
+        },
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=assess_startup_safety(config),
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_CHOP_FILTER_BLOCKED
+    assert decision.primary_reason == "short_move_opposes_medium_move"
+    assert decision.measurements["gate_trace"]["canonical_primary_gate"] == "chop"
+    assert (
+        decision.measurements["gate_trace"]["gates"]["chop"][
             "affects_canonical_decision"
         ]
         is True
