@@ -1946,7 +1946,10 @@ def build_strategy_dry_run_status(
     effective_strategy_id = strategy_id or CONTROL_STRATEGY_ID
     checked_at = _as_utc(now or datetime.now(UTC))
     safety = assess_startup_safety(config)
-    enabled = _dry_run_runtime_enabled(config, safety)
+    enabled = _dry_run_runtime_enabled(config, safety) and (
+        effective_strategy_id != CHALLENGER_STRATEGY_ID
+        or config.strategy_challenger_enabled
+    )
     worker_metadata: dict[str, Any] | None = None
     open_position_count = 0
     latest_event: StrategyDryRunEvent | None = None

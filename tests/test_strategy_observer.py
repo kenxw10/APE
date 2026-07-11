@@ -44,6 +44,7 @@ from ape.strategy.observer import (
     STATE_RISK_BLOCKED,
     STATE_SPREAD_TOO_WIDE,
     StrategyObserver,
+    build_strategy_dry_run_status,
     build_strategy_variants_comparison,
     evaluate_strategy_observer,
     strategy_variant_configs,
@@ -355,6 +356,32 @@ def test_strategy_challenger_is_disabled_without_the_opt_in_flag() -> None:
     variants = strategy_variant_configs(config, assess_startup_safety(config))
 
     assert [variant.strategy_id for variant in variants] == [CONTROL_STRATEGY_ID]
+
+
+def test_dry_run_status_reports_disabled_challenger_without_worker_metadata(
+    tmp_path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_strategy_challenger_status.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    try:
+        status = build_strategy_dry_run_status(
+            config,
+            strategy_id=CHALLENGER_STRATEGY_ID,
+        )
+
+        assert status.enabled is False
+        assert status.worker_observed_enabled is None
+    finally:
+        engine.dispose()
 
 
 def test_strategy_variant_metadata_reports_disabled_when_dry_run_is_off(tmp_path) -> None:
