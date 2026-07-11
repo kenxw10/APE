@@ -1328,13 +1328,20 @@ def evaluate_strategy_observer(
             limit=512,
         )
     )
+    trade_since = evaluated_at - timedelta(
+        seconds=config.strategy_trade_confirmation_lookback_seconds
+    )
     recent_trades = (
-        list(shared_context.recent_trades)
+        [
+            trade
+            for trade in shared_context.recent_trades
+            if trade.received_at is not None and _as_utc(trade.received_at) >= _as_utc(trade_since)
+        ]
         if shared_context is not None
         and market.market_ticker == getattr(shared_context.market, "market_ticker", None)
         else PublicTradesRepository(session).get_trades_since(
             market.market_ticker,
-            evaluated_at - timedelta(seconds=config.strategy_trade_confirmation_lookback_seconds),
+            trade_since,
             limit=250,
         )
     )
@@ -1611,11 +1618,15 @@ def evaluate_strategy_variants(
         130,
         *(variant.strategy_brti_lookback_long_seconds for variant in variant_configs),
     )
+    shared_trade_lookback_seconds = max(
+        variant.strategy_trade_confirmation_lookback_seconds for variant in variant_configs
+    )
     context = load_strategy_evaluation_context(
         config=config,
         session=session,
         evaluated_at=evaluated_at,
         reference_lookback_seconds=shared_reference_lookback_seconds,
+        trade_lookback_seconds=shared_trade_lookback_seconds,
     )
     v2_evaluation = evaluate_momentum_v2(context, config=config)
     v2_repository = StrategyV2Repository(session)
@@ -5199,6 +5210,17 @@ def _apply_v2_hypothetical_lifecycle(
 
     market_ticker = decision.market_ticker
     if market_ticker is None:
+        for open_position in positions.list_open_positions(strategy_id=V2_STRATEGY_ID):
+            lifecycle_event = _apply_v2_position_management(
+                config=config,
+                session=session,
+                intents=intents,
+                positions=positions,
+                position=open_position,
+                decision=decision,
+            )
+            latest_event_type = lifecycle_event or latest_event_type
+            latest_position_id = open_position.position_id
         return DryRunLedgerResult(
             open_position_count=positions.count_open_positions(strategy_id=V2_STRATEGY_ID),
             latest_event_type=latest_event_type,

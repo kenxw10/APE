@@ -69,6 +69,7 @@ def load_strategy_evaluation_context(
     session: Session,
     evaluated_at: datetime,
     reference_lookback_seconds: int = 130,
+    trade_lookback_seconds: int = 30,
 ) -> StrategyEvaluationContext:
     market = MarketsRepository(session).get_active_market(
         now=evaluated_at,
@@ -125,7 +126,7 @@ def load_strategy_evaluation_context(
     recent_trades = tuple(
         trades_repository.get_trades_since(
             market.market_ticker,
-            evaluated_at - timedelta(seconds=30),
+            evaluated_at - timedelta(seconds=trade_lookback_seconds),
             limit=512,
         )
     )
