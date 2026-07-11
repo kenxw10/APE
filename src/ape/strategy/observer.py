@@ -1702,6 +1702,7 @@ def build_latest_strategy_decision(
     *,
     strategy_id: str | None = None,
 ) -> StrategyDecisionSnapshot:
+    effective_strategy_id = strategy_id or CONTROL_STRATEGY_ID
     if not config.database_url:
         return StrategyDecisionSnapshot(found=False)
 
@@ -1711,7 +1712,7 @@ def build_latest_strategy_decision(
             session_factory = create_session_factory(engine)
             with session_factory() as session:
                 decision = StrategyDecisionsRepository(session).get_latest_decision(
-                    strategy_id=strategy_id
+                    strategy_id=effective_strategy_id
                 )
                 return strategy_decision_snapshot(decision)
         finally:
@@ -4870,11 +4871,12 @@ def _full_gate_trace(
             ),
         },
         canonical_reasons={
-            "insufficient_brti_history",
-            "brti_short_impulse_below_threshold",
-            "brti_medium_impulse_below_threshold",
-            "brti_long_impulse_below_threshold",
-            "brti_directional_tick_ratio_below_threshold",
+            "insufficient_reference_history",
+            "weak_short_brti_move",
+            "weak_medium_brti_move",
+            "weak_long_brti_move",
+            "insufficient_directional_ticks",
+            "directional_tick_ratio_below_threshold",
         },
     )
     chop = _brti_chop_metrics(
@@ -4957,17 +4959,20 @@ def _full_gate_trace(
     )
     trade_count = int(trade["trade_count"])
     trade_ratio = trade["candidate_trade_ratio"]
-    trade_reason = (
-        "recent_trade_confirmation_insufficient_trades"
-        if trade_count < config.strategy_trade_confirmation_min_trades
-        else "recent_trade_confirmation_weak"
-        if trade_ratio is not None
+    trade_status = "pass"
+    trade_reason = None
+    if trade_count < config.strategy_trade_confirmation_min_trades:
+        trade_status = "warn"
+        trade_reason = "recent_trade_confirmation_insufficient_trades"
+    elif (
+        trade_ratio is not None
         and trade_ratio < Decimal(str(config.strategy_trade_confirmation_min_ratio))
-        else None
-    )
+    ):
+        trade_status = "block"
+        trade_reason = "recent_trade_confirmation_weak"
     add_gate(
         "trade_confirmation",
-        status="block" if trade_reason else "pass",
+        status=trade_status,
         reason=trade_reason,
         actual={"trade_count": trade_count, "candidate_trade_ratio": trade_ratio},
         thresholds={

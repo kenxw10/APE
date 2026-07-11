@@ -165,12 +165,15 @@ def test_strategy_routes_filter_variants_and_return_bounded_comparison(tmp_path)
             filtered = client.get(
                 "/strategy/decisions/recent?strategy_id=btc15_momentum_v1_fast"
             )
+            latest = client.get("/strategy/decisions/latest")
             comparison = client.get("/strategy/variants/comparison?window_seconds=60")
             status = client.get("/strategy/status")
 
         assert filtered.status_code == 200
         assert filtered.json()["count"] == 1
         assert filtered.json()["decisions"][0]["strategy_id"] == "btc15_momentum_v1_fast"
+        assert latest.status_code == 200
+        assert latest.json()["strategy_id"] == "btc15_momentum_v1"
         assert comparison.status_code == 200
         assert comparison.json()["variants"]["btc15_momentum_v1"]["total_decisions"] == 1
         assert comparison.json()["challenger_enabled"] is True

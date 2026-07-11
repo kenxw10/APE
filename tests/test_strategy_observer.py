@@ -485,6 +485,10 @@ def test_strategy_warns_when_trade_confirmation_sample_too_small(session) -> Non
         decision.measurements["gate_results"]["trade_confirmation"]["reason"]
         == "recent_trade_confirmation_insufficient_trades"
     )
+    assert (
+        decision.measurements["gate_trace"]["gates"]["trade_confirmation"]["status"]
+        == "warn"
+    )
 
 
 def test_strategy_warns_but_enters_when_brti_source_age_is_warning_only(
@@ -1932,6 +1936,13 @@ def test_strategy_blocks_weak_brti_impulse(session) -> None:
     assert decision.decision_state == STATE_IMPULSE_TOO_WEAK
     assert decision.primary_reason == "weak_long_brti_move"
     assert decision.measurements["brti_move_long_bps"] is not None
+    assert decision.measurements["gate_trace"]["canonical_primary_gate"] == "impulse"
+    assert (
+        decision.measurements["gate_trace"]["gates"]["impulse"][
+            "affects_canonical_decision"
+        ]
+        is True
+    )
 
 
 def test_strategy_observer_prioritizes_reference_before_book(session) -> None:
