@@ -1943,7 +1943,7 @@ def build_strategy_dry_run_status(
     strategy_id: str | None = None,
     now: datetime | None = None,
 ) -> StrategyDryRunStatusSnapshot:
-    effective_strategy_id = strategy_id or config.strategy_id
+    effective_strategy_id = strategy_id or CONTROL_STRATEGY_ID
     checked_at = _as_utc(now or datetime.now(UTC))
     safety = assess_startup_safety(config)
     enabled = _dry_run_runtime_enabled(config, safety)
@@ -2059,7 +2059,7 @@ def build_open_strategy_dry_run_positions(
     strategy_id: str | None = None,
     now: datetime | None = None,
 ) -> StrategyDryRunPositionsSnapshot:
-    effective_strategy_id = strategy_id or config.strategy_id
+    effective_strategy_id = strategy_id or CONTROL_STRATEGY_ID
     checked_at = _as_utc(now or datetime.now(UTC))
     if not config.database_url:
         return StrategyDryRunPositionsSnapshot(
@@ -2098,7 +2098,7 @@ def build_recent_strategy_dry_run_positions(
     strategy_id: str | None = None,
     now: datetime | None = None,
 ) -> StrategyDryRunPositionsSnapshot:
-    effective_strategy_id = strategy_id or config.strategy_id
+    effective_strategy_id = strategy_id or CONTROL_STRATEGY_ID
     capped_limit = min(max(limit, 1), 500)
     checked_at = _as_utc(now or datetime.now(UTC))
     if not config.database_url:

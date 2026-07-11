@@ -13,6 +13,7 @@ from ape.repositories.inputs import (
     OrderbookSnapshotInput,
     PublicTradeInput,
     ReferenceTickInput,
+    StrategyDryRunEventInput,
     StrategyDryRunPositionInput,
     WorkerHeartbeatInput,
 )
@@ -424,6 +425,15 @@ def test_dry_run_comparison_excludes_old_closed_positions_from_window(session) -
             )
         )
 
+    repository.insert_event_if_absent(
+        StrategyDryRunEventInput(
+            event_id="old-dry-run-event",
+            strategy_id=strategy_id,
+            event_type="ENTER_DRY_RUN",
+            occurred_at=now - timedelta(days=1),
+        )
+    )
+
     summary = repository.comparison_summary_since(
         strategy_id=strategy_id,
         since=now - timedelta(hours=1),
@@ -434,6 +444,7 @@ def test_dry_run_comparison_excludes_old_closed_positions_from_window(session) -
     assert summary["current_open_positions"] == 1
     assert summary["latest_position_opened_at"] is None
     assert summary["latest_position_closed_at"] is None
+    assert summary["latest_event_at"] is None
 
 
 def test_strategy_entry_ask_at_max_is_eligible_and_intended_price_is_clamped(session) -> None:

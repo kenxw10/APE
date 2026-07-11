@@ -282,7 +282,8 @@ class StrategyDryRunRepository:
         ).all()
         latest_event_at = self.session.scalar(
             select(func.max(StrategyDryRunEvent.occurred_at)).where(
-                StrategyDryRunEvent.strategy_id == strategy_id
+                StrategyDryRunEvent.strategy_id == strategy_id,
+                StrategyDryRunEvent.occurred_at >= since,
             )
         )
         return {

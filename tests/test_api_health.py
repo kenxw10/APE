@@ -120,7 +120,12 @@ def test_readiness_is_ready_with_configured_database(tmp_path) -> None:
 def test_strategy_routes_filter_variants_and_return_bounded_comparison(tmp_path) -> None:
     now = datetime.now(UTC)
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_strategy_variants.sqlite'}"
-    config = load_config({"DATABASE_URL": database_url})
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "STRATEGY_ID": "legacy_custom_strategy",
+        }
+    )
     engine = create_engine_from_config(config)
     run_migrations(engine)
     session_factory = create_session_factory(engine)
@@ -172,6 +177,7 @@ def test_strategy_routes_filter_variants_and_return_bounded_comparison(tmp_path)
             recent = client.get("/strategy/decisions/recent")
             latest = client.get("/strategy/decisions/latest")
             gates = client.get("/strategy/gates/recent")
+            default_dry_run = client.get("/strategy/dry-run/status")
             fast_dry_run = client.get(
                 "/strategy/dry-run/status?strategy_id=btc15_momentum_v1_fast"
             )
@@ -189,6 +195,8 @@ def test_strategy_routes_filter_variants_and_return_bounded_comparison(tmp_path)
         assert gates.status_code == 200
         assert gates.json()["count"] == 1
         assert gates.json()["latest_decision"]["strategy_id"] == "btc15_momentum_v1"
+        assert default_dry_run.status_code == 200
+        assert default_dry_run.json()["last_evaluated_at"] is not None
         assert fast_dry_run.status_code == 200
         assert fast_dry_run.json()["enabled"] is False
         assert "fast_warning" in fast_dry_run.json()["warnings"]
