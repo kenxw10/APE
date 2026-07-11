@@ -88,7 +88,8 @@ def built_in_config_version(
     payload = _json_safe(parameters)
     parameter_hash = _hash(payload)
     code_version = resolve_code_version()
-    version_id = f"config-{strategy_id}-{parameter_hash[:20]}"
+    version_hash = _hash({"parameters": parameter_hash, "code": code_version})
+    version_id = f"config-{strategy_id}-{version_hash[:20]}"
     return StrategyConfigVersionInput(
         strategy_config_version_id=version_id,
         strategy_id=strategy_id,

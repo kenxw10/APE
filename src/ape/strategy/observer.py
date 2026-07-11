@@ -4447,11 +4447,25 @@ def _apply_v2_hypothetical_lifecycle(
     )
 
     if pending is not None:
-        future_book = OrderbookRepository(session).get_first_snapshot_between(
+        future_books = OrderbookRepository(session).get_snapshots_between(
             market_ticker,
             start=pending.effective_after,
             end=pending.expires_at,
         )
+        future_book: OrderbookSnapshot | None = None
+        for candidate_book in future_books:
+            _, candidate_ask, _, _, candidate_ask_depth = _desired_book(
+                candidate_book,
+                pending.side_candidate,
+            )
+            if (
+                candidate_ask is not None
+                and candidate_ask_depth is not None
+                and candidate_ask <= Decimal(pending.intended_limit_price)
+                and candidate_ask_depth >= Decimal(pending.quantity)
+            ):
+                future_book = candidate_book
+                break
         if future_book is not None:
             bid, ask, _, _, ask_depth = _desired_book(future_book, pending.side_candidate)
             del bid
@@ -4517,23 +4531,18 @@ def _apply_v2_hypothetical_lifecycle(
                 )
                 latest_event_type = "ENTER_DRY_RUN"
                 latest_position_id = position.position_id
-            else:
-                intents.resolve_intent(
-                    pending,
-                    status="NO_FILL",
-                    resolved_at=now,
-                    reason="v2_entry_future_book_price_or_depth_unavailable",
-                    fill_snapshot_id=future_book.id,
-                )
-                latest_event_type = "NO_FILL"
         elif now > pending.expires_at:
             intents.resolve_intent(
                 pending,
-                status="EXPIRED",
+                status="NO_FILL" if future_books else "EXPIRED",
                 resolved_at=now,
-                reason="v2_entry_no_future_book_before_expiry",
+                reason=(
+                    "v2_entry_future_book_price_or_depth_unavailable"
+                    if future_books
+                    else "v2_entry_no_future_book_before_expiry"
+                ),
             )
-            latest_event_type = "EXPIRED"
+            latest_event_type = "NO_FILL" if future_books else "EXPIRED"
 
     if (
         decision.decision_state == STATE_V2_ENTRY_SIGNAL

@@ -62,3 +62,14 @@ def test_low_edge_uses_dedicated_v2_edge_state(monkeypatch) -> None:
     assert result.state == momentum_v2.STATE_V2_EDGE_BELOW_THRESHOLD
     assert result.reason == "v2_edge_below_threshold"
     assert result.blockers == []
+
+
+def test_builtin_config_version_changes_with_code_revision(monkeypatch) -> None:
+    monkeypatch.setattr(momentum_v2, "resolve_code_version", lambda: "revision-a")
+    first = momentum_v2.built_in_config_version("btc15_momentum_v2", {"alpha": 1})
+    monkeypatch.setattr(momentum_v2, "resolve_code_version", lambda: "revision-b")
+    second = momentum_v2.built_in_config_version("btc15_momentum_v2", {"alpha": 1})
+
+    assert first.parameter_hash == second.parameter_hash
+    assert first.strategy_config_version_id != second.strategy_config_version_id
+    assert second.code_commit_sha == "revision-b"
