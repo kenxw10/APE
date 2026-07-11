@@ -174,8 +174,6 @@ def evaluate_momentum_v2(context: StrategyEvaluationContext) -> V2Evaluation:
     edge = _edge(features)
     threshold = _tier_value(tier, "score") if tier is not None else None
     edge_threshold = Decimal("1.5")
-    if edge < edge_threshold:
-        hard_gates.append("v2_net_edge_lower_bound_below_threshold")
     measurements: dict[str, JsonPayload] = {
         "architecture_version": V2_ARCHITECTURE_VERSION,
         "feature_schema_version": V2_FEATURE_SCHEMA_VERSION,

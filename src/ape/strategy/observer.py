@@ -4582,7 +4582,7 @@ def _apply_v2_hypothetical_lifecycle(
             latest_event_type = "ENTRY_INTENT_PENDING"
 
     open_position = positions.get_latest_open_position(strategy_id=V2_STRATEGY_ID)
-    if open_position is not None:
+    if open_position is not None and open_position.market_ticker == market_ticker:
         features = (decision.measurements or {}).get("features")
         desired_bid = _decimal_or_none(
             features.get("desired_bid") if isinstance(features, dict) else None
