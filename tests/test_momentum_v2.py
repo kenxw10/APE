@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 from ape.config import load_config
-from ape.db.models import Market, OrderbookSnapshot, ReferenceTick
+from ape.db.models import Market, OrderbookSnapshot, PublicTrade, ReferenceTick
 from ape.strategy import momentum_v2
 from ape.strategy.context import StrategyEvaluationContext
 
@@ -106,6 +107,33 @@ def test_v2_blocks_stale_persisted_reference_and_orderbook() -> None:
 
     assert result.state == momentum_v2.STATE_V2_FEATURES_NOT_READY
     assert "v2_prerequisite_data_missing_or_stale" in result.blockers
+
+
+def test_v2_trade_flow_uses_inferred_trade_sides() -> None:
+    now = datetime(2026, 7, 11, 12, 10, tzinfo=UTC)
+    context = SimpleNamespace(
+        recent_trades=(
+            PublicTrade(
+                market_ticker="KXBTC15M-TEST",
+                received_at=now,
+                trade_count=Decimal("3"),
+                side_inferred="YES",
+                taker_side="NO",
+            ),
+            PublicTrade(
+                market_ticker="KXBTC15M-TEST",
+                received_at=now,
+                trade_count=Decimal("1"),
+                side_inferred="NO",
+                taker_side="YES",
+            ),
+        )
+    )
+
+    ratio, count = momentum_v2._trade_flow(context, "YES")
+
+    assert ratio == Decimal("0.75")
+    assert count == 2
 
 
 def test_builtin_config_version_changes_with_code_revision(monkeypatch) -> None:

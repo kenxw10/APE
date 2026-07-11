@@ -424,6 +424,7 @@ class StrategyObserver:
                         repository.insert_decision(decision)
                     ledger_results[decision.strategy_id] = (
                         _apply_v2_hypothetical_lifecycle(
+                            config=variant_config,
                             session=session,
                             decision=decision,
                         )
@@ -4525,6 +4526,7 @@ def _resolve_v2_pending_intent(
 
 def _apply_v2_hypothetical_lifecycle(
     *,
+    config: AppConfig,
     session: Session,
     decision: StrategyDecisionInput,
 ) -> DryRunLedgerResult:
@@ -4592,6 +4594,8 @@ def _apply_v2_hypothetical_lifecycle(
         decision.decision_state == STATE_V2_ENTRY_SIGNAL
         and decision.candidate_side in {"YES", "NO"}
         and pending is None
+        and positions.count_open_positions(strategy_id=V2_STRATEGY_ID)
+        < config.strategy_dry_run_max_open_positions
         and not positions.has_any_position_for_market(
             strategy_id=V2_STRATEGY_ID,
             market_ticker=market_ticker,

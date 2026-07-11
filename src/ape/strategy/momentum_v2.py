@@ -10,7 +10,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from ape.config import AppConfig
-from ape.db.models import OrderbookSnapshot
+from ape.db.models import OrderbookSnapshot, PublicTrade
 from ape.repositories.inputs import (
     JsonPayload,
     StrategyConfigVersionInput,
@@ -699,19 +699,36 @@ def _microstructure(context: StrategyEvaluationContext, side: str | None) -> dic
 
 
 def _trade_flow(context: StrategyEvaluationContext, side: str | None) -> tuple[Decimal, int]:
-    usable = [row for row in context.recent_trades if row.taker_side in {"yes", "no", "YES", "NO"}]
-    total = sum((Decimal(row.trade_count or row.count or 1) for row in usable), Decimal("0"))
+    usable = [
+        (row, trade_side)
+        for row in context.recent_trades
+        if (trade_side := _trade_side(row)) is not None
+    ]
+    total = sum(
+        (Decimal(row.trade_count or row.count or 1) for row, _ in usable),
+        Decimal("0"),
+    )
     if not usable or total == 0 or side is None:
         return Decimal("0.5"), 0
     desired = sum(
         (
             Decimal(row.trade_count or row.count or 1)
-            for row in usable
-            if str(row.taker_side).upper() == side
+            for row, trade_side in usable
+            if trade_side == side
         ),
         Decimal("0"),
     )
     return desired / total, len(usable)
+
+
+def _trade_side(trade: PublicTrade) -> str | None:
+    for value in (trade.side_inferred, trade.taker_side):
+        if value is None:
+            continue
+        normalized = str(value).strip().upper()
+        if normalized in {"YES", "NO"}:
+            return normalized
+    return None
 
 
 def _timing_tier(since_open: int | None, seconds_left: int | None) -> str | None:

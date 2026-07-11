@@ -446,6 +446,7 @@ def test_v2_pending_intent_resolves_without_current_candidate_side(session) -> N
     )
 
     observer_module._apply_v2_hypothetical_lifecycle(
+        config=load_config({}),
         session=session,
         decision=StrategyDecisionInput(
             decision_id="v2-no-current-candidate-decision",
@@ -498,6 +499,7 @@ def test_v2_intent_uses_recorded_timing_parameters(session, monkeypatch) -> None
     )
 
     observer_module._apply_v2_hypothetical_lifecycle(
+        config=load_config({}),
         session=session,
         decision=StrategyDecisionInput(
             decision_id="v2-recorded-timing-decision",
@@ -523,6 +525,49 @@ def test_v2_intent_uses_recorded_timing_parameters(session, monkeypatch) -> None
     assert intent.effective_after == expected_effective_after.replace(tzinfo=None)
     assert intent.expires_at == (expected_effective_after + timedelta(seconds=3)).replace(
         tzinfo=None
+    )
+
+
+def test_v2_intent_respects_open_position_cap_across_markets(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    StrategyDryRunRepository(session).insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="v2-open-prior-market",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker="KXBTC15M-PRIOR",
+            decision_id="v2-prior-entry",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now - timedelta(minutes=1),
+            open_price=Decimal("0.62"),
+            contract_count=1,
+            entry_reason="v2_causal_hypothetical_fill",
+            status="OPEN",
+        )
+    )
+
+    observer_module._apply_v2_hypothetical_lifecycle(
+        config=load_config({}),
+        session=session,
+        decision=StrategyDecisionInput(
+            decision_id="v2-new-market-entry",
+            evaluated_at=now,
+            decision_state=STATE_V2_ENTRY_SIGNAL,
+            primary_reason="v2_entry_signal",
+            app_mode="DRY_RUN",
+            strategy_id=V2_STRATEGY_ID,
+            market_ticker="KXBTC15M-NEXT",
+            candidate_side="YES",
+            measurements={"intended_entry_price": "0.62"},
+        ),
+    )
+
+    assert (
+        StrategyV2Repository(session).list_recent_intents(
+            strategy_id=V2_STRATEGY_ID,
+            limit=10,
+        )
+        == []
     )
 
 
@@ -561,6 +606,7 @@ def test_v2_sweeps_expired_intents_without_an_active_market(session) -> None:
     )
 
     observer_module._apply_v2_hypothetical_lifecycle(
+        config=load_config({}),
         session=session,
         decision=StrategyDecisionInput(
             decision_id="v2-no-active-market-decision",
@@ -626,6 +672,7 @@ def test_v2_resolves_only_the_first_post_delay_orderbook(session) -> None:
     )
 
     observer_module._apply_v2_hypothetical_lifecycle(
+        config=load_config({}),
         session=session,
         decision=StrategyDecisionInput(
             decision_id="v2-first-book-resolution",
@@ -678,6 +725,7 @@ def test_v2_position_mark_uses_the_held_side_bid(session) -> None:
     )
 
     observer_module._apply_v2_hypothetical_lifecycle(
+        config=load_config({}),
         session=session,
         decision=StrategyDecisionInput(
             decision_id="v2-current-no-candidate-decision",
