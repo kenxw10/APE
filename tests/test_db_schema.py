@@ -32,6 +32,10 @@ def test_schema_can_be_created_in_local_sqlite_database(tmp_path) -> None:
             "strategy_decisions",
             "strategy_dry_run_events",
             "strategy_dry_run_positions",
+            "strategy_feature_snapshots",
+            "strategy_config_versions",
+            "strategy_trade_intents",
+            "strategy_position_marks",
             "worker_heartbeats",
             "storage_retention_runs",
         }
@@ -42,7 +46,7 @@ def test_schema_can_be_created_in_local_sqlite_database(tmp_path) -> None:
                 select(SchemaMigration).where(SchemaMigration.version == CURRENT_SCHEMA_VERSION)
             )
             assert migration is not None
-            assert session.scalar(select(func.count()).select_from(SchemaMigration)) == 7
+            assert session.scalar(select(func.count()).select_from(SchemaMigration)) == 8
 
         orderbook_columns = {
             column["name"] for column in inspector.get_columns("orderbook_snapshots")
@@ -56,16 +60,22 @@ def test_schema_can_be_created_in_local_sqlite_database(tmp_path) -> None:
             "yes_ask_count",
             "no_bid_count",
             "no_ask_count",
+            "ladder_schema_version",
+            "yes_bid_ladder",
+            "no_bid_ladder",
         }
         assert "trade_count" in trade_columns
         assert "strategy_id" in event_columns
         decision_columns = {
             column["name"] for column in inspector.get_columns("strategy_decisions")
         }
-        decision_indexes = {
-            index["name"] for index in inspector.get_indexes("strategy_decisions")
+        decision_indexes = {index["name"] for index in inspector.get_indexes("strategy_decisions")}
+        assert decision_columns >= {
+            "strategy_id",
+            "feature_snapshot_id",
+            "strategy_config_version_id",
+            "code_commit_sha",
         }
-        assert "strategy_id" in decision_columns
         assert "ix_strategy_decisions_strategy_id_evaluated" in decision_indexes
     finally:
         engine.dispose()
@@ -114,9 +124,7 @@ def test_migration_adds_fixed_point_quantity_columns_to_existing_tables(tmp_path
                     """
                 )
             )
-            connection.execute(
-                text('INSERT INTO public_trades (id, "count") VALUES (1, 3)')
-            )
+            connection.execute(text('INSERT INTO public_trades (id, "count") VALUES (1, 3)'))
 
         run_migrations(engine)
         run_migrations(engine)
@@ -280,12 +288,8 @@ def test_migration_backfills_strategy_id_on_existing_decisions(tmp_path) -> None
         run_migrations(engine)
 
         inspector = inspect(engine)
-        columns = {
-            column["name"] for column in inspector.get_columns("strategy_decisions")
-        }
-        indexes = {
-            index["name"] for index in inspector.get_indexes("strategy_decisions")
-        }
+        columns = {column["name"] for column in inspector.get_columns("strategy_decisions")}
+        indexes = {index["name"] for index in inspector.get_indexes("strategy_decisions")}
         assert "strategy_id" in columns
         assert "ix_strategy_decisions_strategy_id_evaluated" in indexes
 

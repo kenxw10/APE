@@ -4,6 +4,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Query
@@ -80,6 +81,9 @@ from ape.strategy.observer import (
     build_strategy_dry_run_status,
     build_strategy_status,
     build_strategy_variants_comparison,
+    build_v2_feature_records,
+    build_v2_intent_records,
+    build_v2_mark_records,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -284,6 +288,30 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 strategy_id=strategy_id,
             )
         )
+
+    @app.get("/strategy/features/latest")
+    def strategy_features_latest() -> dict[str, Any]:
+        return build_v2_feature_records(settings, limit=1)
+
+    @app.get("/strategy/features/recent")
+    def strategy_features_recent(
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict[str, Any]:
+        return build_v2_feature_records(settings, limit=limit)
+
+    @app.get("/strategy/dry-run/intents/recent")
+    def strategy_dry_run_intents_recent(
+        limit: int = Query(default=100, ge=1, le=500),
+        strategy_id: str = "btc15_momentum_v2",
+    ) -> dict[str, Any]:
+        return build_v2_intent_records(settings, limit=limit, strategy_id=strategy_id)
+
+    @app.get("/strategy/dry-run/position-marks/recent")
+    def strategy_dry_run_position_marks_recent(
+        limit: int = Query(default=100, ge=1, le=500),
+        strategy_id: str = "btc15_momentum_v2",
+    ) -> dict[str, Any]:
+        return build_v2_mark_records(settings, limit=limit, strategy_id=strategy_id)
 
     @app.get("/storage/status", response_model=StorageStatusResponse)
     def storage_status() -> StorageStatusResponse:

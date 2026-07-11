@@ -38,6 +38,8 @@ PR 9h hardens only the maintenance/storage path. `/storage/status` now reports m
 
 PR 9i adds an opt-in dry-run challenger beside the existing control strategy. The control is always `btc15_momentum_v1`; when `STRATEGY_CHALLENGER_ENABLED=true` on the dedicated strategy worker, `btc15_momentum_v1_fast` evaluates the same persisted snapshot using only shorter BRTI lookbacks (20/60/120 seconds) and a 30-second contract lookback. Each variant has its own decision ID, dry-run positions, and dry-run events. This remains database-only hypothetical simulation with no orders, paper trading, balances, private channels, or execution.
 
+PR 10 adds `btc15_momentum_v2`, disabled by default. Every strategy iteration now persists one canonical `momentum_v2_features_v1` snapshot plus immutable built-in configuration attribution. V2 uses candidate-oriented impulse/path, volatility-normalized boundary, contract-response, compact top-five depth, score, and heuristic-edge evidence. It creates database-only hypothetical entry intents and resolves them only against a later persisted orderbook after a 500 ms simulated latency; it never places, cancels, or reconciles a real order.
+
 ## Safety Defaults
 
 The default configuration is intentionally non-trading:
@@ -69,6 +71,8 @@ If Kalshi credentials are missing, `/kalshi/status` and `/markets/active` return
 `STRATEGY_DRY_RUN_ENABLED=false` by default. Dry-run simulation requires `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`, `STRATEGY_DRY_RUN_ENABLED=true`, `TRADING_ENABLED=false`, and `EXECUTE=false`. Dry-run is a hypothetical ledger only and is not paper trading.
 
 `STRATEGY_CHALLENGER_ENABLED=false` by default. When enabled, it is evaluated only by the Railway strategy worker after the existing DRY_RUN safety gates pass. It does not alter the control strategy thresholds or add any trading capability.
+
+`STRATEGY_V2_ENABLED=false` by default. The only post-merge enablement change is `STRATEGY_V2_ENABLED=true` on `ape-strategy-worker`; keep it absent from API, market, reference, maintenance, Postgres, and Vercel services. V2 is heuristic research evidence, not calibrated expectancy or fair value, and remains DRY_RUN-only.
 
 `STORAGE_RETENTION_ENABLED=false` by default. Retention is worker-only observer infrastructure; it deletes old persisted diagnostics and raw payload JSON only when explicitly enabled on the Railway worker.
 

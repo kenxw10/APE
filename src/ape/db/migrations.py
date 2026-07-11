@@ -9,7 +9,7 @@ from ape.config import ConfigError, load_config
 from ape.db.models import Base, SchemaMigration, utc_now
 from ape.db.session import DatabaseConfigError, create_engine_from_config
 
-CURRENT_SCHEMA_VERSION = "0007_strategy_decision_strategy_id"
+CURRENT_SCHEMA_VERSION = "0008_momentum_v2_feature_architecture"
 SCHEMA_VERSIONS = (
     "0001_initial_schema",
     "0002_fixed_point_ws_quantities",
@@ -17,6 +17,7 @@ SCHEMA_VERSIONS = (
     "0004_dry_run_strategy_ledger",
     "0005_strategy_dry_run_event_strategy_id",
     "0006_kalshi_ws_protocol_events",
+    "0007_strategy_decision_strategy_id",
     CURRENT_SCHEMA_VERSION,
 )
 POSTGRES_MIGRATION_LOCK_ID = 4_150_002
@@ -32,6 +33,7 @@ def run_migrations(engine: Engine) -> None:
         _ensure_fixed_point_quantity_columns(connection)
         _ensure_strategy_dry_run_event_strategy_id(connection)
         _ensure_strategy_decision_strategy_id(connection)
+        _ensure_momentum_v2_columns(connection)
         _record_schema_versions(connection)
 
 
@@ -73,9 +75,7 @@ def _ensure_fixed_point_quantity_columns(connection: Connection) -> None:
             )
 
     if "trade_count" not in existing_columns.get("public_trades", set()):
-        statements.append(
-            _add_numeric_column_statement(connection, "public_trades", "trade_count")
-        )
+        statements.append(_add_numeric_column_statement(connection, "public_trades", "trade_count"))
 
     backfill_statements = (
         "UPDATE orderbook_snapshots SET yes_bid_count = yes_bid_size "
@@ -102,10 +102,7 @@ def _add_numeric_column_statement(
     column_name: str,
 ) -> str:
     if connection.dialect.name == "postgresql":
-        return (
-            f"ALTER TABLE {table_name} "
-            f"ADD COLUMN IF NOT EXISTS {column_name} NUMERIC(24, 8)"
-        )
+        return f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} NUMERIC(24, 8)"
     return f"ALTER TABLE {table_name} ADD COLUMN {column_name} NUMERIC(24, 8)"
 
 
@@ -115,16 +112,16 @@ def _ensure_strategy_dry_run_event_strategy_id(connection: Connection) -> None:
     if "strategy_dry_run_events" not in table_names:
         return
 
-    event_columns = {
-        column["name"] for column in inspector.get_columns("strategy_dry_run_events")
-    }
+    event_columns = {column["name"] for column in inspector.get_columns("strategy_dry_run_events")}
     if "strategy_id" not in event_columns:
         connection.execute(
-            text(_add_text_column_statement(
-                connection,
-                "strategy_dry_run_events",
-                "strategy_id",
-            ))
+            text(
+                _add_text_column_statement(
+                    connection,
+                    "strategy_dry_run_events",
+                    "strategy_id",
+                )
+            )
         )
 
     if "strategy_dry_run_positions" in table_names:
@@ -158,9 +155,7 @@ def _ensure_strategy_decision_strategy_id(connection: Connection) -> None:
     if "strategy_decisions" not in set(inspector.get_table_names()):
         return
 
-    decision_columns = {
-        column["name"] for column in inspector.get_columns("strategy_decisions")
-    }
+    decision_columns = {column["name"] for column in inspector.get_columns("strategy_decisions")}
     if "strategy_id" not in decision_columns:
         connection.execute(
             text(
@@ -189,16 +184,74 @@ def _ensure_strategy_decision_strategy_id(connection: Connection) -> None:
     )
 
 
+def _ensure_momentum_v2_columns(connection: Connection) -> None:
+    columns = {
+        "orderbook_snapshots": {
+            "ladder_schema_version": "VARCHAR(64)",
+            "yes_bid_ladder": "JSON",
+            "no_bid_ladder": "JSON",
+        },
+        "strategy_decisions": {
+            "feature_snapshot_id": "VARCHAR(128)",
+            "strategy_config_version_id": "VARCHAR(128)",
+            "code_commit_sha": "VARCHAR(128)",
+            "calibration_run_id": "VARCHAR(128)",
+        },
+        "strategy_dry_run_positions": {
+            "feature_snapshot_id": "VARCHAR(128)",
+            "strategy_config_version_id": "VARCHAR(128)",
+            "code_commit_sha": "VARCHAR(128)",
+        },
+        "strategy_dry_run_events": {
+            "feature_snapshot_id": "VARCHAR(128)",
+            "strategy_config_version_id": "VARCHAR(128)",
+            "code_commit_sha": "VARCHAR(128)",
+        },
+    }
+    inspector = inspect(connection)
+    table_names = set(inspector.get_table_names())
+    for table_name, expected in columns.items():
+        if table_name not in table_names:
+            continue
+        existing = {column["name"] for column in inspector.get_columns(table_name)}
+        for column_name, type_sql in expected.items():
+            if column_name not in existing:
+                connection.execute(
+                    text(_add_column_statement(connection, table_name, column_name, type_sql))
+                )
+
+    _ensure_composite_index(
+        connection,
+        table_name="strategy_feature_snapshots",
+        index_name="ix_strategy_feature_snapshots_market_evaluated",
+        column_names=("market_ticker", "evaluated_at"),
+    )
+    _ensure_composite_index(
+        connection,
+        table_name="strategy_trade_intents",
+        index_name="ix_strategy_trade_intents_strategy_market_created",
+        column_names=("strategy_id", "market_ticker", "created_at"),
+    )
+
+
+def _add_column_statement(
+    connection: Connection,
+    table_name: str,
+    column_name: str,
+    type_sql: str,
+) -> str:
+    if connection.dialect.name == "postgresql":
+        return f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {type_sql}"
+    return f"ALTER TABLE {table_name} ADD COLUMN {column_name} {type_sql}"
+
+
 def _add_text_column_statement(
     connection: Connection,
     table_name: str,
     column_name: str,
 ) -> str:
     if connection.dialect.name == "postgresql":
-        return (
-            f"ALTER TABLE {table_name} "
-            f"ADD COLUMN IF NOT EXISTS {column_name} VARCHAR(128)"
-        )
+        return f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} VARCHAR(128)"
     return f"ALTER TABLE {table_name} ADD COLUMN {column_name} VARCHAR(128)"
 
 
@@ -210,17 +263,12 @@ def _ensure_index(
     column_name: str,
 ) -> None:
     inspector = inspect(connection)
-    existing_indexes = {
-        index["name"] for index in inspector.get_indexes(table_name)
-    }
+    existing_indexes = {index["name"] for index in inspector.get_indexes(table_name)}
     if index_name in existing_indexes:
         return
 
     connection.execute(
-        text(
-            f"CREATE INDEX IF NOT EXISTS {index_name} "
-            f"ON {table_name} ({column_name})"
-        )
+        text(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name} ({column_name})")
     )
 
 
@@ -232,19 +280,12 @@ def _ensure_composite_index(
     column_names: tuple[str, ...],
 ) -> None:
     inspector = inspect(connection)
-    existing_indexes = {
-        index["name"] for index in inspector.get_indexes(table_name)
-    }
+    existing_indexes = {index["name"] for index in inspector.get_indexes(table_name)}
     if index_name in existing_indexes:
         return
 
     columns = ", ".join(column_names)
-    connection.execute(
-        text(
-            f"CREATE INDEX IF NOT EXISTS {index_name} "
-            f"ON {table_name} ({columns})"
-        )
-    )
+    connection.execute(text(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name} ({columns})"))
 
 
 def _record_schema_versions(connection: Connection) -> None:

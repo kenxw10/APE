@@ -77,6 +77,9 @@ class OrderbookSnapshotInput:
     yes_ask_count: Decimal | None = None
     no_bid_count: Decimal | None = None
     no_ask_count: Decimal | None = None
+    ladder_schema_version: str | None = None
+    yes_bid_ladder: JsonPayload | None = None
+    no_bid_ladder: JsonPayload | None = None
     book_status: str | None = None
     raw_payload_hash: str | None = None
     raw_payload: JsonPayload | None = None
@@ -147,6 +150,10 @@ class StrategyDecisionInput:
     brti_value: Decimal | None = None
     distance_bps: Decimal | None = None
     seconds_left: int | None = None
+    feature_snapshot_id: str | None = None
+    strategy_config_version_id: str | None = None
+    code_commit_sha: str | None = None
+    calibration_run_id: str | None = None
     measurements: JsonPayload | None = None
     blockers: JsonPayload | None = None
     warnings: JsonPayload | None = None
@@ -173,6 +180,9 @@ class StrategyDryRunPositionInput:
     close_price: Decimal | None = None
     close_reason: str | None = None
     realized_pnl_cents: Decimal | None = None
+    feature_snapshot_id: str | None = None
+    strategy_config_version_id: str | None = None
+    code_commit_sha: str | None = None
     measurements: JsonPayload | None = None
 
 
@@ -189,6 +199,88 @@ class StrategyDryRunEventInput:
     price: Decimal | None = None
     contract_count: int | None = None
     reason: str | None = None
+    feature_snapshot_id: str | None = None
+    strategy_config_version_id: str | None = None
+    code_commit_sha: str | None = None
+    measurements: JsonPayload | None = None
+
+
+@dataclass(frozen=True)
+class StrategyFeatureSnapshotInput:
+    feature_snapshot_id: str
+    evaluated_at: datetime
+    feature_schema_version: str
+    context_hash: str
+    market_ticker: str | None = None
+    candidate_side: str | None = None
+    candidate_mode: str | None = None
+    boundary: Decimal | None = None
+    current_brti: Decimal | None = None
+    seconds_since_open: int | None = None
+    seconds_left: int | None = None
+    reference_tick_id: int | None = None
+    orderbook_snapshot_id: int | None = None
+    public_trade_id: int | None = None
+    quality_state: JsonPayload | None = None
+    reference_features: JsonPayload | None = None
+    contract_features: JsonPayload | None = None
+    microstructure_features: JsonPayload | None = None
+    execution_features: JsonPayload | None = None
+
+
+@dataclass(frozen=True)
+class StrategyConfigVersionInput:
+    strategy_config_version_id: str
+    strategy_id: str
+    architecture_version: str
+    feature_schema_version: str
+    parameter_snapshot: JsonPayload
+    parameter_hash: str
+    code_commit_sha: str
+    source: str = "BUILT_IN"
+
+
+@dataclass(frozen=True)
+class StrategyTradeIntentInput:
+    intent_id: str
+    strategy_id: str
+    decision_id: str
+    market_ticker: str
+    side_candidate: str
+    action: str
+    created_at: datetime
+    effective_after: datetime
+    expires_at: datetime
+    intended_limit_price: Decimal
+    quantity: Decimal
+    status: str = "PENDING"
+    strategy_config_version_id: str | None = None
+    feature_snapshot_id: str | None = None
+    position_id: str | None = None
+    optimistic_price: Decimal | None = None
+    optimistic_snapshot_id: int | None = None
+    resolved_at: datetime | None = None
+    fill_snapshot_id: int | None = None
+    simulated_fill_price: Decimal | None = None
+    simulated_fill_size: Decimal | None = None
+    resolution_reason: str | None = None
+    measurements: JsonPayload | None = None
+
+
+@dataclass(frozen=True)
+class StrategyPositionMarkInput:
+    mark_id: str
+    strategy_id: str
+    position_id: str
+    market_ticker: str
+    marked_at: datetime
+    strategy_config_version_id: str | None = None
+    feature_snapshot_id: str | None = None
+    executable_bid: Decimal | None = None
+    score: Decimal | None = None
+    edge_lower_bound_cents: Decimal | None = None
+    boundary_state: JsonPayload | None = None
+    management_reason: str | None = None
     measurements: JsonPayload | None = None
 
 

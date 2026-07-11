@@ -34,6 +34,9 @@ class StrategyDecisionResponse(BaseModel):
     brti_value: Decimal | None
     distance_bps: Decimal | None
     seconds_left: int | None
+    feature_snapshot_id: str | None
+    strategy_config_version_id: str | None
+    code_commit_sha: str | None
     measurements: JsonPayload | None
     blockers: JsonPayload | None
     warnings: JsonPayload | None
@@ -133,6 +136,9 @@ class StrategyDryRunPositionResponse(BaseModel):
     close_price: Decimal | None
     close_reason: str | None
     realized_pnl_cents: Decimal | None
+    feature_snapshot_id: str | None
+    strategy_config_version_id: str | None
+    code_commit_sha: str | None
     measurements_summary: JsonPayload | None
 
 
@@ -149,6 +155,9 @@ class StrategyDryRunEventResponse(BaseModel):
     price: Decimal | None
     contract_count: int | None
     reason: str | None
+    feature_snapshot_id: str | None
+    strategy_config_version_id: str | None
+    code_commit_sha: str | None
     measurements_summary: JsonPayload | None
 
 
@@ -255,10 +264,7 @@ def strategy_dry_run_positions_response(
     return StrategyDryRunPositionsResponse(
         limit=snapshot.limit,
         count=snapshot.count,
-        positions=[
-            strategy_dry_run_position_response(position)
-            for position in snapshot.positions
-        ],
+        positions=[strategy_dry_run_position_response(position) for position in snapshot.positions],
         checked_at=snapshot.checked_at,
     )
 

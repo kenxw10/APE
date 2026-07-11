@@ -99,6 +99,7 @@ class AppConfig:
     strategy_observer_decision_ttl_seconds: float = 5.0
     strategy_dry_run_enabled: bool = False
     strategy_challenger_enabled: bool = False
+    strategy_v2_enabled: bool = False
     strategy_id: str = "btc15_momentum_v1"
     strategy_dry_run_max_open_positions: int = 1
     strategy_dry_run_one_entry_per_market: bool = True
@@ -158,6 +159,9 @@ class AppConfig:
     storage_retention_kalshi_ws_protocol_events_seconds: int = 21600
     storage_retention_dry_run_positions_seconds: int = 2592000
     storage_retention_dry_run_events_seconds: int = 2592000
+    storage_retention_strategy_feature_snapshots_seconds: int = 1814400
+    storage_retention_strategy_trade_intents_seconds: int = 2592000
+    storage_retention_strategy_position_marks_seconds: int = 2592000
     storage_retention_markets_seconds: int = 2592000
     storage_retention_raw_payload_orderbook_seconds: int = 900
     storage_retention_raw_payload_public_trades_seconds: int = 3600
@@ -418,6 +422,10 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
             "STRATEGY_CHALLENGER_ENABLED",
             _get(source, "STRATEGY_CHALLENGER_ENABLED", "false"),
         ),
+        strategy_v2_enabled=_parse_bool(
+            "STRATEGY_V2_ENABLED",
+            _get(source, "STRATEGY_V2_ENABLED", "false"),
+        ),
         strategy_id=_parse_required_text(
             "STRATEGY_ID",
             _get(source, "STRATEGY_ID", "btc15_momentum_v1"),
@@ -662,6 +670,18 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
             "STORAGE_RETENTION_DRY_RUN_EVENTS_SECONDS",
             _get(source, "STORAGE_RETENTION_DRY_RUN_EVENTS_SECONDS", "2592000"),
         ),
+        storage_retention_strategy_feature_snapshots_seconds=_parse_int(
+            "STORAGE_RETENTION_STRATEGY_FEATURE_SNAPSHOTS_SECONDS",
+            _get(source, "STORAGE_RETENTION_STRATEGY_FEATURE_SNAPSHOTS_SECONDS", "1814400"),
+        ),
+        storage_retention_strategy_trade_intents_seconds=_parse_int(
+            "STORAGE_RETENTION_STRATEGY_TRADE_INTENTS_SECONDS",
+            _get(source, "STORAGE_RETENTION_STRATEGY_TRADE_INTENTS_SECONDS", "2592000"),
+        ),
+        storage_retention_strategy_position_marks_seconds=_parse_int(
+            "STORAGE_RETENTION_STRATEGY_POSITION_MARKS_SECONDS",
+            _get(source, "STORAGE_RETENTION_STRATEGY_POSITION_MARKS_SECONDS", "2592000"),
+        ),
         storage_retention_markets_seconds=_parse_int(
             "STORAGE_RETENTION_MARKETS_SECONDS",
             _get(source, "STORAGE_RETENTION_MARKETS_SECONDS", "2592000"),
@@ -751,9 +771,7 @@ def _parse_mode(raw_value: str) -> AppMode:
         return AppMode(normalized)
     except ValueError as exc:
         allowed = ", ".join(mode.value for mode in AppMode)
-        raise ConfigError(
-            f"Invalid APP_MODE {raw_value!r}. Expected one of: {allowed}."
-        ) from exc
+        raise ConfigError(f"Invalid APP_MODE {raw_value!r}. Expected one of: {allowed}.") from exc
 
 
 def _parse_worker_role(raw_value: str) -> str:
@@ -761,9 +779,7 @@ def _parse_worker_role(raw_value: str) -> str:
     if normalized in WORKER_ROLES:
         return normalized
     allowed = ", ".join(sorted(WORKER_ROLES))
-    raise ConfigError(
-        f"Invalid APE_WORKER_ROLE {raw_value!r}. Expected one of: {allowed}."
-    )
+    raise ConfigError(f"Invalid APE_WORKER_ROLE {raw_value!r}. Expected one of: {allowed}.")
 
 
 def _parse_bool(name: str, raw_value: str) -> bool:
@@ -773,8 +789,7 @@ def _parse_bool(name: str, raw_value: str) -> bool:
     if normalized in FALSE_VALUES:
         return False
     raise ConfigError(
-        f"Invalid boolean for {name}: {raw_value!r}. "
-        "Use true/false, yes/no, on/off, or 1/0."
+        f"Invalid boolean for {name}: {raw_value!r}. Use true/false, yes/no, on/off, or 1/0."
     )
 
 
