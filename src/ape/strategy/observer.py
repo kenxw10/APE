@@ -7,11 +7,12 @@ import logging
 import re
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -75,6 +76,9 @@ STATE_MANAGE_POSITION = "MANAGE_POSITION"
 STATE_EXIT_SIGNAL = "EXIT_SIGNAL"
 STATE_FORCE_EXIT = "FORCE_EXIT"
 
+CONTROL_STRATEGY_ID = "btc15_momentum_v1"
+CHALLENGER_STRATEGY_ID = "btc15_momentum_v1_fast"
+
 DECISION_STATES = {
     STATE_NO_ACTIVE_MARKET,
     STATE_MARKET_NOT_PARSEABLE,
@@ -114,6 +118,7 @@ class StrategyObserverRuntimeStatus:
     dry_run_latest_position_id: str | None = None
     warnings: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
+    variants: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def as_metadata(self) -> dict[str, Any]:
         return {
@@ -137,11 +142,15 @@ class StrategyObserverRuntimeStatus:
             "blockers": self.blockers,
         }
 
+    def variant_metadata(self) -> dict[str, dict[str, Any]]:
+        return self.variants
+
 
 @dataclass(frozen=True)
 class StrategyDecisionSnapshot:
     found: bool
     decision_id: str | None = None
+    strategy_id: str | None = None
     evaluated_at: datetime | None = None
     decision_state: str | None = None
     primary_reason: str | None = None
@@ -171,6 +180,7 @@ class StrategyStatusSnapshot:
     enabled: bool
     worker_observed_enabled: bool | None
     connection_state: str
+    variants: JsonPayload
     app_mode: str
     trading_enabled: bool
     execute: bool
@@ -261,6 +271,7 @@ class StrategyDryRunPositionSnapshot:
 class StrategyDryRunEventSnapshot:
     found: bool
     event_id: str | None = None
+    strategy_id: str | None = None
     position_id: str | None = None
     decision_id: str | None = None
     event_type: str | None = None
@@ -305,6 +316,17 @@ class StrategyDryRunStatusSnapshot:
     warnings: list[str]
     blockers: list[str]
     checked_at: datetime
+
+
+@dataclass(frozen=True)
+class StrategyVariantsComparisonSnapshot:
+    window_seconds: int
+    generated_at: datetime
+    challenger_enabled: bool | None
+    safety: JsonPayload
+    variants: JsonPayload
+    warnings: list[str]
+    blockers: list[str]
 
 
 @dataclass(frozen=True)
@@ -363,20 +385,22 @@ class StrategyObserver:
 
         try:
             with self.session_factory() as session:
-                decision = evaluate_strategy_observer(
+                decisions = evaluate_strategy_variants(
                     config=self.config,
                     safety=self.safety,
                     session=session,
                     now=self.now(),
                 )
                 repository = StrategyDecisionsRepository(session)
-                if repository.get_decision_by_id(decision.decision_id) is None:
-                    repository.insert_decision(decision)
-                ledger_result = _apply_dry_run_ledger(
-                    config=self.config,
-                    session=session,
-                    decision=decision,
-                )
+                ledger_results: dict[str, DryRunLedgerResult] = {}
+                for variant_config, decision in decisions:
+                    if repository.get_decision_by_id(decision.decision_id) is None:
+                        repository.insert_decision(decision)
+                    ledger_results[decision.strategy_id] = _apply_dry_run_ledger(
+                        config=variant_config,
+                        session=session,
+                        decision=decision,
+                    )
                 session.commit()
         except IntegrityError:
             LOGGER.info("Strategy observer decision already exists for current bucket.")
@@ -390,17 +414,28 @@ class StrategyObserver:
             self.record_heartbeat()
             return None
 
+        control_config, decision = decisions[0]
+        ledger_result = ledger_results[decision.strategy_id]
         self.status.connection_state = "running"
         self.status.last_evaluated_at = decision.evaluated_at
         self.status.last_decision_state = decision.decision_state
         self.status.last_primary_reason = decision.primary_reason
         self.status.last_decision_id = decision.decision_id
-        self.status.dry_run_enabled = _dry_run_runtime_enabled(self.config, self.safety)
+        self.status.dry_run_enabled = _dry_run_runtime_enabled(control_config, self.safety)
         self.status.dry_run_open_position_count = ledger_result.open_position_count
         self.status.dry_run_latest_event_type = ledger_result.latest_event_type
         self.status.dry_run_latest_position_id = ledger_result.latest_position_id
         self.status.blockers = list(decision.blockers or [])
         self.status.warnings = list(decision.warnings or [])
+        self.status.variants = {
+            variant_decision.strategy_id: _variant_runtime_metadata(
+                config=variant_config,
+                safety=self.safety,
+                decision=variant_decision,
+                ledger_result=ledger_results[variant_decision.strategy_id],
+            )
+            for variant_config, variant_decision in decisions
+        }
         self.record_heartbeat()
         return decision
 
@@ -416,6 +451,7 @@ class StrategyObserver:
                     "strategy": {
                         "observer": self.status.as_metadata(),
                         "dry_run": self.status.dry_run_metadata(),
+                        "variants": self.status.variant_metadata(),
                     },
                 }
                 heartbeat_at = self.now()
@@ -698,8 +734,24 @@ def evaluate_strategy_observer(
             dry_run_position_id=dry_run_position_id,
             managing_position=managing_position,
         )
+        measurements["gate_trace"] = _full_gate_trace(
+            config=config,
+            decision_state=state,
+            primary_reason=reason,
+            evaluated_at=evaluated_at,
+            market=market,
+            boundary=boundary,
+            brti_value=brti_value,
+            orderbook=orderbook,
+            seconds_since_open=seconds_since_open,
+            seconds_left=seconds_left,
+            reference_ticks=reference_ticks,
+            orderbook_history=orderbook_history,
+            recent_trades=recent_trades,
+        )
         context_hash = _stable_hash(
             {
+                "strategy_id": config.strategy_id,
                 "state": state,
                 "reason": reason,
                 "market_id": getattr(market, "id", None),
@@ -723,6 +775,7 @@ def evaluate_strategy_observer(
             decision_id=_decision_id(
                 evaluated_at=evaluated_at,
                 poll_seconds=config.strategy_observer_poll_seconds,
+                strategy_id=config.strategy_id,
                 market_ticker=getattr(market, "market_ticker", None),
                 context_hash=context_hash,
             ),
@@ -730,6 +783,7 @@ def evaluate_strategy_observer(
             decision_state=state,
             primary_reason=reason,
             app_mode=config.app_mode.value,
+            strategy_id=config.strategy_id,
             market_ticker=getattr(market, "market_ticker", None),
             candidate_side=candidate_side,
             boundary=boundary,
@@ -1380,19 +1434,15 @@ def evaluate_strategy_observer(
     dry_run_intended_entry_price = _intended_entry_price(
         desired_ask,
         config.strategy_dry_run_entry_price_offset_cents,
+        max_entry_price=Decimal(str(config.strategy_dry_run_max_entry_price)),
     )
     dry_run_intended_contract_count = config.strategy_dry_run_position_size_contracts
-    if (
-        dry_run_intended_entry_price
-        < Decimal(str(config.strategy_dry_run_min_entry_price))
-    ):
+    if desired_ask < Decimal(str(config.strategy_dry_run_min_entry_price)):
         return decision(
             STATE_CONTRACT_NOT_CONFIRMED,
             "dry_run_intended_entry_price_too_low",
         )
-    if dry_run_intended_entry_price > Decimal(
-        str(config.strategy_dry_run_max_entry_price)
-    ):
+    if desired_ask > Decimal(str(config.strategy_dry_run_max_entry_price)):
         return decision(
             STATE_CONTRACT_NOT_CONFIRMED,
             "dry_run_intended_entry_price_too_high",
@@ -1503,6 +1553,78 @@ def evaluate_strategy_observer(
     )
 
 
+def evaluate_strategy_variants(
+    *,
+    config: AppConfig,
+    safety: SafetyAssessment,
+    session: Session,
+    now: datetime | None = None,
+) -> list[tuple[AppConfig, StrategyDecisionInput]]:
+    """Evaluate configured dry-run variants on one timestamp and DB transaction."""
+
+    evaluated_at = _as_utc(now or datetime.now(UTC))
+    if session.bind is not None and session.bind.dialect.name == "postgresql":
+        # Keep both variants on the same committed market/reference snapshot.
+        session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+    return [
+        (
+            variant_config,
+            evaluate_strategy_observer(
+                config=variant_config,
+                safety=safety,
+                session=session,
+                now=evaluated_at,
+            ),
+        )
+        for variant_config in strategy_variant_configs(config, safety)
+    ]
+
+
+def strategy_variant_configs(
+    config: AppConfig,
+    safety: SafetyAssessment,
+) -> list[AppConfig]:
+    control = replace(config, strategy_id=CONTROL_STRATEGY_ID)
+    if not (
+        config.strategy_challenger_enabled
+        and _dry_run_runtime_enabled(control, safety)
+    ):
+        return [control]
+
+    challenger = replace(
+        control,
+        strategy_id=CHALLENGER_STRATEGY_ID,
+        strategy_brti_lookback_short_seconds=20,
+        strategy_brti_lookback_medium_seconds=60,
+        strategy_brti_lookback_long_seconds=120,
+        strategy_contract_lookback_seconds=30,
+    )
+    return [control, challenger]
+
+
+def _variant_runtime_metadata(
+    *,
+    config: AppConfig,
+    safety: SafetyAssessment,
+    decision: StrategyDecisionInput,
+    ledger_result: DryRunLedgerResult,
+) -> dict[str, Any]:
+    return {
+        "strategy_id": decision.strategy_id,
+        "enabled": _dry_run_runtime_enabled(config, safety),
+        "thresholds": _thresholds(config),
+        "latest_decision_id": decision.decision_id,
+        "latest_evaluated_at": _isoformat_or_none(decision.evaluated_at),
+        "latest_decision_state": decision.decision_state,
+        "latest_primary_reason": decision.primary_reason,
+        "open_position_count": ledger_result.open_position_count,
+        "latest_event_type": ledger_result.latest_event_type,
+        "latest_position_id": ledger_result.latest_position_id,
+        "warnings": list(decision.warnings or []),
+        "blockers": list(decision.blockers or []),
+    }
+
+
 def build_strategy_status(
     config: AppConfig,
     *,
@@ -1512,6 +1634,7 @@ def build_strategy_status(
     safety = assess_startup_safety(config)
     latest_decision: StrategyDecision | None = None
     worker_metadata: dict[str, Any] | None = None
+    variants: JsonPayload = {}
     warnings: list[str] = []
     blockers: list[str] = []
 
@@ -1524,6 +1647,7 @@ def build_strategy_status(
             checked_at=checked_at,
             latest_decision=None,
             worker_metadata=None,
+            variants=variants,
             warnings=warnings,
             blockers=blockers,
         )
@@ -1533,7 +1657,9 @@ def build_strategy_status(
         try:
             session_factory = create_session_factory(engine)
             with session_factory() as session:
-                latest_decision = StrategyDecisionsRepository(session).get_latest_decision()
+                latest_decision = StrategyDecisionsRepository(session).get_latest_decision(
+                    strategy_id=CONTROL_STRATEGY_ID
+                )
                 heartbeat_repository = WorkerHeartbeatRepository(session)
                 component_heartbeat = heartbeat_repository.get_latest_heartbeat(
                     WORKER_SERVICE_STRATEGY
@@ -1541,11 +1667,17 @@ def build_strategy_status(
                 worker_metadata = _strategy_worker_metadata(
                     component_heartbeat.metadata_ if component_heartbeat else None
                 )
+                variants = _strategy_variants_worker_metadata(
+                    component_heartbeat.metadata_ if component_heartbeat else None
+                )
                 if worker_metadata is None:
                     heartbeat = heartbeat_repository.get_latest_heartbeat(
                         WORKER_SERVICE_AGGREGATE
                     )
                     worker_metadata = _strategy_worker_metadata(
+                        heartbeat.metadata_ if heartbeat else None
+                    )
+                    variants = _strategy_variants_worker_metadata(
                         heartbeat.metadata_ if heartbeat else None
                     )
                     if worker_metadata is not None:
@@ -1561,12 +1693,18 @@ def build_strategy_status(
         checked_at=checked_at,
         latest_decision=latest_decision,
         worker_metadata=worker_metadata,
+        variants=variants,
         warnings=warnings,
         blockers=blockers,
     )
 
 
-def build_latest_strategy_decision(config: AppConfig) -> StrategyDecisionSnapshot:
+def build_latest_strategy_decision(
+    config: AppConfig,
+    *,
+    strategy_id: str | None = None,
+) -> StrategyDecisionSnapshot:
+    effective_strategy_id = strategy_id or CONTROL_STRATEGY_ID
     if not config.database_url:
         return StrategyDecisionSnapshot(found=False)
 
@@ -1575,7 +1713,9 @@ def build_latest_strategy_decision(config: AppConfig) -> StrategyDecisionSnapsho
         try:
             session_factory = create_session_factory(engine)
             with session_factory() as session:
-                decision = StrategyDecisionsRepository(session).get_latest_decision()
+                decision = StrategyDecisionsRepository(session).get_latest_decision(
+                    strategy_id=effective_strategy_id
+                )
                 return strategy_decision_snapshot(decision)
         finally:
             engine.dispose()
@@ -1590,8 +1730,10 @@ def build_recent_strategy_decisions(
     config: AppConfig,
     *,
     limit: int,
+    strategy_id: str | None = None,
     now: datetime | None = None,
 ) -> StrategyRecentDecisionsSnapshot:
+    effective_strategy_id = strategy_id or CONTROL_STRATEGY_ID
     capped_limit = min(max(limit, 1), 500)
     checked_at = _as_utc(now or datetime.now(UTC))
     if not config.database_url:
@@ -1608,7 +1750,8 @@ def build_recent_strategy_decisions(
             session_factory = create_session_factory(engine)
             with session_factory() as session:
                 rows = StrategyDecisionsRepository(session).list_recent_decisions(
-                    limit=capped_limit
+                    limit=capped_limit,
+                    strategy_id=effective_strategy_id,
                 )
         finally:
             engine.dispose()
@@ -1628,8 +1771,10 @@ def build_recent_strategy_gate_summary(
     config: AppConfig,
     *,
     limit: int,
+    strategy_id: str | None = None,
     now: datetime | None = None,
 ) -> StrategyGateSummarySnapshot:
+    effective_strategy_id = strategy_id or CONTROL_STRATEGY_ID
     capped_limit = min(max(limit, 1), 500)
     checked_at = _as_utc(now or datetime.now(UTC))
     rows: list[StrategyDecision] = []
@@ -1641,11 +1786,14 @@ def build_recent_strategy_gate_summary(
                 session_factory = create_session_factory(engine)
                 with session_factory() as session:
                     rows = StrategyDecisionsRepository(session).list_recent_decisions(
-                        limit=capped_limit
+                        limit=capped_limit,
+                        strategy_id=effective_strategy_id,
                     )
                     current_open_position_count = StrategyDryRunRepository(
                         session
-                    ).count_open_positions(strategy_id=config.strategy_id)
+                    ).count_open_positions(
+                        strategy_id=effective_strategy_id
+                    )
             finally:
                 engine.dispose()
         except SQLAlchemyError:
@@ -1708,14 +1856,100 @@ def build_recent_strategy_gate_summary(
     )
 
 
+def build_strategy_variants_comparison(
+    config: AppConfig,
+    *,
+    window_seconds: int,
+    now: datetime | None = None,
+) -> StrategyVariantsComparisonSnapshot:
+    generated_at = _as_utc(now or datetime.now(UTC))
+    since = generated_at - timedelta(seconds=window_seconds)
+    safety = assess_startup_safety(config)
+    warnings: list[str] = []
+    blockers: list[str] = []
+    variants: dict[str, Any] = {}
+    heartbeat_variants: dict[str, Any] = {}
+
+    if not config.database_url:
+        blockers.append("database_not_configured_for_strategy_variant_comparison")
+        return StrategyVariantsComparisonSnapshot(
+            window_seconds=window_seconds,
+            generated_at=generated_at,
+            challenger_enabled=None,
+            safety=safety.to_dict(),
+            variants=variants,
+            warnings=warnings,
+            blockers=blockers,
+        )
+
+    try:
+        engine = create_engine_from_config(config)
+        try:
+            session_factory = create_session_factory(engine)
+            with session_factory() as session:
+                heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                    WORKER_SERVICE_STRATEGY
+                )
+                heartbeat_variants = _strategy_variants_worker_metadata(
+                    heartbeat.metadata_ if heartbeat else None
+                )
+                decisions = StrategyDecisionsRepository(session)
+                dry_run = StrategyDryRunRepository(session)
+                strategy_ids = set(heartbeat_variants) | {
+                    CONTROL_STRATEGY_ID,
+                    CHALLENGER_STRATEGY_ID,
+                }
+                for strategy_id in sorted(strategy_ids):
+                    latest = decisions.get_latest_decision(strategy_id=strategy_id)
+                    variants[strategy_id] = {
+                        "worker": heartbeat_variants.get(strategy_id),
+                        "configured_thresholds": (
+                            latest.measurements.get("config")
+                            if latest is not None
+                            and isinstance(latest.measurements, dict)
+                            else None
+                        ),
+                        **decisions.comparison_summary_since(
+                            strategy_id=strategy_id,
+                            since=since,
+                        ),
+                        **dry_run.comparison_summary_since(
+                            strategy_id=strategy_id,
+                            since=since,
+                        ),
+                    }
+        finally:
+            engine.dispose()
+    except SQLAlchemyError:
+        warnings.append("strategy_variant_comparison_database_error")
+
+    challenger = heartbeat_variants.get(CHALLENGER_STRATEGY_ID)
+    return StrategyVariantsComparisonSnapshot(
+        window_seconds=window_seconds,
+        generated_at=generated_at,
+        challenger_enabled=(
+            bool(challenger.get("enabled")) if isinstance(challenger, dict) else None
+        ),
+        safety=safety.to_dict(),
+        variants=variants,
+        warnings=warnings,
+        blockers=blockers,
+    )
+
+
 def build_strategy_dry_run_status(
     config: AppConfig,
     *,
+    strategy_id: str | None = None,
     now: datetime | None = None,
 ) -> StrategyDryRunStatusSnapshot:
+    effective_strategy_id = strategy_id or CONTROL_STRATEGY_ID
     checked_at = _as_utc(now or datetime.now(UTC))
     safety = assess_startup_safety(config)
-    enabled = _dry_run_runtime_enabled(config, safety)
+    enabled = _dry_run_runtime_enabled(config, safety) and (
+        effective_strategy_id != CHALLENGER_STRATEGY_ID
+        or config.strategy_challenger_enabled
+    )
     worker_metadata: dict[str, Any] | None = None
     open_position_count = 0
     latest_event: StrategyDryRunEvent | None = None
@@ -1754,14 +1988,16 @@ def build_strategy_dry_run_status(
             with session_factory() as session:
                 dry_run_repository = StrategyDryRunRepository(session)
                 open_position_count = dry_run_repository.count_open_positions(
-                    strategy_id=config.strategy_id
+                    strategy_id=effective_strategy_id
                 )
                 latest_event = dry_run_repository.get_latest_event(
-                    strategy_id=config.strategy_id
+                    strategy_id=effective_strategy_id
                 )
-                latest_decision = StrategyDecisionsRepository(session).get_latest_decision()
+                latest_decision = StrategyDecisionsRepository(session).get_latest_decision(
+                    strategy_id=effective_strategy_id
+                )
                 latest_enter_id = dry_run_repository.get_latest_enter_decision_id(
-                    strategy_id=config.strategy_id
+                    strategy_id=effective_strategy_id
                 )
                 if latest_enter_id is not None:
                     latest_enter_decision = StrategyDecisionsRepository(
@@ -1771,15 +2007,17 @@ def build_strategy_dry_run_status(
                 component_heartbeat = heartbeat_repository.get_latest_heartbeat(
                     WORKER_SERVICE_STRATEGY
                 )
-                worker_metadata = _strategy_dry_run_worker_metadata(
-                    component_heartbeat.metadata_ if component_heartbeat else None
+                worker_metadata = _strategy_dry_run_status_worker_metadata(
+                    component_heartbeat.metadata_ if component_heartbeat else None,
+                    strategy_id=effective_strategy_id,
                 )
                 if worker_metadata is None:
                     heartbeat = heartbeat_repository.get_latest_heartbeat(
                         WORKER_SERVICE_AGGREGATE
                     )
-                    worker_metadata = _strategy_dry_run_worker_metadata(
-                        heartbeat.metadata_ if heartbeat else None
+                    worker_metadata = _strategy_dry_run_status_worker_metadata(
+                        heartbeat.metadata_ if heartbeat else None,
+                        strategy_id=effective_strategy_id,
                     )
                     if worker_metadata is not None:
                         warnings.append("feed_liveness_legacy_aggregate_fallback")
@@ -1821,8 +2059,10 @@ def build_strategy_dry_run_status(
 def build_open_strategy_dry_run_positions(
     config: AppConfig,
     *,
+    strategy_id: str | None = None,
     now: datetime | None = None,
 ) -> StrategyDryRunPositionsSnapshot:
+    effective_strategy_id = strategy_id or CONTROL_STRATEGY_ID
     checked_at = _as_utc(now or datetime.now(UTC))
     if not config.database_url:
         return StrategyDryRunPositionsSnapshot(
@@ -1838,7 +2078,7 @@ def build_open_strategy_dry_run_positions(
             session_factory = create_session_factory(engine)
             with session_factory() as session:
                 positions = StrategyDryRunRepository(session).list_open_positions(
-                    strategy_id=config.strategy_id
+                    strategy_id=effective_strategy_id
                 )
         finally:
             engine.dispose()
@@ -1858,8 +2098,10 @@ def build_recent_strategy_dry_run_positions(
     config: AppConfig,
     *,
     limit: int,
+    strategy_id: str | None = None,
     now: datetime | None = None,
 ) -> StrategyDryRunPositionsSnapshot:
+    effective_strategy_id = strategy_id or CONTROL_STRATEGY_ID
     capped_limit = min(max(limit, 1), 500)
     checked_at = _as_utc(now or datetime.now(UTC))
     if not config.database_url:
@@ -1877,7 +2119,7 @@ def build_recent_strategy_dry_run_positions(
             with session_factory() as session:
                 rows = StrategyDryRunRepository(session).list_recent_positions(
                     limit=capped_limit,
-                    strategy_id=config.strategy_id,
+                    strategy_id=effective_strategy_id,
                 )
         finally:
             engine.dispose()
@@ -1897,8 +2139,10 @@ def build_recent_strategy_dry_run_events(
     config: AppConfig,
     *,
     limit: int,
+    strategy_id: str | None = None,
     now: datetime | None = None,
 ) -> StrategyDryRunEventsSnapshot:
+    effective_strategy_id = strategy_id or CONTROL_STRATEGY_ID
     capped_limit = min(max(limit, 1), 500)
     checked_at = _as_utc(now or datetime.now(UTC))
     if not config.database_url:
@@ -1916,7 +2160,7 @@ def build_recent_strategy_dry_run_events(
             with session_factory() as session:
                 rows = StrategyDryRunRepository(session).list_recent_events(
                     limit=capped_limit,
-                    strategy_id=config.strategy_id,
+                    strategy_id=effective_strategy_id,
                 )
         finally:
             engine.dispose()
@@ -1941,6 +2185,7 @@ def strategy_decision_snapshot(
     return StrategyDecisionSnapshot(
         found=True,
         decision_id=decision.decision_id,
+        strategy_id=decision.strategy_id,
         evaluated_at=decision.evaluated_at,
         decision_state=decision.decision_state,
         primary_reason=decision.primary_reason,
@@ -1995,6 +2240,7 @@ def strategy_dry_run_event_snapshot(
     return StrategyDryRunEventSnapshot(
         found=True,
         event_id=event.event_id,
+        strategy_id=event.strategy_id,
         position_id=event.position_id,
         decision_id=event.decision_id,
         event_type=event.event_type,
@@ -2015,6 +2261,7 @@ def _status_snapshot(
     checked_at: datetime,
     latest_decision: StrategyDecision | None,
     worker_metadata: dict[str, Any] | None,
+    variants: JsonPayload,
     warnings: list[str],
     blockers: list[str],
 ) -> StrategyStatusSnapshot:
@@ -2071,6 +2318,7 @@ def _status_snapshot(
         enabled=effective_enabled,
         worker_observed_enabled=worker_observed_enabled,
         connection_state=connection_state,
+        variants=variants,
         app_mode=config.app_mode.value,
         trading_enabled=config.trading_enabled,
         execute=config.execute,
@@ -4095,8 +4343,13 @@ def _trade_side(trade: PublicTrade) -> str | None:
 def _intended_entry_price(
     desired_ask: Decimal,
     offset_cents: int,
+    *,
+    max_entry_price: Decimal,
 ) -> Decimal:
-    return desired_ask + (Decimal(offset_cents) / Decimal("100"))
+    return min(
+        desired_ask + (Decimal(offset_cents) / Decimal("100")),
+        max_entry_price,
+    )
 
 
 def _dry_run_position_id(
@@ -4293,13 +4546,15 @@ def _decision_id(
     *,
     evaluated_at: datetime,
     poll_seconds: float,
+    strategy_id: str,
     market_ticker: str | None,
     context_hash: str,
 ) -> str:
     bucket_size = max(poll_seconds, 0.001)
     bucket = int(evaluated_at.timestamp() / bucket_size)
+    safe_strategy_id = _safe_decision_id_part(strategy_id)
     safe_ticker = _safe_decision_id_part(market_ticker or "none")
-    return f"strategy-{safe_ticker}-{bucket}-{context_hash[:12]}"[:128]
+    return f"strategy-{safe_strategy_id}-{safe_ticker}-{bucket}-{context_hash[:12]}"[:128]
 
 
 def _safe_decision_id_part(value: str) -> str:
@@ -4348,6 +4603,439 @@ def _strategy_dry_run_worker_metadata(metadata: Any) -> dict[str, Any] | None:
         return None
     dry_run_metadata = strategy_metadata.get("dry_run")
     return dry_run_metadata if isinstance(dry_run_metadata, dict) else None
+
+
+def _strategy_dry_run_status_worker_metadata(
+    metadata: Any,
+    *,
+    strategy_id: str,
+) -> dict[str, Any] | None:
+    variant_metadata = _strategy_variants_worker_metadata(metadata).get(strategy_id)
+    if isinstance(variant_metadata, dict):
+        return variant_metadata
+    if strategy_id == CONTROL_STRATEGY_ID:
+        return _strategy_dry_run_worker_metadata(metadata)
+    return None
+
+
+def _strategy_variants_worker_metadata(metadata: Any) -> dict[str, Any]:
+    if not isinstance(metadata, dict):
+        return {}
+    strategy_metadata = metadata.get("strategy")
+    if not isinstance(strategy_metadata, dict):
+        return {}
+    variants = strategy_metadata.get("variants")
+    if not isinstance(variants, dict):
+        return {}
+    return {
+        str(strategy_id): value
+        for strategy_id, value in variants.items()
+        if isinstance(value, dict)
+    }
+
+
+def _full_gate_trace(
+    *,
+    config: AppConfig,
+    decision_state: str,
+    primary_reason: str,
+    evaluated_at: datetime,
+    market: Market | None,
+    boundary: Decimal | None,
+    brti_value: Decimal | None,
+    orderbook: OrderbookSnapshot | None,
+    seconds_since_open: int | None,
+    seconds_left: int | None,
+    reference_ticks: list[ReferenceTick],
+    orderbook_history: list[OrderbookSnapshot],
+    recent_trades: list[PublicTrade],
+) -> JsonPayload:
+    """Record every pure entry gate without changing the canonical decision."""
+
+    prerequisite_ready = all(
+        value is not None
+        for value in (market, boundary, brti_value, orderbook)
+    ) and bool(brti_value and brti_value > 0)
+    base: dict[str, Any] = {
+        "strategy_id": config.strategy_id,
+        "evaluated_at": _isoformat_or_none(evaluated_at),
+        "thresholds": _thresholds(config),
+        "canonical_state": decision_state,
+        "canonical_reason": primary_reason,
+        "prerequisites_ready": prerequisite_ready,
+        "gates": {},
+        "passing_gate_count": 0,
+        "blocking_gate_count": 0,
+        "canonical_primary_gate": None,
+    }
+    if not prerequisite_ready:
+        return base
+
+    assert boundary is not None
+    assert brti_value is not None
+    assert orderbook is not None
+    candidate_side = "YES" if brti_value > boundary else "NO"
+    distance_bps = abs(brti_value - boundary) / brti_value * Decimal("10000")
+    desired_bid, desired_ask, desired_spread = _desired_book(orderbook, candidate_side)
+    desired_mid = _midpoint(desired_bid, desired_ask)
+    desired_spread_cents = (
+        desired_spread * Decimal("100") if desired_spread is not None else None
+    )
+    desired_top_book_size = _desired_top_book_size(orderbook, candidate_side)
+    gates: dict[str, dict[str, Any]] = {}
+
+    def add_gate(
+        name: str,
+        *,
+        status: str,
+        reason: str | None,
+        actual: dict[str, Any],
+        thresholds: dict[str, Any],
+        margins: dict[str, Any],
+        canonical_reasons: set[str],
+    ) -> None:
+        canonical = primary_reason in canonical_reasons
+        gates[name] = {
+            "status": status,
+            "reason": reason,
+            "actual": _json_safe(actual),
+            "thresholds": _json_safe(thresholds),
+            "signed_margins": _json_safe(margins),
+            "affects_canonical_decision": canonical,
+            "analysis_only": not canonical,
+        }
+
+    first_seconds = config.strategy_no_entry_first_seconds
+    last_seconds = config.strategy_no_entry_last_seconds
+    timing_reason = (
+        "entry_window_too_early"
+        if seconds_since_open is not None and seconds_since_open < first_seconds
+        else "entry_window_too_late"
+        if seconds_left is not None and seconds_left < last_seconds
+        else None
+    )
+    add_gate(
+        "timing",
+        status="block" if timing_reason else "pass",
+        reason=timing_reason,
+        actual={"seconds_since_open": seconds_since_open, "seconds_left": seconds_left},
+        thresholds={"no_entry_first_seconds": first_seconds, "no_entry_last_seconds": last_seconds},
+        margins={
+            "after_open_seconds": (
+                None if seconds_since_open is None else seconds_since_open - first_seconds
+            ),
+            "before_close_seconds": (
+                None if seconds_left is None else seconds_left - last_seconds
+            ),
+        },
+        canonical_reasons={"entry_window_too_early", "entry_window_too_late"},
+    )
+    boundary_threshold = Decimal(str(config.strategy_min_boundary_distance_bps))
+    boundary_reason = (
+        "boundary_distance_below_threshold"
+        if distance_bps < boundary_threshold
+        else None
+    )
+    add_gate(
+        "boundary_distance",
+        status="block" if boundary_reason else "pass",
+        reason=boundary_reason,
+        actual={"distance_bps": distance_bps, "candidate_side": candidate_side},
+        thresholds={"min_boundary_distance_bps": boundary_threshold},
+        margins={"distance_bps": distance_bps - boundary_threshold},
+        canonical_reasons={"boundary_distance_below_threshold"},
+    )
+    book_reason = (
+        "kalshi_orderbook_side_missing"
+        if desired_bid is None
+        or desired_ask is None
+        or desired_spread is None
+        or desired_ask < desired_bid
+        or desired_spread < 0
+        else None
+    )
+    add_gate(
+        "book",
+        status="block" if book_reason else "pass",
+        reason=book_reason,
+        actual={
+            "desired_bid": desired_bid,
+            "desired_ask": desired_ask,
+            "desired_spread_cents": desired_spread_cents,
+        },
+        thresholds={},
+        margins={},
+        canonical_reasons={"kalshi_orderbook_side_missing"},
+    )
+    max_spread = Decimal(str(config.strategy_max_spread_cents))
+    spread_reason = (
+        "desired_side_spread_too_wide"
+        if desired_spread_cents is None or desired_spread_cents > max_spread
+        else None
+    )
+    add_gate(
+        "spread",
+        status="block" if spread_reason else "pass",
+        reason=spread_reason,
+        actual={"spread_cents": desired_spread_cents},
+        thresholds={"max_spread_cents": max_spread},
+        margins={
+            "spread_cents": (
+                None if desired_spread_cents is None else max_spread - desired_spread_cents
+            )
+        },
+        canonical_reasons={"desired_side_spread_too_wide"},
+    )
+    min_depth = Decimal(str(config.strategy_min_top_book_size_contracts))
+    depth_reason = (
+        "desired_side_depth_too_thin"
+        if desired_top_book_size is None or desired_top_book_size < min_depth
+        else None
+    )
+    add_gate(
+        "depth",
+        status="block" if depth_reason else "pass",
+        reason=depth_reason,
+        actual={"top_book_size": desired_top_book_size},
+        thresholds={"min_top_book_size_contracts": min_depth},
+        margins={
+            "top_book_size": (
+                None if desired_top_book_size is None else desired_top_book_size - min_depth
+            )
+        },
+        canonical_reasons={"desired_side_depth_too_thin"},
+    )
+    min_entry = Decimal(str(config.strategy_dry_run_min_entry_price))
+    max_entry = Decimal(str(config.strategy_dry_run_max_entry_price))
+    raw_ask_reason = (
+        "dry_run_intended_entry_price_too_low"
+        if desired_ask is None or desired_ask < min_entry
+        else "dry_run_intended_entry_price_too_high"
+        if desired_ask > max_entry
+        else None
+    )
+    add_gate(
+        "raw_entry_ask",
+        status="block" if raw_ask_reason else "pass",
+        reason=raw_ask_reason,
+        actual={"desired_ask": desired_ask},
+        thresholds={"min_entry_price": min_entry, "max_entry_price": max_entry},
+        margins={
+            "above_min": None if desired_ask is None else desired_ask - min_entry,
+            "below_max": None if desired_ask is None else max_entry - desired_ask,
+        },
+        canonical_reasons={
+            "dry_run_intended_entry_price_too_low",
+            "dry_run_intended_entry_price_too_high",
+        },
+    )
+    intended_entry = (
+        None
+        if desired_ask is None
+        else _intended_entry_price(
+            desired_ask,
+            config.strategy_dry_run_entry_price_offset_cents,
+            max_entry_price=max_entry,
+        )
+    )
+    add_gate(
+        "intended_entry_price",
+        status="pass" if intended_entry is not None else "not_evaluated",
+        reason=None,
+        actual={"intended_entry_price": intended_entry},
+        thresholds={"max_entry_price": max_entry},
+        margins={
+            "below_max": None if intended_entry is None else max_entry - intended_entry
+        },
+        canonical_reasons=set(),
+    )
+    impulse = _brti_impulse_metrics(
+        config=config,
+        ticks=reference_ticks,
+        evaluated_at=evaluated_at,
+        current_value=brti_value,
+        candidate_side=candidate_side,
+    )
+    add_gate(
+        "impulse",
+        status="block" if impulse["reason"] else "pass",
+        reason=impulse["reason"],
+        actual={
+            "short_move_bps": impulse["short_move_bps"],
+            "medium_move_bps": impulse["medium_move_bps"],
+            "long_move_bps": impulse["long_move_bps"],
+            "directional_tick_ratio": impulse["directional_tick_ratio"],
+            "point_counts": {
+                "short": impulse["short_point_count"],
+                "medium": impulse["medium_point_count"],
+                "long": impulse["long_point_count"],
+            },
+        },
+        thresholds={
+            "short_move_bps": config.strategy_brti_min_move_short_bps,
+            "medium_move_bps": config.strategy_brti_min_move_medium_bps,
+            "long_move_bps": config.strategy_brti_min_move_long_bps,
+            "directional_tick_ratio": config.strategy_brti_directional_tick_ratio_min,
+        },
+        margins={
+            "short_move_bps": _margin(
+                impulse["short_move_bps"], config.strategy_brti_min_move_short_bps
+            ),
+            "medium_move_bps": _margin(
+                impulse["medium_move_bps"], config.strategy_brti_min_move_medium_bps
+            ),
+            "long_move_bps": _margin(
+                impulse["long_move_bps"], config.strategy_brti_min_move_long_bps
+            ),
+            "directional_tick_ratio": _margin(
+                impulse["directional_tick_ratio"],
+                config.strategy_brti_directional_tick_ratio_min,
+            ),
+        },
+        canonical_reasons={
+            "insufficient_reference_history",
+            "weak_short_brti_move",
+            "weak_medium_brti_move",
+            "weak_long_brti_move",
+            "insufficient_directional_ticks",
+            "directional_tick_ratio_below_threshold",
+        },
+    )
+    chop = _brti_chop_metrics(
+        config=config,
+        ticks=reference_ticks,
+        evaluated_at=evaluated_at,
+        boundary=boundary,
+        current_value=brti_value,
+        candidate_side=candidate_side,
+        short_move_bps=impulse["short_move_bps"],
+        medium_move_bps=impulse["medium_move_bps"],
+    )
+    add_gate(
+        "chop",
+        status="block" if chop["reason"] else "pass",
+        reason=chop["reason"],
+        actual={
+            "boundary_cross_count": chop["boundary_cross_count"],
+            "retrace_fraction": chop["retrace_fraction"],
+        },
+        thresholds={
+            "max_boundary_crosses": config.strategy_brti_max_boundary_crosses_90s,
+            "max_retrace_fraction": config.strategy_brti_max_retrace_fraction,
+        },
+        margins={
+            "boundary_crosses": (
+                None
+                if chop["boundary_cross_count"] is None
+                else config.strategy_brti_max_boundary_crosses_90s
+                - chop["boundary_cross_count"]
+            ),
+            "retrace_fraction": _margin(
+                config.strategy_brti_max_retrace_fraction,
+                chop["retrace_fraction"],
+            ),
+        },
+        canonical_reasons={
+            "boundary_cross_count_above_threshold",
+            "short_move_opposes_medium_move",
+            "retrace_fraction_above_threshold",
+        },
+    )
+    contract = _contract_confirmation_metrics(
+        config=config,
+        evaluated_at=evaluated_at,
+        orderbook_history=orderbook_history,
+        candidate_side=candidate_side,
+        desired_mid=desired_mid,
+        desired_ask=desired_ask,
+    )
+    add_gate(
+        "contract_confirmation",
+        status="block" if contract["reason"] else "pass",
+        reason=contract["reason"],
+        actual={
+            "mid_move_cents": contract["mid_move_cents"],
+            "ask_pullback_cents": contract["ask_pullback_cents"],
+        },
+        thresholds={
+            "min_mid_move_cents": config.strategy_contract_min_mid_move_cents,
+            "max_ask_pullback_cents": config.strategy_contract_max_ask_pullback_cents,
+        },
+        margins={
+            "mid_move_cents": _margin(
+                contract["mid_move_cents"], config.strategy_contract_min_mid_move_cents
+            ),
+            "ask_pullback_cents": _margin(
+                config.strategy_contract_max_ask_pullback_cents,
+                contract["ask_pullback_cents"],
+            ),
+        },
+        canonical_reasons={
+            "insufficient_contract_history",
+            "contract_mid_move_below_threshold",
+            "ask_pullback_above_threshold",
+        },
+    )
+    trade = _trade_confirmation_metrics(
+        trades=recent_trades,
+        candidate_side=candidate_side,
+    )
+    trade_count = int(trade["trade_count"])
+    trade_ratio = trade["candidate_trade_ratio"]
+    trade_status = "pass"
+    trade_reason = None
+    if trade_count < config.strategy_trade_confirmation_min_trades:
+        trade_status = "warn"
+        trade_reason = "recent_trade_confirmation_insufficient_trades"
+    elif (
+        trade_ratio is not None
+        and trade_ratio < Decimal(str(config.strategy_trade_confirmation_min_ratio))
+    ):
+        trade_status = "block"
+        trade_reason = "recent_trade_confirmation_weak"
+    add_gate(
+        "trade_confirmation",
+        status=trade_status,
+        reason=trade_reason,
+        actual={"trade_count": trade_count, "candidate_trade_ratio": trade_ratio},
+        thresholds={
+            "min_trades": config.strategy_trade_confirmation_min_trades,
+            "min_candidate_ratio": config.strategy_trade_confirmation_min_ratio,
+        },
+        margins={
+            "trade_count": trade_count - config.strategy_trade_confirmation_min_trades,
+            "candidate_trade_ratio": _margin(
+                trade_ratio,
+                config.strategy_trade_confirmation_min_ratio,
+            ),
+        },
+        canonical_reasons={"recent_trade_confirmation_weak"},
+    )
+    base["gates"] = gates
+    base["passing_gate_count"] = sum(
+        1 for gate in gates.values() if gate["status"] == "pass"
+    )
+    base["blocking_gate_count"] = sum(
+        1 for gate in gates.values() if gate["status"] == "block"
+    )
+    base["canonical_primary_gate"] = next(
+        (
+            name
+            for name, gate in gates.items()
+            if gate["affects_canonical_decision"]
+        ),
+        None,
+    )
+    return base
+
+
+def _margin(
+    value: Decimal | float | int | None,
+    threshold: Decimal | float | int | None,
+) -> Decimal | None:
+    if value is None or threshold is None:
+        return None
+    return Decimal(str(value)) - Decimal(str(threshold))
 
 
 def _reference_worker_metadata(metadata: Any) -> dict[str, Any] | None:

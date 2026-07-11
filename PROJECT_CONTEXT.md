@@ -99,6 +99,7 @@ This ladder is directional and should be reviewed before each PR.
 9f. Dedicated market data worker isolation and Kalshi WebSocket protocol proof. Completed by PR 9f.
 9g. Market worker persistence backpressure hardening. Completed by PR 9g.
 9h. Maintenance worker liveness/status and retention load smoothing. Current PR.
+9i. DRY_RUN control versus fast momentum challenger comparison, still hypothetical-only. Current PR.
 10. Local replay fixtures.
 11. Deterministic replay harness for captured market/reference data.
 12. Spread, depth, liquidity, and anti-chop calibration diagnostics.

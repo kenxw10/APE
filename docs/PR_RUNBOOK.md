@@ -186,6 +186,32 @@ PR 9a post-merge checkpoint:
   sample-size warnings, without raw payloads or execution controls.
 - Confirm `ENTER_PAPER` and `ENTER_LIVE` do not appear.
 
+PR 9i post-merge checkpoint:
+
+- Keep the existing DRY_RUN safety settings on `ape-strategy-worker` only:
+  `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`,
+  `STRATEGY_DRY_RUN_ENABLED=true`, `TRADING_ENABLED=false`, and
+  `EXECUTE=false`.
+- Add only `STRATEGY_CHALLENGER_ENABLED=true` to `ape-strategy-worker` to
+  enable the challenger. Do not add it to API, market, reference, maintenance,
+  Railway Postgres, or Vercel services.
+- Confirm the control remains `btc15_momentum_v1` with 30/90/180-second BRTI
+  lookbacks and a 45-second contract lookback. Confirm the challenger is
+  `btc15_momentum_v1_fast` with 20/60/120-second BRTI lookbacks and a
+  30-second contract lookback; all other thresholds remain the same.
+- Validate `/strategy/status` for worker-owned `variants` metadata and
+  `/strategy/variants/comparison?window_seconds=3600` for bounded counts.
+  Use `strategy_id=btc15_momentum_v1` or
+  `strategy_id=btc15_momentum_v1_fast` on decision, gate, and dry-run routes
+  to inspect one ledger.
+- Verify the raw desired-side ask range remains `$0.56` through `$0.78`; an
+  ask of `$0.78` is eligible with intended entry clamped to `$0.78`, while a
+  raw ask outside the range blocks. Inspect `measurements.gate_trace` for the
+  canonical reason and later analysis-only gate results.
+- Confirm both variants write hypothetical rows only. There must be no orders,
+  cancels, private/user channels, account reads, balance reads, paper/live
+  positions, credentials, or dashboard trading controls.
+
 PR 9b post-merge checkpoint:
 
 - Keep `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`,

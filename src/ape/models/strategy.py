@@ -16,12 +16,14 @@ from ape.strategy.observer import (
     StrategyGateSummarySnapshot,
     StrategyRecentDecisionsSnapshot,
     StrategyStatusSnapshot,
+    StrategyVariantsComparisonSnapshot,
 )
 
 
 class StrategyDecisionResponse(BaseModel):
     found: bool
     decision_id: str | None
+    strategy_id: str | None
     evaluated_at: datetime | None
     decision_state: str | None
     primary_reason: str | None
@@ -49,6 +51,7 @@ class StrategyStatusResponse(BaseModel):
     enabled: bool
     worker_observed_enabled: bool | None
     connection_state: str
+    variants: JsonPayload
     app_mode: str
     trading_enabled: bool
     execute: bool
@@ -136,6 +139,7 @@ class StrategyDryRunPositionResponse(BaseModel):
 class StrategyDryRunEventResponse(BaseModel):
     found: bool
     event_id: str | None
+    strategy_id: str | None
     position_id: str | None
     decision_id: str | None
     event_type: str | None
@@ -179,6 +183,16 @@ class StrategyDryRunStatusResponse(BaseModel):
     checked_at: datetime
 
 
+class StrategyVariantsComparisonResponse(BaseModel):
+    window_seconds: int
+    generated_at: datetime
+    challenger_enabled: bool | None
+    safety: JsonPayload
+    variants: JsonPayload
+    warnings: list[str]
+    blockers: list[str]
+
+
 def strategy_decision_response(
     snapshot: StrategyDecisionSnapshot,
 ) -> StrategyDecisionResponse:
@@ -198,6 +212,12 @@ def strategy_recent_decisions_response(
 
 def strategy_status_response(snapshot: StrategyStatusSnapshot) -> StrategyStatusResponse:
     return StrategyStatusResponse(**snapshot.__dict__)
+
+
+def strategy_variants_comparison_response(
+    snapshot: StrategyVariantsComparisonSnapshot,
+) -> StrategyVariantsComparisonResponse:
+    return StrategyVariantsComparisonResponse(**snapshot.__dict__)
 
 
 def strategy_gate_summary_response(

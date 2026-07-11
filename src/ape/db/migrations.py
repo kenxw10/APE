@@ -9,13 +9,14 @@ from ape.config import ConfigError, load_config
 from ape.db.models import Base, SchemaMigration, utc_now
 from ape.db.session import DatabaseConfigError, create_engine_from_config
 
-CURRENT_SCHEMA_VERSION = "0006_kalshi_ws_protocol_events"
+CURRENT_SCHEMA_VERSION = "0007_strategy_decision_strategy_id"
 SCHEMA_VERSIONS = (
     "0001_initial_schema",
     "0002_fixed_point_ws_quantities",
     "0003_storage_retention_lifecycle",
     "0004_dry_run_strategy_ledger",
     "0005_strategy_dry_run_event_strategy_id",
+    "0006_kalshi_ws_protocol_events",
     CURRENT_SCHEMA_VERSION,
 )
 POSTGRES_MIGRATION_LOCK_ID = 4_150_002
@@ -30,6 +31,7 @@ def run_migrations(engine: Engine) -> None:
         Base.metadata.create_all(connection)
         _ensure_fixed_point_quantity_columns(connection)
         _ensure_strategy_dry_run_event_strategy_id(connection)
+        _ensure_strategy_decision_strategy_id(connection)
         _record_schema_versions(connection)
 
 
@@ -151,6 +153,42 @@ def _ensure_strategy_dry_run_event_strategy_id(connection: Connection) -> None:
     )
 
 
+def _ensure_strategy_decision_strategy_id(connection: Connection) -> None:
+    inspector = inspect(connection)
+    if "strategy_decisions" not in set(inspector.get_table_names()):
+        return
+
+    decision_columns = {
+        column["name"] for column in inspector.get_columns("strategy_decisions")
+    }
+    if "strategy_id" not in decision_columns:
+        connection.execute(
+            text(
+                _add_text_column_statement(
+                    connection,
+                    "strategy_decisions",
+                    "strategy_id",
+                )
+            )
+        )
+
+    connection.execute(
+        text(
+            """
+            UPDATE strategy_decisions
+            SET strategy_id = 'btc15_momentum_v1'
+            WHERE strategy_id IS NULL OR TRIM(strategy_id) = ''
+            """
+        )
+    )
+    _ensure_composite_index(
+        connection,
+        table_name="strategy_decisions",
+        index_name="ix_strategy_decisions_strategy_id_evaluated",
+        column_names=("strategy_id", "evaluated_at"),
+    )
+
+
 def _add_text_column_statement(
     connection: Connection,
     table_name: str,
@@ -182,6 +220,29 @@ def _ensure_index(
         text(
             f"CREATE INDEX IF NOT EXISTS {index_name} "
             f"ON {table_name} ({column_name})"
+        )
+    )
+
+
+def _ensure_composite_index(
+    connection: Connection,
+    *,
+    table_name: str,
+    index_name: str,
+    column_names: tuple[str, ...],
+) -> None:
+    inspector = inspect(connection)
+    existing_indexes = {
+        index["name"] for index in inspector.get_indexes(table_name)
+    }
+    if index_name in existing_indexes:
+        return
+
+    columns = ", ".join(column_names)
+    connection.execute(
+        text(
+            f"CREATE INDEX IF NOT EXISTS {index_name} "
+            f"ON {table_name} ({columns})"
         )
     )
 

@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import desc, select
+from sqlalchemy import case, desc, func, or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -236,6 +236,65 @@ class StrategyDryRunRepository:
                 ).limit(limit)
             )
         )
+
+    def comparison_summary_since(
+        self,
+        *,
+        strategy_id: str,
+        since: datetime,
+    ) -> dict[str, object]:
+        position_window = self.session.execute(
+            select(
+                func.sum(case((StrategyDryRunPosition.opened_at >= since, 1), else_=0)),
+                func.sum(
+                    case(
+                        (
+                            StrategyDryRunPosition.closed_at.is_not(None)
+                            & (StrategyDryRunPosition.closed_at >= since),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                func.max(StrategyDryRunPosition.opened_at),
+                func.max(StrategyDryRunPosition.closed_at),
+            ).where(
+                StrategyDryRunPosition.strategy_id == strategy_id,
+                or_(
+                    StrategyDryRunPosition.opened_at >= since,
+                    StrategyDryRunPosition.closed_at >= since,
+                ),
+            )
+        ).one()
+        current_open_positions = self.session.scalar(
+            select(func.count()).where(
+                StrategyDryRunPosition.strategy_id == strategy_id,
+                StrategyDryRunPosition.status == OPEN_POSITION_STATUS,
+            )
+        ) or 0
+        event_rows = self.session.execute(
+            select(StrategyDryRunEvent.event_type, func.count())
+            .where(
+                StrategyDryRunEvent.strategy_id == strategy_id,
+                StrategyDryRunEvent.occurred_at >= since,
+            )
+            .group_by(StrategyDryRunEvent.event_type)
+        ).all()
+        latest_event_at = self.session.scalar(
+            select(func.max(StrategyDryRunEvent.occurred_at)).where(
+                StrategyDryRunEvent.strategy_id == strategy_id,
+                StrategyDryRunEvent.occurred_at >= since,
+            )
+        )
+        return {
+            "opened_positions": int(position_window[0] or 0),
+            "closed_positions": int(position_window[1] or 0),
+            "current_open_positions": int(current_open_positions),
+            "latest_position_opened_at": position_window[2],
+            "latest_position_closed_at": position_window[3],
+            "event_counts": dict(event_rows),
+            "latest_event_at": latest_event_at,
+        }
 
     def _strategy_id_for_position(self, position_id: str) -> str | None:
         return self.session.scalar(

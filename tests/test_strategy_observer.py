@@ -13,6 +13,7 @@ from ape.repositories.inputs import (
     OrderbookSnapshotInput,
     PublicTradeInput,
     ReferenceTickInput,
+    StrategyDryRunEventInput,
     StrategyDryRunPositionInput,
     WorkerHeartbeatInput,
 )
@@ -26,6 +27,9 @@ from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import assess_startup_safety
 from ape.strategy import observer as observer_module
 from ape.strategy.observer import (
+    CHALLENGER_STRATEGY_ID,
+    CONTROL_STRATEGY_ID,
+    STATE_CHOP_FILTER_BLOCKED,
     STATE_CONTRACT_NOT_CONFIRMED,
     STATE_ENTER_DRY_RUN,
     STATE_EXIT_SIGNAL,
@@ -40,7 +44,10 @@ from ape.strategy.observer import (
     STATE_RISK_BLOCKED,
     STATE_SPREAD_TOO_WIDE,
     StrategyObserver,
+    build_strategy_dry_run_status,
+    build_strategy_variants_comparison,
     evaluate_strategy_observer,
+    strategy_variant_configs,
 )
 from ape.worker.services import (
     WORKER_SERVICE_AGGREGATE,
@@ -229,9 +236,253 @@ def test_strategy_dry_run_records_hypothetical_entry_and_event(tmp_path) -> None
         engine.dispose()
 
 
-def test_strategy_entry_bounds_use_offset_adjusted_dry_run_price(session) -> None:
+def test_strategy_challenger_runs_on_same_timestamp_with_separate_ledgers(tmp_path) -> None:
     now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
-    config = load_config({"APP_MODE": "DRY_RUN", "STRATEGY_DRY_RUN_ENABLED": "true"})
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_strategy_challenger.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+            "STRATEGY_CHALLENGER_ENABLED": "true",
+        }
+    )
+    safety = assess_startup_safety(config)
+    assert [variant.strategy_id for variant in strategy_variant_configs(config, safety)] == [
+        CONTROL_STRATEGY_ID,
+        CHALLENGER_STRATEGY_ID,
+    ]
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        with session_factory() as session:
+            _seed_observable_context(session, now=now)
+            OrderbookRepository(session).insert_snapshot(
+                OrderbookSnapshotInput(
+                    market_ticker="KXBTC15M-ACTIVE",
+                    received_at=now - timedelta(seconds=30),
+                    sequence_number=124,
+                    yes_bid=Decimal("0.55"),
+                    yes_ask=Decimal("0.57"),
+                    no_bid=Decimal("0.43"),
+                    no_ask=Decimal("0.45"),
+                    yes_spread=Decimal("0.02"),
+                    no_spread=Decimal("0.02"),
+                    yes_bid_count=Decimal("3"),
+                    yes_ask_count=Decimal("3"),
+                    no_bid_count=Decimal("3"),
+                    no_ask_count=Decimal("3"),
+                    book_status="ok",
+                )
+            )
+            ReferenceTicksRepository(session).insert_tick(
+                ReferenceTickInput(
+                    source="kalshi_cfbenchmarks_brti",
+                    received_at=now,
+                    source_ts=now,
+                    raw_value="62130",
+                    parsed_value=Decimal("62130"),
+                    source_age_ms=0,
+                    parse_status="valid",
+                )
+            )
+            session.commit()
+
+        observer = StrategyObserver(
+            config=config,
+            safety=safety,
+            session_factory=session_factory,
+            started_at=now - timedelta(minutes=1),
+            now=lambda: now,
+        )
+        control = observer.evaluate_once()
+
+        with session_factory() as session:
+            decisions = StrategyDecisionsRepository(session).list_recent_decisions(
+                limit=10
+            )
+            dry_run = StrategyDryRunRepository(session)
+            control_open_positions = dry_run.list_open_positions(
+                strategy_id=CONTROL_STRATEGY_ID
+            )
+            challenger_open_positions = dry_run.list_open_positions(
+                strategy_id=CHALLENGER_STRATEGY_ID
+            )
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                "ape-worker"
+            )
+            comparison = build_strategy_variants_comparison(
+                config,
+                window_seconds=60,
+                now=now,
+            )
+
+        assert control is not None
+        assert control.strategy_id == CONTROL_STRATEGY_ID
+        assert {decision.strategy_id for decision in decisions} == {
+            CONTROL_STRATEGY_ID,
+            CHALLENGER_STRATEGY_ID,
+        }
+        assert {decision.evaluated_at for decision in decisions} == {
+            decisions[0].evaluated_at
+        }
+        assert {
+            decision.measurements["brti_received_at"] for decision in decisions
+        } == {decisions[0].measurements["brti_received_at"]}
+        assert len(control_open_positions) == 1
+        assert len(challenger_open_positions) == 1
+        assert heartbeat is not None
+        assert set(heartbeat.metadata_["strategy"]["variants"]) == {
+            CONTROL_STRATEGY_ID,
+            CHALLENGER_STRATEGY_ID,
+        }
+        assert comparison.challenger_enabled is True
+        assert comparison.variants[CONTROL_STRATEGY_ID]["total_decisions"] == 1
+        assert comparison.variants[CHALLENGER_STRATEGY_ID]["current_open_positions"] == 1
+    finally:
+        engine.dispose()
+
+
+def test_strategy_challenger_is_disabled_without_the_opt_in_flag() -> None:
+    config = load_config(
+        {
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+        }
+    )
+    variants = strategy_variant_configs(config, assess_startup_safety(config))
+
+    assert [variant.strategy_id for variant in variants] == [CONTROL_STRATEGY_ID]
+
+
+def test_dry_run_status_reports_disabled_challenger_without_worker_metadata(
+    tmp_path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_strategy_challenger_status.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    try:
+        status = build_strategy_dry_run_status(
+            config,
+            strategy_id=CHALLENGER_STRATEGY_ID,
+        )
+
+        assert status.enabled is False
+        assert status.worker_observed_enabled is None
+    finally:
+        engine.dispose()
+
+
+def test_strategy_variant_metadata_reports_disabled_when_dry_run_is_off(tmp_path) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_strategy_disabled.sqlite'}"
+    config = load_config(
+        {
+            "DATABASE_URL": database_url,
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "false",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        with session_factory() as session:
+            _seed_observable_context(session, now=now)
+
+        observer = StrategyObserver(
+            config=config,
+            safety=assess_startup_safety(config),
+            session_factory=session_factory,
+            started_at=now - timedelta(minutes=1),
+            now=lambda: now,
+        )
+        observer.evaluate_once()
+
+        with session_factory() as session:
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                "ape-worker"
+            )
+
+        assert heartbeat is not None
+        assert (
+            heartbeat.metadata_["strategy"]["variants"][CONTROL_STRATEGY_ID]["enabled"]
+            is False
+        )
+    finally:
+        engine.dispose()
+
+
+def test_dry_run_comparison_excludes_old_closed_positions_from_window(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    repository = StrategyDryRunRepository(session)
+    strategy_id = CONTROL_STRATEGY_ID
+    for position_id, status, closed_at in (
+        ("old-closed-position", "CLOSED", now - timedelta(days=1)),
+        ("old-open-position", "OPEN", None),
+    ):
+        repository.insert_position_if_absent(
+            StrategyDryRunPositionInput(
+                position_id=position_id,
+                strategy_id=strategy_id,
+                market_ticker="KXBTC15M-ACTIVE",
+                decision_id=f"decision-{position_id}",
+                side_candidate="YES",
+                economic_side="YES",
+                opened_at=now - timedelta(days=2),
+                open_price=Decimal("0.62"),
+                contract_count=1,
+                entry_reason="dry_run_entry_signal",
+                status=status,
+                closed_at=closed_at,
+                close_price=Decimal("0.63") if closed_at else None,
+                close_reason="test_close" if closed_at else None,
+                realized_pnl_cents=Decimal("0.01") if closed_at else None,
+            )
+        )
+
+    repository.insert_event_if_absent(
+        StrategyDryRunEventInput(
+            event_id="old-dry-run-event",
+            strategy_id=strategy_id,
+            event_type="ENTER_DRY_RUN",
+            occurred_at=now - timedelta(days=1),
+        )
+    )
+
+    summary = repository.comparison_summary_since(
+        strategy_id=strategy_id,
+        since=now - timedelta(hours=1),
+    )
+
+    assert summary["opened_positions"] == 0
+    assert summary["closed_positions"] == 0
+    assert summary["current_open_positions"] == 1
+    assert summary["latest_position_opened_at"] is None
+    assert summary["latest_position_closed_at"] is None
+    assert summary["latest_event_at"] is None
+
+
+def test_strategy_entry_ask_at_max_is_eligible_and_intended_price_is_clamped(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config(
+        {
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+        }
+    )
     safety = assess_startup_safety(config)
     _seed_observable_context(
         session,
@@ -248,17 +499,18 @@ def test_strategy_entry_bounds_use_offset_adjusted_dry_run_price(session) -> Non
         now=now,
     )
 
-    assert decision.decision_state == STATE_CONTRACT_NOT_CONFIRMED
-    assert decision.primary_reason == "dry_run_intended_entry_price_too_high"
-    assert decision.measurements["dry_run_intended_entry_price"] == "0.79"
-    assert decision.measurements["gate_results"]["entry_price"]["status"] == "block"
+    assert decision.decision_state == STATE_ENTER_DRY_RUN
+    assert decision.measurements["dry_run_intended_entry_price"] == "0.78"
+    assert decision.measurements["gate_results"]["entry_price"]["status"] == "pass"
     assert (
         decision.measurements["gate_results"]["contract_confirmation"]["status"]
         != "block"
     )
 
 
-def test_strategy_entry_bounds_allow_offset_to_reach_minimum(session) -> None:
+def test_strategy_entry_ask_below_minimum_is_blocked_even_if_offset_reaches_minimum(
+    session,
+) -> None:
     now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
     config = load_config(
         {
@@ -285,8 +537,42 @@ def test_strategy_entry_bounds_allow_offset_to_reach_minimum(session) -> None:
         now=now,
     )
 
-    assert decision.decision_state == STATE_ENTER_DRY_RUN
+    assert decision.decision_state == STATE_CONTRACT_NOT_CONFIRMED
+    assert decision.primary_reason == "dry_run_intended_entry_price_too_low"
     assert decision.measurements["dry_run_intended_entry_price"] == "0.56"
+    trace = decision.measurements["gate_trace"]
+    assert trace["canonical_primary_gate"] == "raw_entry_ask"
+    assert trace["gates"]["raw_entry_ask"]["status"] == "block"
+    assert "impulse" in trace["gates"]
+
+
+def test_strategy_entry_ask_above_maximum_is_blocked_before_offset(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config(
+        {
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+        }
+    )
+    _seed_observable_context(
+        session,
+        now=now,
+        yes_bid=Decimal("0.761"),
+        yes_ask=Decimal("0.781"),
+        yes_spread=Decimal("0.02"),
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=assess_startup_safety(config),
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_CONTRACT_NOT_CONFIRMED
+    assert decision.primary_reason == "dry_run_intended_entry_price_too_high"
+    assert decision.measurements["dry_run_intended_entry_price"] == "0.78"
 
 
 def test_strategy_warns_when_trade_confirmation_sample_too_small(session) -> None:
@@ -317,6 +603,10 @@ def test_strategy_warns_when_trade_confirmation_sample_too_small(session) -> Non
     assert (
         decision.measurements["gate_results"]["trade_confirmation"]["reason"]
         == "recent_trade_confirmation_insufficient_trades"
+    )
+    assert (
+        decision.measurements["gate_trace"]["gates"]["trade_confirmation"]["status"]
+        == "warn"
     )
 
 
@@ -1765,6 +2055,45 @@ def test_strategy_blocks_weak_brti_impulse(session) -> None:
     assert decision.decision_state == STATE_IMPULSE_TOO_WEAK
     assert decision.primary_reason == "weak_long_brti_move"
     assert decision.measurements["brti_move_long_bps"] is not None
+    assert decision.measurements["gate_trace"]["canonical_primary_gate"] == "impulse"
+    assert (
+        decision.measurements["gate_trace"]["gates"]["impulse"][
+            "affects_canonical_decision"
+        ]
+        is True
+    )
+
+
+def test_strategy_gate_trace_attributes_emitted_chop_block(session, monkeypatch) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({})
+    _seed_observable_context(session, now=now)
+    monkeypatch.setattr(
+        observer_module,
+        "_brti_chop_metrics",
+        lambda **_: {
+            "boundary_cross_count": 0,
+            "retrace_fraction": None,
+            "reason": "short_move_opposes_medium_move",
+        },
+    )
+
+    decision = evaluate_strategy_observer(
+        config=config,
+        safety=assess_startup_safety(config),
+        session=session,
+        now=now,
+    )
+
+    assert decision.decision_state == STATE_CHOP_FILTER_BLOCKED
+    assert decision.primary_reason == "short_move_opposes_medium_move"
+    assert decision.measurements["gate_trace"]["canonical_primary_gate"] == "chop"
+    assert (
+        decision.measurements["gate_trace"]["gates"]["chop"][
+            "affects_canonical_decision"
+        ]
+        is True
+    )
 
 
 def test_strategy_observer_prioritizes_reference_before_book(session) -> None:
