@@ -36,6 +36,8 @@ PR 9g hardens the dedicated market worker persistence path after PR 9f proved th
 
 PR 9h hardens only the maintenance/storage path. `/storage/status` now reports maintenance component liveness from `ape-worker.maintenance`, effective retention enablement from worker metadata, latest run totals, budget/partial-run details, and DB timeout/error counters. Retention also adds small configurable sleeps and optional per-run caps so cleanup work can progress incrementally without hammering Railway Postgres. No strategy thresholds, trading states, Kalshi orders, private channels, account reads, credentials, or dashboard trading controls are added.
 
+PR 9i adds an opt-in dry-run challenger beside the existing control strategy. The control is always `btc15_momentum_v1`; when `STRATEGY_CHALLENGER_ENABLED=true` on the dedicated strategy worker, `btc15_momentum_v1_fast` evaluates the same persisted snapshot using only shorter BRTI lookbacks (20/60/120 seconds) and a 30-second contract lookback. Each variant has its own decision ID, dry-run positions, and dry-run events. This remains database-only hypothetical simulation with no orders, paper trading, balances, private channels, or execution.
+
 ## Safety Defaults
 
 The default configuration is intentionally non-trading:
@@ -65,6 +67,8 @@ If Kalshi credentials are missing, `/kalshi/status` and `/markets/active` return
 `STRATEGY_OBSERVER_ENABLED=false` by default. The strategy observer is a decision ledger only; it records why the system would keep observing and never emits enter/order/execution actions.
 
 `STRATEGY_DRY_RUN_ENABLED=false` by default. Dry-run simulation requires `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`, `STRATEGY_DRY_RUN_ENABLED=true`, `TRADING_ENABLED=false`, and `EXECUTE=false`. Dry-run is a hypothetical ledger only and is not paper trading.
+
+`STRATEGY_CHALLENGER_ENABLED=false` by default. When enabled, it is evaluated only by the Railway strategy worker after the existing DRY_RUN safety gates pass. It does not alter the control strategy thresholds or add any trading capability.
 
 `STORAGE_RETENTION_ENABLED=false` by default. Retention is worker-only observer infrastructure; it deletes old persisted diagnostics and raw payload JSON only when explicitly enabled on the Railway worker.
 
@@ -120,6 +124,7 @@ Invoke-RestMethod http://127.0.0.1:8000/strategy/status
 Invoke-RestMethod http://127.0.0.1:8000/strategy/decisions/latest
 Invoke-RestMethod "http://127.0.0.1:8000/strategy/decisions/recent?limit=100"
 Invoke-RestMethod "http://127.0.0.1:8000/strategy/gates/recent?limit=100"
+Invoke-RestMethod "http://127.0.0.1:8000/strategy/variants/comparison?window_seconds=3600"
 Invoke-RestMethod http://127.0.0.1:8000/strategy/dry-run/status
 Invoke-RestMethod http://127.0.0.1:8000/strategy/dry-run/positions/open
 Invoke-RestMethod "http://127.0.0.1:8000/strategy/dry-run/positions/recent?limit=100"
@@ -314,9 +319,12 @@ Read-only dry-run endpoints:
 /strategy/dry-run/positions/recent?limit=100
 /strategy/dry-run/events/recent?limit=100
 /strategy/gates/recent?limit=100
+/strategy/variants/comparison?window_seconds=3600
 ```
 
-The evaluator checks safety, active market, boundary parsing, BRTI freshness, Kalshi book freshness, entry timing, boundary distance, spread/depth, BRTI impulse, anti-chop, contract confirmation, recent public-trade confirmation, and dry-run risk limits. Backend BRTI receipt age is the hard freshness gate for strategy use; upstream source age above `STRATEGY_REFERENCE_SOURCE_WARN_MS` is a warning until it exceeds `STRATEGY_REFERENCE_SOURCE_MAX_AGE_MS`. Too-few public trades are reported as a trade-confirmation warning instead of silently hiding the rest of the gate result. Observer mode still stops at `OBSERVE_ONLY_MARKET`; PR 9/9a never emits `ENTER_PAPER` or `ENTER_LIVE`.
+The evaluator checks safety, active market, boundary parsing, BRTI freshness, Kalshi book freshness, entry timing, boundary distance, spread/depth, raw desired-side ask eligibility, intended entry price, BRTI impulse, anti-chop, contract confirmation, recent public-trade confirmation, and dry-run risk limits. Raw desired-side asks are eligible only in the configured `$0.56` through `$0.78` range: an ask at `$0.78` remains eligible and its one-cent intended offset is clamped to `$0.78`; an ask above `$0.78` or below `$0.56` blocks. Every post-prerequisite decision stores `measurements.gate_trace` with actual values, thresholds, signed margins, and analysis-only results after an earlier canonical block. Backend BRTI receipt age is the hard freshness gate for strategy use; upstream source age above `STRATEGY_REFERENCE_SOURCE_WARN_MS` is a warning until it exceeds `STRATEGY_REFERENCE_SOURCE_MAX_AGE_MS`. Too-few public trades are reported as a trade-confirmation warning instead of silently hiding the rest of the gate result. Observer mode still stops at `OBSERVE_ONLY_MARKET`; PR 9/9a never emits `ENTER_PAPER` or `ENTER_LIVE`.
+
+When the challenger is enabled, append `strategy_id=btc15_momentum_v1` or `strategy_id=btc15_momentum_v1_fast` to decision, gate, and dry-run read endpoints to inspect one ledger. Omit the parameter to preserve the existing route behavior. `/strategy/status` remains control-oriented and exposes worker-owned per-variant metadata under `variants`; `/strategy/variants/comparison` returns bounded aggregate counts and the latest persisted threshold snapshot without scanning an unbounded history.
 
 ## Storage Retention
 

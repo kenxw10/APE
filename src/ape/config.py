@@ -98,6 +98,7 @@ class AppConfig:
     strategy_observer_poll_seconds: float = 1.0
     strategy_observer_decision_ttl_seconds: float = 5.0
     strategy_dry_run_enabled: bool = False
+    strategy_challenger_enabled: bool = False
     strategy_id: str = "btc15_momentum_v1"
     strategy_dry_run_max_open_positions: int = 1
     strategy_dry_run_one_entry_per_market: bool = True
@@ -412,6 +413,10 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         strategy_dry_run_enabled=_parse_bool(
             "STRATEGY_DRY_RUN_ENABLED",
             _get(source, "STRATEGY_DRY_RUN_ENABLED", "false"),
+        ),
+        strategy_challenger_enabled=_parse_bool(
+            "STRATEGY_CHALLENGER_ENABLED",
+            _get(source, "STRATEGY_CHALLENGER_ENABLED", "false"),
         ),
         strategy_id=_parse_required_text(
             "STRATEGY_ID",

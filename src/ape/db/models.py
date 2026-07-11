@@ -244,10 +244,12 @@ class StrategyDecision(Base):
     __table_args__ = (
         UniqueConstraint("decision_id", name="uq_strategy_decisions_decision_id"),
         Index("ix_strategy_decisions_state_evaluated", "decision_state", "evaluated_at"),
+        Index("ix_strategy_decisions_strategy_id_evaluated", "strategy_id", "evaluated_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     decision_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     market_ticker: Mapped[str | None] = mapped_column(String(128), index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -42,7 +42,7 @@ def test_schema_can_be_created_in_local_sqlite_database(tmp_path) -> None:
                 select(SchemaMigration).where(SchemaMigration.version == CURRENT_SCHEMA_VERSION)
             )
             assert migration is not None
-            assert session.scalar(select(func.count()).select_from(SchemaMigration)) == 6
+            assert session.scalar(select(func.count()).select_from(SchemaMigration)) == 7
 
         orderbook_columns = {
             column["name"] for column in inspector.get_columns("orderbook_snapshots")
@@ -59,6 +59,14 @@ def test_schema_can_be_created_in_local_sqlite_database(tmp_path) -> None:
         }
         assert "trade_count" in trade_columns
         assert "strategy_id" in event_columns
+        decision_columns = {
+            column["name"] for column in inspector.get_columns("strategy_decisions")
+        }
+        decision_indexes = {
+            index["name"] for index in inspector.get_indexes("strategy_decisions")
+        }
+        assert "strategy_id" in decision_columns
+        assert "ix_strategy_decisions_strategy_id_evaluated" in decision_indexes
     finally:
         engine.dispose()
 
@@ -233,6 +241,61 @@ def test_migration_adds_strategy_id_to_existing_dry_run_events(tmp_path) -> None
                     SELECT strategy_id
                     FROM strategy_dry_run_events
                     WHERE event_id = 'dryrun-event-1'
+                    """
+                )
+            ).one()
+
+        assert row.strategy_id == "btc15_momentum_v1"
+    finally:
+        engine.dispose()
+
+
+def test_migration_backfills_strategy_id_on_existing_decisions(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_schema_decisions.sqlite'}"
+    engine = create_engine_from_config(load_config({"DATABASE_URL": database_url}))
+
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE strategy_decisions (
+                        id INTEGER PRIMARY KEY,
+                        decision_id VARCHAR(128) NOT NULL,
+                        evaluated_at DATETIME NOT NULL
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO strategy_decisions (id, decision_id, evaluated_at)
+                    VALUES (1, 'strategy-legacy-1', CURRENT_TIMESTAMP)
+                    """
+                )
+            )
+
+        run_migrations(engine)
+        run_migrations(engine)
+
+        inspector = inspect(engine)
+        columns = {
+            column["name"] for column in inspector.get_columns("strategy_decisions")
+        }
+        indexes = {
+            index["name"] for index in inspector.get_indexes("strategy_decisions")
+        }
+        assert "strategy_id" in columns
+        assert "ix_strategy_decisions_strategy_id_evaluated" in indexes
+
+        with engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    SELECT strategy_id
+                    FROM strategy_decisions
+                    WHERE decision_id = 'strategy-legacy-1'
                     """
                 )
             ).one()

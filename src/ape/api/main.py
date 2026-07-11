@@ -58,6 +58,7 @@ from ape.models.strategy import (
     StrategyGateSummaryResponse,
     StrategyRecentDecisionsResponse,
     StrategyStatusResponse,
+    StrategyVariantsComparisonResponse,
     strategy_decision_response,
     strategy_dry_run_events_response,
     strategy_dry_run_positions_response,
@@ -65,6 +66,7 @@ from ape.models.strategy import (
     strategy_gate_summary_response,
     strategy_recent_decisions_response,
     strategy_status_response,
+    strategy_variants_comparison_response,
 )
 from ape.safety import SafetyAssessment, assert_startup_safe, assess_startup_safety
 from ape.storage.retention import build_storage_status
@@ -77,6 +79,7 @@ from ape.strategy.observer import (
     build_recent_strategy_gate_summary,
     build_strategy_dry_run_status,
     build_strategy_status,
+    build_strategy_variants_comparison,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -184,36 +187,70 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return strategy_status_response(build_strategy_status(settings))
 
     @app.get("/strategy/decisions/latest", response_model=StrategyDecisionResponse)
-    def strategy_decision_latest() -> StrategyDecisionResponse:
-        return strategy_decision_response(build_latest_strategy_decision(settings))
+    def strategy_decision_latest(
+        strategy_id: str | None = None,
+    ) -> StrategyDecisionResponse:
+        return strategy_decision_response(
+            build_latest_strategy_decision(settings, strategy_id=strategy_id)
+        )
 
     @app.get("/strategy/decisions/recent", response_model=StrategyRecentDecisionsResponse)
     def strategy_decisions_recent(
         limit: int = Query(default=100, ge=1, le=500),
+        strategy_id: str | None = None,
     ) -> StrategyRecentDecisionsResponse:
         return strategy_recent_decisions_response(
-            build_recent_strategy_decisions(settings, limit=limit)
+            build_recent_strategy_decisions(
+                settings,
+                limit=limit,
+                strategy_id=strategy_id,
+            )
         )
 
     @app.get("/strategy/gates/recent", response_model=StrategyGateSummaryResponse)
     def strategy_gates_recent(
         limit: int = Query(default=100, ge=1, le=500),
+        strategy_id: str | None = None,
     ) -> StrategyGateSummaryResponse:
         return strategy_gate_summary_response(
-            build_recent_strategy_gate_summary(settings, limit=limit)
+            build_recent_strategy_gate_summary(
+                settings,
+                limit=limit,
+                strategy_id=strategy_id,
+            )
         )
 
     @app.get("/strategy/dry-run/status", response_model=StrategyDryRunStatusResponse)
-    def strategy_dry_run_status() -> StrategyDryRunStatusResponse:
-        return strategy_dry_run_status_response(build_strategy_dry_run_status(settings))
+    def strategy_dry_run_status(
+        strategy_id: str | None = None,
+    ) -> StrategyDryRunStatusResponse:
+        return strategy_dry_run_status_response(
+            build_strategy_dry_run_status(settings, strategy_id=strategy_id)
+        )
+
+    @app.get(
+        "/strategy/variants/comparison",
+        response_model=StrategyVariantsComparisonResponse,
+    )
+    def strategy_variants_comparison(
+        window_seconds: int = Query(default=3600, ge=1, le=604800),
+    ) -> StrategyVariantsComparisonResponse:
+        return strategy_variants_comparison_response(
+            build_strategy_variants_comparison(
+                settings,
+                window_seconds=window_seconds,
+            )
+        )
 
     @app.get(
         "/strategy/dry-run/positions/open",
         response_model=StrategyDryRunPositionsResponse,
     )
-    def strategy_dry_run_positions_open() -> StrategyDryRunPositionsResponse:
+    def strategy_dry_run_positions_open(
+        strategy_id: str | None = None,
+    ) -> StrategyDryRunPositionsResponse:
         return strategy_dry_run_positions_response(
-            build_open_strategy_dry_run_positions(settings)
+            build_open_strategy_dry_run_positions(settings, strategy_id=strategy_id)
         )
 
     @app.get(
@@ -222,9 +259,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     )
     def strategy_dry_run_positions_recent(
         limit: int = Query(default=100, ge=1, le=500),
+        strategy_id: str | None = None,
     ) -> StrategyDryRunPositionsResponse:
         return strategy_dry_run_positions_response(
-            build_recent_strategy_dry_run_positions(settings, limit=limit)
+            build_recent_strategy_dry_run_positions(
+                settings,
+                limit=limit,
+                strategy_id=strategy_id,
+            )
         )
 
     @app.get(
@@ -233,9 +275,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     )
     def strategy_dry_run_events_recent(
         limit: int = Query(default=100, ge=1, le=500),
+        strategy_id: str | None = None,
     ) -> StrategyDryRunEventsResponse:
         return strategy_dry_run_events_response(
-            build_recent_strategy_dry_run_events(settings, limit=limit)
+            build_recent_strategy_dry_run_events(
+                settings,
+                limit=limit,
+                strategy_id=strategy_id,
+            )
         )
 
     @app.get("/storage/status", response_model=StorageStatusResponse)

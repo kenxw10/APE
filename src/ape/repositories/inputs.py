@@ -140,6 +140,7 @@ class StrategyDecisionInput:
     decision_state: str
     primary_reason: str
     app_mode: str
+    strategy_id: str = "btc15_momentum_v1"
     market_ticker: str | None = None
     candidate_side: str | None = None
     boundary: Decimal | None = None

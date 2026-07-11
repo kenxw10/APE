@@ -47,6 +47,8 @@ After PR 8a merges, storage retention is still disabled by default. Enable it on
 
 After PR 9 merges, dry-run remains disabled by default. Enable it only on the Railway worker service with `APP_MODE=DRY_RUN`, `STRATEGY_OBSERVER_ENABLED=true`, `STRATEGY_DRY_RUN_ENABLED=true`, `TRADING_ENABLED=false`, and `EXECUTE=false` after market WebSocket, BRTI, strategy observer, and storage retention are healthy. Dry-run writes hypothetical simulated positions/events only; it does not place orders, paper trade, live trade, read balances, or use private/user channels.
 
+After PR 9i merges, enable the fast challenger only by adding `STRATEGY_CHALLENGER_ENABLED=true` to `ape-strategy-worker`. Do not add it to the API, market worker, reference worker, maintenance worker, Railway Postgres, or Vercel. The control remains `btc15_momentum_v1`; the challenger is `btc15_momentum_v1_fast` and writes only separate hypothetical dry-run ledger rows.
+
 After PR 9f merges, production workers are split by role. The role is selected
 with `--role` or `APE_WORKER_ROLE`; the CLI flag wins when both are set. A
 role-specific worker only starts loops for that role, even if unrelated env
@@ -309,6 +311,7 @@ APP_MODE=DRY_RUN
 STRATEGY_OBSERVER_ENABLED=true
 STRATEGY_DRY_RUN_ENABLED=true
 STRATEGY_ID=btc15_momentum_v1
+STRATEGY_CHALLENGER_ENABLED=false
 TRADING_ENABLED=false
 EXECUTE=false
 APE_WORKER_ROLE=strategy
@@ -606,6 +609,7 @@ Only after PR 9a is merged and market WebSocket, BRTI, strategy observer, and st
 APP_MODE=DRY_RUN
 STRATEGY_OBSERVER_ENABLED=true
 STRATEGY_DRY_RUN_ENABLED=true
+STRATEGY_CHALLENGER_ENABLED=false
 TRADING_ENABLED=false
 EXECUTE=false
 STRATEGY_ID=btc15_momentum_v1
@@ -662,6 +666,7 @@ Invoke-RestMethod "https://ape-api-production.up.railway.app/strategy/dry-run/ev
 Invoke-RestMethod https://ape-api-production.up.railway.app/strategy/status
 Invoke-RestMethod https://ape-api-production.up.railway.app/strategy/decisions/latest
 Invoke-RestMethod "https://ape-api-production.up.railway.app/strategy/decisions/recent?limit=100"
+Invoke-RestMethod "https://ape-api-production.up.railway.app/strategy/variants/comparison?window_seconds=3600"
 Invoke-RestMethod "https://ape-api-production.up.railway.app/strategy/gates/recent?limit=100"
 Invoke-RestMethod https://ape-api-production.up.railway.app/storage/status
 Invoke-RestMethod https://ape-api-production.up.railway.app/ws/status

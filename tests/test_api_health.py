@@ -11,10 +11,16 @@ from ape.api.main import create_app
 from ape.config import load_config
 from ape.db.migrations import run_migrations
 from ape.db.session import create_engine_from_config, create_session_factory
-from ape.repositories.inputs import OrderbookSnapshotInput, PublicTradeInput, WorkerHeartbeatInput
+from ape.repositories.inputs import (
+    OrderbookSnapshotInput,
+    PublicTradeInput,
+    StrategyDecisionInput,
+    WorkerHeartbeatInput,
+)
 from ape.repositories.markets import MarketsRepository
 from ape.repositories.orderbook import OrderbookRepository
 from ape.repositories.public_trades import PublicTradesRepository
+from ape.repositories.strategy_decisions import StrategyDecisionsRepository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 
 
@@ -109,6 +115,69 @@ def test_readiness_is_ready_with_configured_database(tmp_path) -> None:
     assert body["safety"]["is_safe"] is True
     assert body["database"]["status"] == "ok"
     assert body["database"]["configured"] is True
+
+
+def test_strategy_routes_filter_variants_and_return_bounded_comparison(tmp_path) -> None:
+    now = datetime.now(UTC)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_strategy_variants.sqlite'}"
+    config = load_config({"DATABASE_URL": database_url})
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        with session_factory() as session:
+            decisions = StrategyDecisionsRepository(session)
+            for strategy_id in ("btc15_momentum_v1", "btc15_momentum_v1_fast"):
+                decisions.insert_decision(
+                    StrategyDecisionInput(
+                        decision_id=f"strategy-{strategy_id}",
+                        strategy_id=strategy_id,
+                        evaluated_at=now,
+                        decision_state="OBSERVE_ONLY_MARKET",
+                        primary_reason="observer_decision_ledger_only",
+                        app_mode="OBSERVER",
+                        market_ticker="KXBTC15M-TEST",
+                        measurements={"config": {"strategy_id": strategy_id}},
+                    )
+                )
+            WorkerHeartbeatRepository(session).record_heartbeat(
+                WorkerHeartbeatInput(
+                    service_name="ape-worker.strategy",
+                    started_at=now - timedelta(minutes=1),
+                    heartbeat_at=now,
+                    app_mode="DRY_RUN",
+                    is_safe=True,
+                    metadata={
+                        "strategy": {
+                            "observer": {"enabled": True, "connection_state": "running"},
+                            "variants": {
+                                "btc15_momentum_v1": {"enabled": True},
+                                "btc15_momentum_v1_fast": {"enabled": True},
+                            },
+                        }
+                    },
+                )
+            )
+            session.commit()
+
+        app = create_app(config)
+        with TestClient(app) as client:
+            filtered = client.get(
+                "/strategy/decisions/recent?strategy_id=btc15_momentum_v1_fast"
+            )
+            comparison = client.get("/strategy/variants/comparison?window_seconds=60")
+            status = client.get("/strategy/status")
+
+        assert filtered.status_code == 200
+        assert filtered.json()["count"] == 1
+        assert filtered.json()["decisions"][0]["strategy_id"] == "btc15_momentum_v1_fast"
+        assert comparison.status_code == 200
+        assert comparison.json()["variants"]["btc15_momentum_v1"]["total_decisions"] == 1
+        assert comparison.json()["challenger_enabled"] is True
+        assert status.status_code == 200
+        assert "btc15_momentum_v1_fast" in status.json()["variants"]
+    finally:
+        engine.dispose()
 
 
 def test_readiness_is_blocked_when_safety_is_unsafe() -> None:
