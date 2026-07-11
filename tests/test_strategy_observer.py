@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -545,6 +546,60 @@ def test_variants_receive_one_shared_context_per_iteration(session, monkeypatch)
     ]
 
 
+def test_shared_context_trims_orderbook_history_to_variant_lookback(session, monkeypatch) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config({})
+    safety = assess_startup_safety(config)
+    _seed_observable_context(session, now=now)
+    old_snapshot = OrderbookRepository(session).insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker="KXBTC15M-ACTIVE",
+            received_at=now - timedelta(seconds=90),
+            sequence_number=121,
+            yes_bid=Decimal("0.50"),
+            yes_ask=Decimal("0.52"),
+            no_bid=Decimal("0.48"),
+            no_ask=Decimal("0.50"),
+            yes_bid_count=Decimal("3"),
+            yes_ask_count=Decimal("3"),
+            no_bid_count=Decimal("3"),
+            no_ask_count=Decimal("3"),
+            book_status="ok",
+        )
+    )
+    shared_context = observer_module.load_strategy_evaluation_context(
+        config=config,
+        session=session,
+        evaluated_at=now,
+        reference_lookback_seconds=config.strategy_brti_lookback_long_seconds,
+    )
+    captured: dict[str, object] = {}
+    original_metrics = observer_module._contract_confirmation_metrics
+
+    def capture_metrics(**kwargs):
+        captured["orderbook_history"] = kwargs["orderbook_history"]
+        return original_metrics(**kwargs)
+
+    monkeypatch.setattr(observer_module, "_contract_confirmation_metrics", capture_metrics)
+
+    evaluate_strategy_observer(
+        config=config,
+        safety=safety,
+        session=session,
+        now=now,
+        shared_context=shared_context,
+    )
+
+    orderbook_history = captured["orderbook_history"]
+    assert isinstance(orderbook_history, list)
+    assert old_snapshot.id not in {snapshot.id for snapshot in orderbook_history}
+    assert all(
+        observer_module._as_utc(snapshot.received_at)
+        >= now - timedelta(seconds=config.strategy_contract_lookback_seconds)
+        for snapshot in orderbook_history
+    )
+
+
 def test_v2_causal_exit_fill_closes_once_and_persists_outcome(session) -> None:
     now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
     market_ticker = "KXBTC15M-V2-EXIT"
@@ -641,16 +696,26 @@ def test_v2_causal_exit_fill_closes_once_and_persists_outcome(session) -> None:
             book_status="ok",
         )
     )
-    event_type, position_id = observer_module._resolve_v2_pending_exit(
-        session=session,
-        intents=intents,
-        positions=positions,
-        pending=exit_intent,
-        resolved_at=now + timedelta(seconds=2),
-        decision=decision,
+    OrderbookRepository(session).insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker=market_ticker,
+            received_at=now + timedelta(milliseconds=1500),
+            yes_bid=Decimal("0.90"),
+            yes_ask=Decimal("0.91"),
+            yes_bid_count=Decimal("1"),
+            yes_ask_count=Decimal("1"),
+            no_bid=Decimal("0.09"),
+            no_ask=Decimal("0.10"),
+            no_bid_count=Decimal("1"),
+            no_ask_count=Decimal("1"),
+            book_status="ok",
+        )
     )
-    assert event_type == "V2_EXIT_FILLED"
-    assert position_id == "v2-open-exit"
+    observer_module._apply_v2_hypothetical_lifecycle(
+        config=load_config({}),
+        session=session,
+        decision=replace(decision, evaluated_at=now + timedelta(milliseconds=1500)),
+    )
 
     position = positions.get_position_by_id("v2-open-exit")
     assert position is not None
@@ -671,6 +736,7 @@ def test_v2_causal_exit_fill_closes_once_and_persists_outcome(session) -> None:
     assert len(outcomes) == 1
     assert outcomes[0].exit_intent_id == exit_intent.intent_id
     assert outcomes[0].mfe_cents == Decimal("12")
+    assert outcomes[0].time_to_mfe_ms == 11000
 
 
 def test_v2_intent_uses_recorded_timing_parameters(session, monkeypatch) -> None:

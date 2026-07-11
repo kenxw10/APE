@@ -1314,7 +1314,12 @@ def evaluate_strategy_observer(
         )
     )
     orderbook_history = (
-        list(shared_context.orderbook_history)
+        [
+            snapshot
+            for snapshot in shared_context.orderbook_history
+            if snapshot.received_at is not None
+            and _as_utc(snapshot.received_at) >= _as_utc(orderbook_since)
+        ]
         if shared_context is not None
         and market.market_ticker == getattr(shared_context.market, "market_ticker", None)
         else OrderbookRepository(session).get_snapshots_since(
@@ -5077,7 +5082,13 @@ def _persist_v2_outcome(
     ):
         return
     marks = intents.list_marks_for_position(position_id=position.position_id)
-    marks = [mark for mark in marks if mark.executable_bid is not None]
+    exit_at = exit_intent.fill_timestamp or position.closed_at
+    marks = [
+        mark
+        for mark in marks
+        if mark.executable_bid is not None
+        and _as_utc(position.opened_at) <= _as_utc(mark.marked_at) <= _as_utc(exit_at)
+    ]
     entry = Decimal(position.open_price)
     quantity = Decimal(position.contract_count)
     excursions = [
@@ -5087,7 +5098,7 @@ def _persist_v2_outcome(
     excursions.append(
         (
             (Decimal(position.close_price) - entry) * Decimal("100") * quantity,
-            exit_intent.fill_timestamp or position.closed_at,
+            exit_at,
         )
     )
     mfe, mfe_at = max(excursions, key=lambda item: item[0])
