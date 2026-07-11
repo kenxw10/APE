@@ -793,6 +793,7 @@ def test_v2_causal_exit_fill_closes_once_and_persists_outcome(session) -> None:
     assert len(outcomes) == 1
     assert outcomes[0].exit_intent_id == exit_intent.intent_id
     assert outcomes[0].mfe_cents == Decimal("12")
+    assert outcomes[0].mae_cents == Decimal("0")
     assert outcomes[0].time_to_mfe_ms == 11000
 
 

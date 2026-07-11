@@ -5118,10 +5118,11 @@ def _persist_v2_outcome(
     ]
     entry = Decimal(position.open_price)
     quantity = Decimal(position.contract_count)
-    excursions = [
+    excursions = [(Decimal("0"), position.opened_at)]
+    excursions.extend(
         ((Decimal(mark.executable_bid) - entry) * Decimal("100") * quantity, mark.marked_at)
         for mark in marks
-    ]
+    )
     excursions.append(
         (
             (Decimal(position.close_price) - entry) * Decimal("100") * quantity,
