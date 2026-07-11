@@ -1731,6 +1731,7 @@ def build_recent_strategy_decisions(
     strategy_id: str | None = None,
     now: datetime | None = None,
 ) -> StrategyRecentDecisionsSnapshot:
+    effective_strategy_id = strategy_id or CONTROL_STRATEGY_ID
     capped_limit = min(max(limit, 1), 500)
     checked_at = _as_utc(now or datetime.now(UTC))
     if not config.database_url:
@@ -1748,7 +1749,7 @@ def build_recent_strategy_decisions(
             with session_factory() as session:
                 rows = StrategyDecisionsRepository(session).list_recent_decisions(
                     limit=capped_limit,
-                    strategy_id=strategy_id,
+                    strategy_id=effective_strategy_id,
                 )
         finally:
             engine.dispose()
