@@ -4599,6 +4599,12 @@ def _apply_v2_hypothetical_lifecycle(
         intended_price = _decimal_or_none((decision.measurements or {}).get("intended_entry_price"))
         if intended_price is not None:
             intent_id = f"v2-intent-{_stable_hash({'decision': decision.decision_id})[:24]}"
+            effective_after = now + timedelta(
+                milliseconds=int(V2_PARAMETERS["decision_to_book_latency_ms"])
+            )
+            expires_at = effective_after + timedelta(
+                seconds=int(V2_PARAMETERS["intent_expiry_seconds"])
+            )
             intents.insert_intent_if_absent(
                 StrategyTradeIntentInput(
                     intent_id=intent_id,
@@ -4608,8 +4614,8 @@ def _apply_v2_hypothetical_lifecycle(
                     side_candidate=decision.candidate_side,
                     action="ENTRY",
                     created_at=now,
-                    effective_after=now + timedelta(milliseconds=500),
-                    expires_at=now + timedelta(milliseconds=2500),
+                    effective_after=effective_after,
+                    expires_at=expires_at,
                     intended_limit_price=intended_price,
                     quantity=Decimal("1"),
                     strategy_config_version_id=decision.strategy_config_version_id,
