@@ -163,7 +163,7 @@ def evaluate_momentum_v2(
         hard_gates.append("v2_timing_tier_unavailable")
     if features["distance_bps"] is None or features["distance_bps"] < Decimal("1.5"):
         hard_gates.append("v2_boundary_distance_below_1_5_bps")
-    if not features["fast_impulse_active"]:
+    if mode == "CONTINUATION" and not features["fast_impulse_active"]:
         hard_gates.append("v2_fast_impulse_not_active")
     if (
         features["reversal_beyond_origin"]
