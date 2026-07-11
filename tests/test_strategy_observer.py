@@ -606,7 +606,22 @@ def test_v2_causal_exit_fill_closes_once_and_persists_outcome(session) -> None:
     assert exit_intent.action == "EXIT"
     assert exit_intent.status == "PENDING"
 
-    OrderbookRepository(session).insert_snapshot(
+    first_future_book = OrderbookRepository(session).insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker=market_ticker,
+            received_at=now + timedelta(milliseconds=750),
+            yes_bid=Decimal("0.72"),
+            yes_ask=Decimal("0.73"),
+            yes_bid_count=Decimal("1"),
+            yes_ask_count=Decimal("1"),
+            no_bid=Decimal("0.27"),
+            no_ask=Decimal("0.28"),
+            no_bid_count=Decimal("1"),
+            no_ask_count=Decimal("1"),
+            book_status="ok",
+        )
+    )
+    second_future_book = OrderbookRepository(session).insert_snapshot(
         OrderbookSnapshotInput(
             market_ticker=market_ticker,
             received_at=now + timedelta(seconds=1),
@@ -632,6 +647,16 @@ def test_v2_causal_exit_fill_closes_once_and_persists_outcome(session) -> None:
     assert position.status == "CLOSED"
     assert position.close_price == Decimal("0.74")
     assert position.realized_pnl_cents == Decimal("11")
+    resolved_exit_intent = next(
+        intent
+        for intent in intents.list_recent_intents(
+            strategy_id=V2_STRATEGY_ID,
+            limit=10,
+        )
+        if intent.intent_id == exit_intent.intent_id
+    )
+    assert resolved_exit_intent.fill_snapshot_id == second_future_book.id
+    assert resolved_exit_intent.fill_snapshot_id != first_future_book.id
     outcomes = intents.list_recent_outcomes(strategy_id=V2_STRATEGY_ID, limit=10)
     assert len(outcomes) == 1
     assert outcomes[0].exit_intent_id == exit_intent.intent_id

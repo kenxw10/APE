@@ -4677,78 +4677,87 @@ def _resolve_v2_pending_exit(
         start=pending.effective_after,
         end=pending.expires_at,
     )
-    future_book = future_books[0] if future_books else None
-    if future_book is not None:
-        bid, _, _ = _desired_book(future_book, position.side_candidate)
-        bid_depth = _desired_exit_book_size(future_book, position.side_candidate)
+    future_book: OrderbookSnapshot | None = None
+    fill_bid: Decimal | None = None
+    for candidate_book in future_books:
+        candidate_bid, _, _ = _desired_book(candidate_book, position.side_candidate)
+        candidate_bid_depth = _desired_exit_book_size(
+            candidate_book,
+            position.side_candidate,
+        )
         if (
-            bid is not None
-            and bid_depth is not None
-            and bid >= Decimal(pending.intended_limit_price)
-            and bid_depth >= Decimal(pending.quantity)
+            candidate_bid is not None
+            and candidate_bid_depth is not None
+            and candidate_bid >= Decimal(pending.intended_limit_price)
+            and candidate_bid_depth >= Decimal(pending.quantity)
         ):
-            fill_time = future_book.received_at
-            intents.resolve_intent(
-                pending,
-                status="FILLED",
-                resolved_at=resolved_at,
-                reason="v2_exit_future_book_fill",
-                position_id=position.position_id,
-                fill_snapshot_id=future_book.id,
-                fill_price=bid,
-                fill_size=Decimal(pending.quantity),
-                fill_timestamp=future_book.received_at,
+            future_book = candidate_book
+            fill_bid = candidate_bid
+            break
+    if future_book is not None and fill_bid is not None:
+        bid = fill_bid
+        fill_time = future_book.received_at
+        intents.resolve_intent(
+            pending,
+            status="FILLED",
+            resolved_at=resolved_at,
+            reason="v2_exit_future_book_fill",
+            position_id=position.position_id,
+            fill_snapshot_id=future_book.id,
+            fill_price=bid,
+            fill_size=Decimal(pending.quantity),
+            fill_timestamp=future_book.received_at,
+        )
+        realized = (
+            (bid - Decimal(position.open_price))
+            * Decimal("100")
+            * Decimal(position.contract_count)
+        )
+        positions.link_exit_intent(
+            position_id=position.position_id, exit_intent_id=pending.intent_id
+        )
+        closed = positions.close_position(
+            position_id=position.position_id,
+            closed_at=fill_time,
+            close_price=bid,
+            close_reason=pending.trigger or pending.resolution_reason or "v2_exit_fill",
+            status="FORCE_CLOSED" if pending.trigger_classification == "FORCE" else "CLOSED",
+            realized_pnl_cents=realized,
+            measurements={
+                **(position.measurements if isinstance(position.measurements, dict) else {}),
+                "exit_intent_id": pending.intent_id,
+                "exit_fill_snapshot_id": future_book.id,
+            },
+        )
+        if closed is not None:
+            _persist_v2_outcome(
+                intents=intents,
+                position=closed,
+                exit_intent=pending,
+                exit_decision=decision,
             )
-            realized = (
-                (bid - Decimal(position.open_price))
-                * Decimal("100")
-                * Decimal(position.contract_count)
-            )
-            positions.link_exit_intent(
-                position_id=position.position_id, exit_intent_id=pending.intent_id
-            )
-            closed = positions.close_position(
-                position_id=position.position_id,
-                closed_at=fill_time,
-                close_price=bid,
-                close_reason=pending.trigger or pending.resolution_reason or "v2_exit_fill",
-                status="FORCE_CLOSED" if pending.trigger_classification == "FORCE" else "CLOSED",
-                realized_pnl_cents=realized,
-                measurements={
-                    **(position.measurements if isinstance(position.measurements, dict) else {}),
-                    "exit_intent_id": pending.intent_id,
-                    "exit_fill_snapshot_id": future_book.id,
-                },
-            )
-            if closed is not None:
-                _persist_v2_outcome(
-                    intents=intents,
-                    position=closed,
-                    exit_intent=pending,
-                    exit_decision=decision,
+            exit_event_key = _stable_hash({"intent": pending.intent_id, "event": "exit-fill"})[
+                :24
+            ]
+            positions.insert_event_if_absent(
+                StrategyDryRunEventInput(
+                    event_id=f"v2-event-{exit_event_key}",
+                    event_type="V2_EXIT_FILLED",
+                    occurred_at=fill_time,
+                    strategy_id=V2_STRATEGY_ID,
+                    position_id=position.position_id,
+                    decision_id=pending.decision_id,
+                    market_ticker=pending.market_ticker,
+                    side_candidate=position.side_candidate,
+                    price=bid,
+                    contract_count=position.contract_count,
+                    reason=pending.trigger,
+                    feature_snapshot_id=pending.feature_snapshot_id,
+                    strategy_config_version_id=pending.strategy_config_version_id,
+                    code_commit_sha=pending.code_commit_sha,
                 )
-                exit_event_key = _stable_hash({"intent": pending.intent_id, "event": "exit-fill"})[
-                    :24
-                ]
-                positions.insert_event_if_absent(
-                    StrategyDryRunEventInput(
-                        event_id=f"v2-event-{exit_event_key}",
-                        event_type="V2_EXIT_FILLED",
-                        occurred_at=fill_time,
-                        strategy_id=V2_STRATEGY_ID,
-                        position_id=position.position_id,
-                        decision_id=pending.decision_id,
-                        market_ticker=pending.market_ticker,
-                        side_candidate=position.side_candidate,
-                        price=bid,
-                        contract_count=position.contract_count,
-                        reason=pending.trigger,
-                        feature_snapshot_id=pending.feature_snapshot_id,
-                        strategy_config_version_id=pending.strategy_config_version_id,
-                        code_commit_sha=pending.code_commit_sha,
-                    )
-                )
-            return "V2_EXIT_FILLED", position.position_id
+            )
+        return "V2_EXIT_FILLED", position.position_id
     if _as_utc(resolved_at) > _as_utc(pending.expires_at):
         intents.resolve_intent(
             pending,

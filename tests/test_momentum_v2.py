@@ -10,6 +10,14 @@ from ape.strategy import momentum_v2
 from ape.strategy.context import StrategyEvaluationContext
 
 
+def test_v2_json_safe_serializes_boundary_cross_timestamp() -> None:
+    crossed_at = datetime(2026, 7, 11, 12, 10, tzinfo=UTC)
+
+    assert momentum_v2._json_safe({"last_boundary_cross_at": crossed_at}) == {
+        "last_boundary_cross_at": "2026-07-11T12:10:00+00:00"
+    }
+
+
 def test_low_edge_uses_dedicated_v2_edge_state(monkeypatch) -> None:
     evaluated_at = datetime(2026, 7, 11, 12, 10, tzinfo=UTC)
     context = StrategyEvaluationContext(
