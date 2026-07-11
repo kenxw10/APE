@@ -159,6 +159,7 @@ class StrategyV2Repository:
         status: str,
         resolved_at: datetime,
         reason: str,
+        position_id: str | None = None,
         fill_snapshot_id: int | None = None,
         fill_price: Decimal | None = None,
         fill_size: Decimal | None = None,
@@ -168,6 +169,7 @@ class StrategyV2Repository:
         intent.status = status
         intent.resolved_at = resolved_at
         intent.resolution_reason = reason
+        intent.position_id = position_id
         intent.fill_snapshot_id = fill_snapshot_id
         intent.simulated_fill_price = fill_price
         intent.simulated_fill_size = fill_size

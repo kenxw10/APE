@@ -4439,18 +4439,7 @@ def _resolve_v2_pending_intent(
         start=pending.effective_after,
         end=pending.expires_at,
     )
-    future_book: OrderbookSnapshot | None = None
-    for candidate_book in future_books:
-        _, candidate_ask, _ = _desired_book(candidate_book, pending.side_candidate)
-        candidate_ask_depth = _desired_top_book_size(candidate_book, pending.side_candidate)
-        if (
-            candidate_ask is not None
-            and candidate_ask_depth is not None
-            and candidate_ask <= Decimal(pending.intended_limit_price)
-            and candidate_ask_depth >= Decimal(pending.quantity)
-        ):
-            future_book = candidate_book
-            break
+    future_book = future_books[0] if future_books else None
 
     if future_book is not None:
         _, ask, _ = _desired_book(future_book, pending.side_candidate)
@@ -4461,17 +4450,18 @@ def _resolve_v2_pending_intent(
             and ask <= Decimal(pending.intended_limit_price)
             and ask_depth >= Decimal(pending.quantity)
         ):
+            position_id = f"v2-pos-{_stable_hash({'intent': pending.intent_id})[:24]}"
             intents.resolve_intent(
                 pending,
                 status="FILLED",
                 resolved_at=resolved_at,
                 reason="v2_entry_future_book_fill",
+                position_id=position_id,
                 fill_snapshot_id=future_book.id,
                 fill_price=ask,
                 fill_size=Decimal(pending.quantity),
             )
             fill_time = future_book.received_at
-            position_id = f"v2-pos-{_stable_hash({'intent': pending.intent_id})[:24]}"
             position = positions.insert_position_if_absent(
                 StrategyDryRunPositionInput(
                     position_id=position_id,
