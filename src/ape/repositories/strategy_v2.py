@@ -130,6 +130,19 @@ class StrategyV2Repository:
             .limit(1)
         )
 
+    def has_pending_intents(self, *, strategy_id: str) -> bool:
+        return (
+            self.session.scalar(
+                select(StrategyTradeIntent.id)
+                .where(
+                    StrategyTradeIntent.strategy_id == strategy_id,
+                    StrategyTradeIntent.status == "PENDING",
+                )
+                .limit(1)
+            )
+            is not None
+        )
+
     def count_exit_attempts(self, *, position_id: str) -> int:
         return int(
             self.session.scalar(

@@ -55,6 +55,7 @@ from ape.safety import SafetyAssessment, assess_startup_safety
 from ape.strategy.context import StrategyEvaluationContext, load_strategy_evaluation_context
 from ape.strategy.momentum_v2 import (
     STATE_V2_ENTRY_SIGNAL,
+    STATE_V2_HARD_GATE_BLOCKED,
     V2_ARCHITECTURE_VERSION,
     V2_LIFECYCLE_SCHEMA_VERSION,
     V2_PARAMETERS,
@@ -441,6 +442,14 @@ class StrategyObserver:
                     pin_blocker=candidate_pin_blocker,
                     pin_resolved=True,
                 )
+                cleanup = _candidate_pin_cleanup_decision(
+                    config=self.config,
+                    session=session,
+                    decisions=decisions,
+                    pin_blocker=candidate_pin_blocker,
+                )
+                if cleanup is not None:
+                    decisions.append(cleanup)
                 repository = StrategyDecisionsRepository(session)
                 ledger_results: dict[str, DryRunLedgerResult] = {}
                 for variant_config, decision in decisions:
@@ -1780,6 +1789,68 @@ def evaluate_strategy_variants(
                 )
             )
     return results
+
+
+def _candidate_pin_cleanup_decision(
+    *,
+    config: AppConfig,
+    session: Session,
+    decisions: list[tuple[AppConfig, StrategyDecisionInput]],
+    pin_blocker: str | None,
+) -> tuple[AppConfig, StrategyDecisionInput] | None:
+    if pin_blocker is None or not config.strategy_v2_candidate_config_version_id:
+        return None
+    baseline = next(
+        (
+            (variant_config, decision)
+            for variant_config, decision in decisions
+            if decision.strategy_id == V2_STRATEGY_ID
+        ),
+        None,
+    )
+    if baseline is None:
+        return None
+    version = StrategyV2Repository(session).get_config_version(
+        config.strategy_v2_candidate_config_version_id
+    )
+    if (
+        version is None
+        or version.strategy_id == V2_STRATEGY_ID
+        or not _is_v2_strategy_id(version.strategy_id)
+    ):
+        return None
+    intents = StrategyV2Repository(session)
+    positions = StrategyDryRunRepository(session)
+    if not intents.has_pending_intents(
+        strategy_id=version.strategy_id
+    ) and not positions.count_open_positions(strategy_id=version.strategy_id):
+        return None
+    variant_config, decision = baseline
+    measurements = dict(decision.measurements or {})
+    measurements["candidate_pin_cleanup"] = True
+    measurements["candidate_pin_blocker"] = pin_blocker
+    return (
+        replace(variant_config, strategy_id=version.strategy_id),
+        replace(
+            decision,
+            decision_id=_decision_id(
+                evaluated_at=decision.evaluated_at,
+                poll_seconds=config.strategy_observer_poll_seconds,
+                strategy_id=version.strategy_id,
+                market_ticker=decision.market_ticker,
+                context_hash=decision.raw_context_hash or "candidate-pin-cleanup",
+            ),
+            decision_state=STATE_V2_HARD_GATE_BLOCKED,
+            primary_reason=pin_blocker,
+            strategy_id=version.strategy_id,
+            candidate_side=None,
+            strategy_config_version_id=version.strategy_config_version_id,
+            code_commit_sha=version.code_commit_sha,
+            measurements=measurements,
+            blockers=[pin_blocker],
+            warnings=[*(decision.warnings or []), pin_blocker],
+        ),
+    )
 
 
 def strategy_variant_configs(

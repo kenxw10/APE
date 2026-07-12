@@ -186,6 +186,155 @@ def test_strategy_observer_revalidates_candidate_pin_each_cycle(tmp_path, monkey
         engine.dispose()
 
 
+def test_pin_failure_runs_pending_candidate_intent_cleanup(tmp_path, monkeypatch) -> None:
+    now = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
+    candidate_strategy_id = "btc15_momentum_v2_candidate_revoked"
+    candidate_config_version_id = "candidate-config-revoked"
+    config = load_config(
+        {
+            "DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'candidate-pin-cleanup.sqlite'}",
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+            "STRATEGY_V2_ENABLED": "true",
+            "STRATEGY_V2_CANDIDATE_CONFIG_VERSION_ID": candidate_config_version_id,
+            "TRADING_ENABLED": "false",
+            "EXECUTE": "false",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    control_decision = StrategyDecisionInput(
+        decision_id="candidate-pin-cleanup-control",
+        evaluated_at=now,
+        decision_state=STATE_OBSERVE_ONLY_MARKET,
+        primary_reason="fixture",
+        app_mode="DRY_RUN",
+        strategy_id=CONTROL_STRATEGY_ID,
+    )
+    baseline_v2_decision = StrategyDecisionInput(
+        decision_id="candidate-pin-cleanup-v2",
+        evaluated_at=now,
+        decision_state=STATE_V2_HARD_GATE_BLOCKED,
+        primary_reason="fixture",
+        app_mode="DRY_RUN",
+        strategy_id=V2_STRATEGY_ID,
+        raw_context_hash="candidate-pin-cleanup",
+    )
+    try:
+        with session_factory() as session:
+            StrategyV2Repository(session).ensure_config_version(
+                replace(
+                    observer_module.built_in_config_version(
+                        candidate_strategy_id,
+                        V2_PARAMETERS,
+                    ),
+                    strategy_config_version_id=candidate_config_version_id,
+                    code_commit_sha="candidate-commit",
+                )
+            )
+            StrategyDecisionsRepository(session).insert_decision(
+                StrategyDecisionInput(
+                    decision_id="candidate-pin-original-entry",
+                    evaluated_at=now - timedelta(seconds=2),
+                    decision_state=STATE_V2_ENTRY_SIGNAL,
+                    primary_reason="v2_entry_signal",
+                    app_mode="DRY_RUN",
+                    strategy_id=candidate_strategy_id,
+                    market_ticker="KXBTC15M-PIN-CLEANUP",
+                    candidate_side="YES",
+                )
+            )
+            StrategyV2Repository(session).insert_intent_if_absent(
+                StrategyTradeIntentInput(
+                    intent_id="candidate-pin-pending-intent",
+                    strategy_id=candidate_strategy_id,
+                    strategy_config_version_id=candidate_config_version_id,
+                    decision_id="candidate-pin-original-entry",
+                    market_ticker="KXBTC15M-PIN-CLEANUP",
+                    side_candidate="YES",
+                    action="ENTRY",
+                    created_at=now - timedelta(seconds=3),
+                    effective_after=now - timedelta(seconds=2),
+                    expires_at=now - timedelta(seconds=1),
+                    intended_limit_price=Decimal("0.62"),
+                    quantity=Decimal("1"),
+                )
+            )
+            StrategyDryRunRepository(session).insert_position_if_absent(
+                StrategyDryRunPositionInput(
+                    position_id="candidate-pin-open-position",
+                    strategy_id=candidate_strategy_id,
+                    market_ticker="KXBTC15M-PIN-CLEANUP-OPEN",
+                    decision_id="candidate-pin-original-entry",
+                    side_candidate="YES",
+                    economic_side="YES",
+                    opened_at=now - timedelta(minutes=1),
+                    open_price=Decimal("0.62"),
+                    contract_count=1,
+                    entry_reason="fixture",
+                    status="OPEN",
+                    strategy_config_version_id=candidate_config_version_id,
+                )
+            )
+            OrderbookRepository(session).insert_snapshot(
+                OrderbookSnapshotInput(
+                    market_ticker="KXBTC15M-PIN-CLEANUP-OPEN",
+                    received_at=now - timedelta(seconds=1),
+                    yes_bid=Decimal("0.60"),
+                    yes_bid_count=Decimal("1"),
+                    yes_ask=Decimal("0.61"),
+                    yes_ask_count=Decimal("1"),
+                    book_status="ok",
+                )
+            )
+            session.commit()
+
+        monkeypatch.setattr(
+            observer_module,
+            "resolve_pinned_candidate",
+            lambda *_args: (None, "candidate_pin_not_dry_run_challenger"),
+        )
+        monkeypatch.setattr(
+            observer_module,
+            "evaluate_strategy_variants",
+            lambda **_kwargs: [
+                (config, control_decision),
+                (replace(config, strategy_id=V2_STRATEGY_ID), baseline_v2_decision),
+            ],
+        )
+        observer = StrategyObserver(
+            config=config,
+            safety=assess_startup_safety(config),
+            session_factory=session_factory,
+            started_at=now - timedelta(minutes=1),
+            now=lambda: now,
+        )
+        monkeypatch.setattr(observer, "record_heartbeat", lambda: None)
+
+        observer.evaluate_once()
+
+        with session_factory() as session:
+            intent = StrategyV2Repository(session).get_intent("candidate-pin-pending-intent")
+            exit_intent = StrategyV2Repository(session).get_pending_exit_intent(
+                position_id="candidate-pin-open-position"
+            )
+            cleanup = StrategyDecisionsRepository(session).get_latest_decision(
+                strategy_id=candidate_strategy_id
+            )
+
+        assert intent is not None
+        assert intent.status == "EXPIRED"
+        assert exit_intent is not None
+        assert cleanup is not None
+        assert cleanup.decision_state == STATE_V2_HARD_GATE_BLOCKED
+        assert cleanup.primary_reason == "candidate_pin_not_dry_run_challenger"
+        assert cleanup.measurements["candidate_pin_cleanup"] is True
+    finally:
+        engine.dispose()
+
+
 def test_v2_boundary_cross_decision_does_not_create_an_entry_intent(session) -> None:
     now = datetime(2026, 7, 11, 12, 10, tzinfo=UTC)
 
