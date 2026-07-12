@@ -53,6 +53,17 @@ After PR 10 merges, enable momentum v2 only by adding `STRATEGY_V2_ENABLED=true`
 
 After PR 10a, also validate `/strategy/dry-run/outcomes/recent` and the `action=ENTRY` / `action=EXIT` filters on `/strategy/dry-run/intents/recent`. These are read-only records for DRY_RUN V2 entry and exit simulations. No Railway service, environment variable, credential, live order, private channel, or execution setting is added.
 
+After PR 10b, `BOUNDARY_CROSS_HOLD` is research-only, EXIT attempts evaluate only the first persisted orderbook in their causal window, and `strategy_position_outcomes` is visible in `/storage/status` without becoming a retention target. V2 attribution is `momentum_v2_heuristic_v3` with `momentum_v2_lifecycle_v2`; `momentum_v2_features_v2` is unchanged. No migration, Railway service, or environment variable is added. Use this post-merge correction sequence:
+
+1. Keep STRATEGY_V2_ENABLED=false.
+2. Redeploy ape-api.
+3. Redeploy ape-maintenance-worker.
+4. Redeploy ape-strategy-worker.
+5. Run initial API/storage/safety preflight.
+6. Set STRATEGY_V2_ENABLED=true only on ape-strategy-worker.
+7. Redeploy ape-strategy-worker.
+8. Run full PR 10b production validation.
+
 After PR 9f merges, production workers are split by role. The role is selected
 with `--role` or `APE_WORKER_ROLE`; the CLI flag wins when both are set. A
 role-specific worker only starts loops for that role, even if unrelated env

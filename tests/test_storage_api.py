@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,11 +9,13 @@ from fastapi.testclient import TestClient
 from ape.api.main import create_app
 from ape.config import load_config
 from ape.db.migrations import run_migrations
+from ape.db.models import StrategyPositionOutcome
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.repositories.inputs import StorageRetentionRunInput, WorkerHeartbeatInput
 from ape.repositories.storage_retention import StorageRetentionRepository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.storage import retention as retention_module
+from ape.storage.retention import RETENTION_TABLE_NAMES
 
 
 def test_storage_status_works_without_database_url() -> None:
@@ -36,8 +39,31 @@ def test_storage_status_works_without_database_url() -> None:
 
 def test_storage_status_reports_tables_without_retention_run(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ape_storage_status.sqlite'}"
+    first_closed_at = datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
+    second_closed_at = first_closed_at + timedelta(minutes=5)
     engine = create_engine_from_config(load_config({"DATABASE_URL": database_url}))
     run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    with session_factory() as session:
+        for suffix, closed_at in (("first", first_closed_at), ("second", second_closed_at)):
+            session.add(
+                StrategyPositionOutcome(
+                    outcome_id=f"v2-storage-outcome-{suffix}",
+                    position_id=f"v2-storage-position-{suffix}",
+                    strategy_id="btc15_momentum_v2",
+                    market_ticker="KXBTC15M-STORAGE",
+                    held_side="YES",
+                    lifecycle_version="momentum_v2_lifecycle_v2",
+                    opened_at=closed_at - timedelta(seconds=30),
+                    closed_at=closed_at,
+                    holding_duration_ms=30_000,
+                    quantity=Decimal("1"),
+                    entry_price=Decimal("0.62"),
+                    exit_price=Decimal("0.72"),
+                    realized_pnl_cents=Decimal("10"),
+                )
+            )
+        session.commit()
     engine.dispose()
     app = create_app(load_config({"DATABASE_URL": database_url}))
 
@@ -48,7 +74,9 @@ def test_storage_status_reports_tables_without_retention_run(tmp_path) -> None:
     body = response.json()
     assert body["database_configured"] is True
     assert body["latest_run_found"] is False
-    assert {stat["table_name"] for stat in body["table_stats"]} >= {
+    table_names = [stat["table_name"] for stat in body["table_stats"]]
+    assert set(RETENTION_TABLE_NAMES) <= set(table_names)
+    assert set(table_names) >= {
         "orderbook_snapshots",
         "public_trades",
         "reference_ticks",
@@ -58,6 +86,15 @@ def test_storage_status_reports_tables_without_retention_run(tmp_path) -> None:
         "strategy_dry_run_positions",
         "markets",
     }
+    assert table_names.count("strategy_position_outcomes") == 1
+    outcome_stats = next(
+        stat for stat in body["table_stats"] if stat["table_name"] == "strategy_position_outcomes"
+    )
+    assert outcome_stats["timestamp_basis"] == "closed_at"
+    assert outcome_stats["oldest_row_at"] == "2026-07-11T12:00:00Z"
+    assert outcome_stats["newest_row_at"] == "2026-07-11T12:05:00Z"
+    assert outcome_stats["retention_seconds"] is None
+    assert outcome_stats["raw_payload_retention_seconds"] is None
     assert "large-secret-payload" not in response.text
 
 

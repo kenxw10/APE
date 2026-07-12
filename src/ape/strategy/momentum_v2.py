@@ -19,9 +19,9 @@ from ape.repositories.inputs import (
 from ape.strategy.context import StrategyEvaluationContext
 
 V2_STRATEGY_ID = "btc15_momentum_v2"
-V2_ARCHITECTURE_VERSION = "momentum_v2_heuristic_v2"
+V2_ARCHITECTURE_VERSION = "momentum_v2_heuristic_v3"
 V2_FEATURE_SCHEMA_VERSION = "momentum_v2_features_v2"
-V2_LIFECYCLE_SCHEMA_VERSION = "momentum_v2_lifecycle_v1"
+V2_LIFECYCLE_SCHEMA_VERSION = "momentum_v2_lifecycle_v2"
 V2_EDGE_MODEL_VERSION = "heuristic_edge_v1"
 
 STATE_V2_FEATURES_NOT_READY = "V2_FEATURES_NOT_READY"
@@ -243,7 +243,23 @@ def evaluate_momentum_v2(
             snapshot,
             measurements,
         )
-    if mode not in {"BOUNDARY_CROSS_HOLD", "CONTINUATION"}:
+    if mode == "BOUNDARY_CROSS_HOLD":
+        return V2Evaluation(
+            STATE_V2_HARD_GATE_BLOCKED,
+            "v2_candidate_mode_not_enabled",
+            ["v2_candidate_mode_not_enabled"],
+            warnings,
+            candidate_side,
+            mode,
+            tier,
+            None,
+            score,
+            threshold,
+            edge,
+            snapshot,
+            measurements,
+        )
+    if mode != "CONTINUATION":
         return V2Evaluation(
             STATE_V2_HARD_GATE_BLOCKED,
             "v2_candidate_mode_not_enabled",

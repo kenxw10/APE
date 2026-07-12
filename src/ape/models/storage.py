@@ -10,6 +10,7 @@ from ape.storage.retention import StorageStatusSnapshot, StorageTableStats
 
 class StorageTableStatsResponse(BaseModel):
     table_name: str
+    timestamp_basis: str
     row_count: int | None
     approximate_total_bytes: int | None
     approximate_table_bytes: int | None
@@ -19,7 +20,7 @@ class StorageTableStatsResponse(BaseModel):
     oldest_row_at: datetime | None
     newest_row_at: datetime | None
     raw_payload_non_null_count: int | None
-    retention_seconds: int
+    retention_seconds: int | None
     raw_payload_retention_seconds: int | None
 
 

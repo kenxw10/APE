@@ -26,6 +26,14 @@ ALLOWED_RETENTION_TABLES = {
     "strategy_trade_intents",
     "worker_heartbeats",
 }
+ALLOWED_STATUS_READ_TABLES = ALLOWED_RETENTION_TABLES | {
+    "strategy_position_outcomes",
+}
+ALLOWED_RAW_PAYLOAD_READ_TABLES = {
+    "orderbook_snapshots",
+    "public_trades",
+    "reference_ticks",
+}
 JSON_FIELDS = {
     "deleted_rows",
     "raw_payload_stripped_rows",
@@ -103,7 +111,7 @@ class StorageRetentionRepository:
         condition_sql: str,
         parameters: dict[str, Any],
     ) -> int:
-        _validate_table_name(table_name)
+        _validate_retention_table(table_name)
         row_count = self.session.scalar(
             text(f"SELECT COUNT(*) FROM {table_name} WHERE {condition_sql}"),
             parameters,
@@ -117,7 +125,7 @@ class StorageRetentionRepository:
         condition_sql: str,
         parameters: dict[str, Any],
     ) -> bool:
-        _validate_table_name(table_name)
+        _validate_retention_table(table_name)
         value = self.session.scalar(
             text(f"SELECT 1 FROM {table_name} WHERE {condition_sql} LIMIT 1"),
             parameters,
@@ -132,7 +140,7 @@ class StorageRetentionRepository:
         parameters: dict[str, Any],
         batch_size: int,
     ) -> int:
-        _validate_table_name(table_name)
+        _validate_retention_table(table_name)
         rows = self.session.execute(
             text(
                 f"""
@@ -160,7 +168,7 @@ class StorageRetentionRepository:
         parameters: dict[str, Any],
         batch_size: int,
     ) -> int:
-        _validate_table_name(table_name)
+        _validate_retention_table(table_name)
         rows = self.session.execute(
             text(
                 f"""
@@ -188,7 +196,7 @@ class StorageRetentionRepository:
         return {table_name: self.table_size(table_name) for table_name in table_names}
 
     def approximate_row_count(self, table_name: str) -> int | None:
-        _validate_table_name(table_name)
+        _validate_status_read_table(table_name)
         if self.session.bind is not None and self.session.bind.dialect.name == "postgresql":
             value = self.session.scalar(
                 text(
@@ -207,7 +215,7 @@ class StorageRetentionRepository:
         return int(value or 0)
 
     def table_size(self, table_name: str) -> dict[str, int | None]:
-        _validate_table_name(table_name)
+        _validate_status_read_table(table_name)
         if self.session.bind is None or self.session.bind.dialect.name != "postgresql":
             return {
                 "approximate_total_bytes": None,
@@ -247,7 +255,7 @@ class StorageRetentionRepository:
         table_name: str,
         timestamp_expression: str,
     ) -> tuple[datetime | None, datetime | None]:
-        _validate_table_name(table_name)
+        _validate_status_read_table(table_name)
         row = self.session.execute(
             text(
                 f"""
@@ -261,7 +269,7 @@ class StorageRetentionRepository:
         return _datetime_or_none(row.oldest_row_at), _datetime_or_none(row.newest_row_at)
 
     def raw_payload_non_null_count(self, table_name: str) -> int | None:
-        _validate_table_name(table_name)
+        _validate_raw_payload_read_table(table_name)
         if self.session.bind is not None and self.session.bind.dialect.name == "postgresql":
             value = self.session.scalar(
                 text(
@@ -296,9 +304,19 @@ class StorageRetentionRepository:
         return int(value or 0)
 
 
-def _validate_table_name(table_name: str) -> None:
+def _validate_retention_table(table_name: str) -> None:
     if table_name not in ALLOWED_RETENTION_TABLES:
         raise ValueError(f"Unsupported retention table: {table_name}")
+
+
+def _validate_status_read_table(table_name: str) -> None:
+    if table_name not in ALLOWED_STATUS_READ_TABLES:
+        raise ValueError(f"Unsupported storage status table: {table_name}")
+
+
+def _validate_raw_payload_read_table(table_name: str) -> None:
+    if table_name not in ALLOWED_RAW_PAYLOAD_READ_TABLES:
+        raise ValueError(f"Unsupported raw payload storage table: {table_name}")
 
 
 def _run_values(run: StorageRetentionRunInput) -> dict[str, Any]:

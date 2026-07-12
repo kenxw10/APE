@@ -18,6 +18,7 @@ from ape.db.models import (
     StorageRetentionRun,
     StrategyDecision,
     StrategyDryRunPosition,
+    StrategyPositionOutcome,
     WorkerHeartbeat,
 )
 from ape.db.session import create_engine_from_config, create_session_factory
@@ -37,7 +38,9 @@ from ape.repositories.orderbook import OrderbookRepository
 from ape.repositories.public_trades import PublicTradesRepository
 from ape.repositories.reference_ticks import ReferenceTicksRepository
 from ape.repositories.storage_retention import (
+    ALLOWED_RAW_PAYLOAD_READ_TABLES,
     ALLOWED_RETENTION_TABLES,
+    ALLOWED_STATUS_READ_TABLES,
     StorageRetentionRepository,
 )
 from ape.repositories.strategy_decisions import StrategyDecisionsRepository
@@ -70,6 +73,96 @@ def retention_db(tmp_path):
 
 def test_all_retention_policy_tables_are_repository_allowlisted() -> None:
     assert set(RETENTION_TABLE_NAMES) <= ALLOWED_RETENTION_TABLES
+    assert "strategy_position_outcomes" not in RETENTION_TABLE_NAMES
+    assert "strategy_position_outcomes" not in ALLOWED_RETENTION_TABLES
+    assert "strategy_position_outcomes" in ALLOWED_STATUS_READ_TABLES
+    assert "strategy_position_outcomes" not in ALLOWED_RAW_PAYLOAD_READ_TABLES
+
+
+def test_storage_status_reads_outcomes_without_authorizing_retention_mutation(
+    retention_db,
+) -> None:
+    _, session_factory = retention_db
+
+    with session_factory() as session:
+        repository = StorageRetentionRepository(session)
+
+        assert repository.approximate_row_count("strategy_position_outcomes") == 0
+        assert (
+            repository.table_size("strategy_position_outcomes")["approximate_total_bytes"]
+            is None
+        )
+        assert repository.oldest_newest(
+            table_name="strategy_position_outcomes",
+            timestamp_expression="closed_at",
+        ) == (None, None)
+        with pytest.raises(ValueError, match="Unsupported retention table"):
+            repository.count_matching(
+                table_name="strategy_position_outcomes",
+                condition_sql="closed_at < :cutoff",
+                parameters={"cutoff": datetime.now(UTC)},
+            )
+        with pytest.raises(ValueError, match="Unsupported retention table"):
+            repository.has_matching(
+                table_name="strategy_position_outcomes",
+                condition_sql="closed_at < :cutoff",
+                parameters={"cutoff": datetime.now(UTC)},
+            )
+        with pytest.raises(ValueError, match="Unsupported retention table"):
+            repository.delete_batch(
+                table_name="strategy_position_outcomes",
+                condition_sql="closed_at < :cutoff",
+                parameters={"cutoff": datetime.now(UTC)},
+                batch_size=1,
+            )
+        with pytest.raises(ValueError, match="Unsupported retention table"):
+            repository.strip_raw_payload_batch(
+                table_name="strategy_position_outcomes",
+                condition_sql="closed_at < :cutoff",
+                parameters={"cutoff": datetime.now(UTC)},
+                batch_size=1,
+            )
+        with pytest.raises(ValueError, match="Unsupported raw payload storage table"):
+            repository.raw_payload_non_null_count("strategy_position_outcomes")
+
+
+def test_storage_retention_keeps_old_position_outcomes_durable(retention_db) -> None:
+    database_url, session_factory = retention_db
+    now = datetime(2026, 7, 11, 12, 10, tzinfo=UTC)
+    config = _retention_config(database_url, row_seconds=60)
+
+    with session_factory() as session:
+        session.add(
+            StrategyPositionOutcome(
+                outcome_id="v2-old-durable-outcome",
+                position_id="v2-old-durable-position",
+                strategy_id="btc15_momentum_v2",
+                market_ticker="KXBTC15M-OUTCOME",
+                held_side="YES",
+                lifecycle_version="momentum_v2_lifecycle_v2",
+                opened_at=now - timedelta(seconds=180),
+                closed_at=now - timedelta(seconds=120),
+                holding_duration_ms=60_000,
+                quantity=Decimal("1"),
+                entry_price=Decimal("0.62"),
+                exit_price=Decimal("0.72"),
+                realized_pnl_cents=Decimal("10"),
+            )
+        )
+        session.commit()
+
+    result = run_storage_retention_once(config, session_factory, now=lambda: now)
+
+    assert "strategy_position_outcomes" not in result.tables_processed
+    assert "strategy_position_outcomes" not in result.tables_skipped
+    assert "strategy_position_outcomes" not in result.deleted_rows
+    with session_factory() as session:
+        outcome = session.scalar(
+            select(StrategyPositionOutcome).where(
+                StrategyPositionOutcome.outcome_id == "v2-old-durable-outcome"
+            )
+        )
+        assert outcome is not None
 
 
 def test_storage_retention_deletes_old_rows_in_chunks(retention_db) -> None:
