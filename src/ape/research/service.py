@@ -92,7 +92,7 @@ class MarketOutcomeReconciler:
         # Deliberately omit credentials: reconciliation owns only public market detail.
         self.market_client = market_client or KalshiRestClient(
             base_url=config.kalshi_api_base_url,
-            timeout_seconds=config.kalshi_request_timeout_seconds,
+            timeout_seconds=config.kalshi_rest_timeout_seconds,
         )
 
     async def run(self, *, stop_event, max_iterations: int | None = None) -> None:

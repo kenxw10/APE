@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from sqlalchemy import select
 
 from ape.config import load_config
@@ -45,6 +47,37 @@ def test_research_cycle_archives_and_records_isolated_heartbeat(tmp_path) -> Non
             assert heartbeat.metadata_["research"]["worker_role"] == "research"
     finally:
         engine.dispose()
+
+
+def test_market_outcome_reconciler_uses_public_rest_configuration(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakePublicClient:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(research_service, "KalshiRestClient", FakePublicClient)
+    config = load_config(
+        {
+            "KALSHI_API_BASE_URL": "https://public.example.test/trade-api/v2",
+            "KALSHI_REST_TIMEOUT_SECONDS": "17.5",
+            "KALSHI_API_KEY_ID": "must-not-be-used",
+            "KALSHI_PRIVATE_KEY": "must-not-be-used",
+        }
+    )
+
+    reconciler = research_service.MarketOutcomeReconciler(
+        config=config,
+        safety=None,
+        session_factory=None,
+        started_at=datetime.now(UTC),
+    )
+
+    assert reconciler.market_client is not None
+    assert captured == {
+        "base_url": config.kalshi_api_base_url,
+        "timeout_seconds": config.kalshi_rest_timeout_seconds,
+    }
 
 
 def test_research_cycle_does_not_reuse_a_frozen_holdout(tmp_path, monkeypatch) -> None:

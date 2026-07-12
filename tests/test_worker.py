@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+import pytest
 from sqlalchemy import func, select
 
 import ape.worker.main as worker_main
@@ -158,9 +159,22 @@ def test_worker_market_data_role_only_starts_market_loop(monkeypatch) -> None:
         def __init__(self, **_kwargs) -> None:
             calls.append("retention_init")
 
+    class FakeResearchWorker:
+        def __init__(self, **_kwargs) -> None:
+            calls.append("research_init")
+
+    class FakeMarketOutcomeReconciler:
+        def __init__(self, **_kwargs) -> None:
+            calls.append("reconciler_init")
+
+        async def run(self, **_kwargs) -> None:
+            calls.append("reconciler")
+
     monkeypatch.setattr(worker_main, "KalshiWsCollector", FakeCollector)
     monkeypatch.setattr(worker_main, "StrategyObserver", FakeStrategyObserver)
     monkeypatch.setattr(worker_main, "StorageRetentionWorker", FakeRetentionWorker)
+    monkeypatch.setattr(worker_main, "ResearchWorker", FakeResearchWorker)
+    monkeypatch.setattr(worker_main, "MarketOutcomeReconciler", FakeMarketOutcomeReconciler)
 
     config = load_config(
         {
@@ -168,12 +182,40 @@ def test_worker_market_data_role_only_starts_market_loop(monkeypatch) -> None:
             "KALSHI_CFBENCHMARKS_ENABLED": "true",
             "STRATEGY_OBSERVER_ENABLED": "true",
             "STORAGE_RETENTION_ENABLED": "true",
+            "RESEARCH_ENABLED": "true",
         }
     )
 
     run_worker(config, max_iterations=1, worker_role="market-data")
 
-    assert calls == ["collector_init", "market"]
+    assert calls == ["collector_init", "reconciler_init", "market", "reconciler"]
+
+
+def test_market_data_reconciler_constructor_failure_leaves_no_unawaited_coroutine(
+    monkeypatch, recwarn
+) -> None:
+    class FakeCollector:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def run_market_data(self, **_kwargs) -> None:
+            raise AssertionError("The coroutine must not be created before reconciliation setup.")
+
+    class FailingReconciler:
+        def __init__(self, **_kwargs) -> None:
+            raise RuntimeError("reconciler configuration failed")
+
+    monkeypatch.setattr(worker_main, "KalshiWsCollector", FakeCollector)
+    monkeypatch.setattr(worker_main, "MarketOutcomeReconciler", FailingReconciler)
+
+    with pytest.raises(RuntimeError, match="reconciler configuration failed"):
+        run_worker(
+            load_config({"KALSHI_WS_ENABLED": "true"}),
+            max_iterations=1,
+            worker_role="market-data",
+        )
+
+    assert not [warning for warning in recwarn if warning.category is RuntimeWarning]
 
 
 def test_worker_reference_role_only_starts_brti_loop(monkeypatch) -> None:

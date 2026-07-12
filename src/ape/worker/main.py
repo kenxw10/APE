@@ -341,14 +341,18 @@ def _run_role_worker(
             session_factory=session_factory,
             started_at=started_at,
         )
-        tasks.append(collector.run_market_data(stop_event=event, max_cycles=max_iterations))
         reconciler = MarketOutcomeReconciler(
             config=config,
             safety=safety,
             session_factory=session_factory,
             started_at=started_at,
         )
-        tasks.append(reconciler.run(stop_event=event, max_iterations=max_iterations))
+        tasks.extend(
+            (
+                collector.run_market_data(stop_event=event, max_cycles=max_iterations),
+                reconciler.run(stop_event=event, max_iterations=max_iterations),
+            )
+        )
     elif role == WORKER_ROLE_REFERENCE_BRTI:
         collector = KalshiWsCollector(
             config=config,
