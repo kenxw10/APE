@@ -427,6 +427,48 @@ def test_counterfactual_label_uses_the_first_in_window_executable_book() -> None
     assert label["net_markout_5s_cents"] is not None
 
 
+def test_counterfactual_label_preserves_zero_fixed_point_book_depth() -> None:
+    at = datetime(2026, 7, 11, 12, 5, tzinfo=UTC)
+    market = Market(
+        market_ticker="KXBTC15M-ZERO-LABEL-DEPTH",
+        open_time=at - timedelta(minutes=5),
+        close_time=at + timedelta(minutes=10),
+        functional_strike=Decimal("62000"),
+    )
+    feature = StrategyFeatureSnapshot(
+        feature_snapshot_id="feature-zero-label-depth",
+        market_ticker=market.market_ticker,
+        evaluated_at=at,
+        feature_schema_version="momentum_v2_features_v3",
+        context_hash="context",
+        candidate_side="YES",
+        boundary=Decimal("62000"),
+        complete_feature_vector=replayable_feature_vector(),
+    )
+    books = [
+        OrderbookSnapshot(
+            market_ticker=market.market_ticker,
+            received_at=at + timedelta(milliseconds=600),
+            yes_ask=Decimal("0.60"),
+            yes_ask_count=Decimal("0"),
+            yes_ask_size=7,
+        ),
+        OrderbookSnapshot(
+            market_ticker=market.market_ticker,
+            received_at=at + timedelta(seconds=5),
+            yes_bid=Decimal("0.65"),
+            yes_bid_count=Decimal("0"),
+            yes_bid_size=9,
+        ),
+    ]
+
+    label = _counterfactual_label(feature, books, [], market)
+
+    assert label["entry_fillable"] is False
+    assert label["first_book_ask_depth"] == "0"
+    assert label["depth_5s"] == "0"
+
+
 def test_legacy_null_replay_readiness_snapshot_remains_labelable(tmp_path) -> None:
     engine = create_engine_from_config(
         load_config({"DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'legacy-label.sqlite'}"})

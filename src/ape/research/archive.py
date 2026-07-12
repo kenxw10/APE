@@ -928,9 +928,9 @@ def _ask_depth(book: OrderbookSnapshot | None, side: str | None) -> Decimal | No
     if book is None:
         return None
     value = (
-        book.yes_ask_count or book.yes_ask_size
+        _fixed_count_or_legacy_size(book.yes_ask_count, book.yes_ask_size)
         if side == "YES"
-        else book.no_ask_count or book.no_ask_size
+        else _fixed_count_or_legacy_size(book.no_ask_count, book.no_ask_size)
         if side == "NO"
         else None
     )
@@ -948,9 +948,9 @@ def _bid_depth(book: OrderbookSnapshot | None, side: str | None) -> Decimal | No
     if book is None:
         return None
     value = (
-        book.yes_bid_count or book.yes_bid_size
+        _fixed_count_or_legacy_size(book.yes_bid_count, book.yes_bid_size)
         if side == "YES"
-        else book.no_bid_count or book.no_bid_size
+        else _fixed_count_or_legacy_size(book.no_bid_count, book.no_bid_size)
         if side == "NO"
         else None
     )
