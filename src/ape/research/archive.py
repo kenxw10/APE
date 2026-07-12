@@ -195,7 +195,7 @@ def reconcile_market_outcomes(session: Session, *, client, now: datetime | None 
             Decimal(tick.parsed_value)
             for tick in ticks
             if tick.parsed_value is not None
-            and _utc(tick.received_at) >= close_at - timedelta(seconds=60)
+            and close_at - timedelta(seconds=60) <= _utc(tick.received_at) <= close_at
         ]
         expected = max(1, int((close_at - _utc(market.open_time or close_at)).total_seconds()))
         actual = len(ticks)

@@ -426,16 +426,30 @@ def replay_metrics(
     timing_counts: dict[str, int] = {}
     volatility_counts: dict[str, int] = {}
     liquidity_counts: dict[str, int] = {}
+    regime_counts: dict[str, int] = {}
     for trade in closed:
         measurements = trade.measurements if isinstance(trade.measurements, dict) else {}
+        timing_tier = str(trade.timing_tier or "unknown")
+        volatility_regime = str(measurements.get("volatility_regime") or "unknown")
+        liquidity_regime = str(measurements.get("liquidity_regime") or "unknown")
         for counts, value in (
-            (timing_counts, trade.timing_tier or "unknown"),
-            (volatility_counts, measurements.get("volatility_regime") or "unknown"),
-            (liquidity_counts, measurements.get("liquidity_regime") or "unknown"),
+            (timing_counts, timing_tier),
+            (volatility_counts, volatility_regime),
+            (liquidity_counts, liquidity_regime),
         ):
             key = str(value)
             counts[key] = counts.get(key, 0) + 1
-    dominant_entries = max(timing_counts.values(), default=0)
+        regime = ":".join((volatility_regime, liquidity_regime, timing_tier))
+        regime_counts[regime] = regime_counts.get(regime, 0) + 1
+    # A candidate must be diversified across every monitored regime dimension.
+    # The combined key catches identical full regimes; the marginal counters
+    # keep timing-tier variety from masking volatility or liquidity concentration.
+    dominant_entries = max(
+        max(timing_counts.values(), default=0),
+        max(volatility_counts.values(), default=0),
+        max(liquidity_counts.values(), default=0),
+        max(regime_counts.values(), default=0),
+    )
     ordered_markets = eligible_markets or tuple(sorted(by_market))
     ordered_market_pnl = [by_market.get(market, Decimal("0")) for market in ordered_markets]
     cumulative = Decimal("0")

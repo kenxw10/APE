@@ -114,6 +114,36 @@ def test_bootstrap_uses_exactly_two_thousand_deterministic_resamples() -> None:
     assert first["resamples"] == "2000"
 
 
+def test_replay_metrics_counts_dominance_across_full_regimes() -> None:
+    trades = tuple(
+        SimpleNamespace(
+            status="CLOSED",
+            market_ticker=f"M{index}",
+            net_pnl_cents=Decimal("1"),
+            gross_pnl_cents=Decimal("1"),
+            fee_cents=Decimal("0"),
+            holding_duration_ms=1_000,
+            mfe_cents=Decimal("1"),
+            mae_cents=Decimal("0"),
+            timing_tier=timing_tier,
+            measurements={
+                "volatility_regime": "high",
+                "liquidity_regime": "thin",
+            },
+        )
+        for index, timing_tier in enumerate(("early", "normal", "late"), start=1)
+    )
+
+    metrics = calibration.replay_metrics(
+        trades,
+        market_count=3,
+        calibration_run_id="full-regime-dominance",
+    )
+
+    assert metrics["timing_tier_coverage"] == 3
+    assert metrics["dominant_regime_entry_share"] == "1"
+
+
 def test_walk_forward_metrics_preserves_manifest_validation_order(monkeypatch) -> None:
     captured: list[tuple[str, ...]] = []
 

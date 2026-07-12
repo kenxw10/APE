@@ -714,3 +714,70 @@ def test_outcome_reconciliation_pages_past_resolved_newest_markets(tmp_path) -> 
             assert session.scalar(select(func.count()).select_from(ResearchMarketOutcome)) == 501
     finally:
         engine.dispose()
+
+
+def test_outcome_reconciliation_excludes_post_close_ticks_from_final_minute_average(
+    tmp_path,
+) -> None:
+    engine = create_engine_from_config(
+        load_config({"DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'close-boundary.sqlite'}"})
+    )
+    run_migrations(engine)
+    factory = create_session_factory(engine)
+    close_at = datetime(2026, 7, 11, 12, 15, tzinfo=UTC)
+
+    class FakePublicClient:
+        def get_market(self, _market_ticker: str) -> dict[str, object]:
+            return {
+                "market": {
+                    "result": "yes",
+                    "status": "settled",
+                    "settlement_value": "62000",
+                }
+            }
+
+    try:
+        with factory() as session:
+            market = Market(
+                market_ticker="KXBTC15M-CLOSE-BOUNDARY",
+                series_ticker="KXBTC15M",
+                open_time=close_at - timedelta(minutes=15),
+                close_time=close_at,
+                expiration_time=close_at + timedelta(minutes=5),
+                functional_strike=Decimal("62000"),
+            )
+            session.add_all(
+                (
+                    market,
+                    ReferenceTick(
+                        source="kalshi_cfbenchmarks_brti",
+                        received_at=close_at - timedelta(seconds=30),
+                        parsed_value=Decimal("62000"),
+                        parse_status="valid",
+                    ),
+                    ReferenceTick(
+                        source="kalshi_cfbenchmarks_brti",
+                        received_at=close_at + timedelta(seconds=10),
+                        parsed_value=Decimal("63000"),
+                        parse_status="valid",
+                    ),
+                )
+            )
+            session.flush()
+
+            changed = reconcile_market_outcomes(
+                session,
+                client=FakePublicClient(),
+                now=close_at + timedelta(minutes=6),
+            )
+            outcome = session.scalar(
+                select(ResearchMarketOutcome).where(
+                    ResearchMarketOutcome.market_ticker == market.market_ticker
+                )
+            )
+
+            assert changed == 1
+            assert outcome is not None
+            assert outcome.final_minute_reference_average == Decimal("62000")
+    finally:
+        engine.dispose()
