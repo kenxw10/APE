@@ -742,13 +742,10 @@ on the existing strategy service unless an operator later approves one immutable
 
 Initial deployment:
 
-1. Keep existing V2 enabled in DRY_RUN.
-2. Keep TRADING_ENABLED=false and EXECUTE=false everywhere.
-3. Deploy the merged code to existing services.
-4. Confirm migration 0010 completed.
-5. Create ape-research-worker with the documented start command and variables.
-6. Do not give the research worker Kalshi private credentials.
-7. Leave STRATEGY_V2_CANDIDATE_CONFIG_VERSION_ID unset.
-8. Validate research status, event coverage, zero-entry audit, and replay.
-9. Do not activate a candidate until a later explicit operator decision.
-10. Do not move to paper or live.
+1. Merge only after the GPT audit and exact unsharded PR CI are green.
+2. Redeploy existing services and confirm migration `0010_research_replay_calibration`.
+3. Create `ape-research-worker` with `DATABASE_URL` plus only research and safety variables.
+4. Do not provide a Kalshi API key, private key, private-channel credentials, or account credentials.
+5. Leave `STRATEGY_V2_CANDIDATE_CONFIG_VERSION_ID` unset initially.
+6. Validate archive, official outcome coverage, labels, replay, calibration, and governance read APIs.
+7. Keep `TRADING_ENABLED=false` and `EXECUTE=false`; do not activate paper or live modes.

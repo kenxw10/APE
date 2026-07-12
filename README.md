@@ -44,6 +44,13 @@ PR 10a completes the DRY_RUN-only V2 evidence lifecycle. Post-10a snapshots use 
 
 PR 10b corrects V2 sample semantics without broadening strategy scope. `BOUNDARY_CROSS_HOLD` remains persisted research evidence but cannot emit an entry signal; only `CONTINUATION` can proceed toward a hypothetical entry. Each V2 EXIT attempt evaluates exactly its first persisted orderbook in the causal window, so a later book cannot rescue an ineligible first book. `strategy_position_outcomes` is now visible in `/storage/status` as durable status-only evidence and remains outside retention mutation. This changes V2 attribution to `momentum_v2_heuristic_v3` and `momentum_v2_lifecycle_v2`; `momentum_v2_features_v2` is unchanged. No migration, Railway service, or environment variable is added.
 
+PR 11 adds database-only replay, archive, calibration, and governance evidence for
+V2 DRY_RUN research. It introduces no paper/live/order/private-account capability.
+Candidate promotions stop at `DRY_RUN_CHALLENGER`, candidate pins are resolved only
+at strategy-worker startup, and changing a pin requires a restart. The target is
+5-15 qualified setups, 3-10 preferred fills, and a 3-15 challenger hard fill band
+per 100 markets; these are governance diagnostics, not execution controls.
+
 ## Safety Defaults
 
 The default configuration is intentionally non-trading:

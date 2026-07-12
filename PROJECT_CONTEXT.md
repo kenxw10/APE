@@ -121,4 +121,12 @@ healthy selectivity, and allows automatic governance only as far as a database
 `DRY_RUN_CHALLENGER` state. It adds one database-only research worker and no
 paper/live/order/private-account capability.
 
+PR 11 evidence is immutable and replayable: calibration persists the complete
+search snapshot and partition-specific candidate trades, while governance uses only
+complete eligible feature coverage and the declared frozen out-of-sample evidence
+set. Candidate pins remain startup-only and require an explicit worker restart to
+change. Qualified setup target is 5-15 per 100 markets, preferred fills are 3-10,
+and the challenger hard fill band is 3-15. These remain research governance
+diagnostics and do not authorize paper or live execution.
+
 Next manual checkpoint after PR 9h: keep API, market, reference, and maintenance workers running, but do not deploy or enable strategy until storage validation is clean. Confirm `/storage/status` uses `liveness_source=component` from `ape-worker.maintenance`, shows `worker_role=maintenance`, `latest_component_heartbeat_mode=storage_retention`, `worker_heartbeat_stale=false`, `retention_config.effective_enabled=true`, and latest run status `success` or `success_partial` with no blockers. `success_partial` is acceptable when bounded cleanup made progress and only the configured time, table, or per-table row budget was reached. Market validation may allow `QUIET_CARRY_FORWARD` when transport is healthy, subscriptions are reconciled, there is no unrecovered blocker, and the snapshot is inside the hard carry-forward cap; `BLOCKED_UNRECOVERED`, stale market transport, or BRTI `stale_transport` remain hard regressions. Keep `TRADING_ENABLED=false` and `EXECUTE=false` everywhere. The API and dashboard may stay read-only; Vercel must not receive Kalshi credentials, WebSocket variables, BRTI env vars, strategy env vars, storage retention env vars, dry-run controls, private-channel controls, account reads, or order/execution controls.

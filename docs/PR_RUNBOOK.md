@@ -589,6 +589,14 @@ $safety
 
 ## PR 11 Research Validation
 
+Deployment order is fixed: merge only after GPT audit and green exact PR CI,
+redeploy existing services, confirm migration `0010_research_replay_calibration`,
+then create `ape-research-worker`. Give that worker only `DATABASE_URL` and the
+research/safety variables. Do not give it Kalshi private credentials or a candidate
+pin. Validate archive, official outcomes, coverage, labels, replay, calibration, and
+governance before any later operator decision. Keep `TRADING_ENABLED=false` and
+`EXECUTE=false`; do not activate paper or live mode.
+
 After the database migration and research worker are running, use only read-only
 checks:
 

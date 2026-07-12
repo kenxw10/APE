@@ -1,68 +1,46 @@
-# PR 11 Remediation Status
+# PR 11 Compliance Matrix
 
-`WIP — PR 11 remediation in progress; do not merge`
+PR 11 is DRY_RUN-only research infrastructure. It does not add paper trading,
+live trading, orders, cancels, private channels, account reads, credentials, or
+execution capability. Candidate pins remain startup-only: a changed pin requires
+a strategy-worker restart and is never hot reloaded.
 
-The current branch contains a partial remediation batch. PR 11 is not yet
-compliant and must not be merged or deployed.
-
-| Requirement | Current remediation evidence | Status |
+| Requirement | Implementation evidence | Behavioral evidence |
 | --- | --- | --- |
-| R1 immutable research schema and migration | Existing `0010_research_replay_calibration` foundation retained. | IN PROGRESS |
-| R2 canonical feature vector and evaluator parity | Complete lifecycle input vector and shared lifecycle helper are being added. The full behavioral parity matrix is still missing. | IN PROGRESS |
-| R3 isolated research worker | Archive no longer reconciles outcomes; public outcome reconciliation is being moved to the market-data role. | IN PROGRESS |
-| R4 normalized archive, labels, and coverage | Idempotent archive protection, immutable coverage reports, and fail-closed malformed labels are in this batch. | IN PROGRESS |
-| R5 zero-entry audit and frequency governance | Funnel and zero-market bootstrap corrections are in this batch; required audit coverage remains incomplete. | IN PROGRESS |
-| R6 executable labels and fee model | July 7, 2026 parameter attribution and published fee-table examples are pinned; complete label-horizon evidence remains incomplete. | IN PROGRESS |
-| R7 deterministic production-parity replay | Shared lifecycle logic and first-book handling are in progress; complete production/replay parity coverage is missing. | IN PROGRESS |
-| R8 chronological partitions and frozen holdout | Development-test and fold corrections are in progress; the required complete leakage-control proof is missing. | IN PROGRESS |
-| R9 bounded search and fold-specific logistic preprocessing | Canonical logistic feature names and fold-specific replay usage are in this batch. Full calibration evidence remains incomplete. | IN PROGRESS |
-| R10 objective, penalties, and bootstrap | Zero-trade market handling and regime aggregation corrections are in this batch. Full metric fixtures remain incomplete. | IN PROGRESS |
-| R11 automatic governance | Candidate-specific persisted replay/calibration evidence now drives DRAFT -> BACKTESTED -> SHADOW -> DRY_RUN_CHALLENGER, with immutable events and database serialization. Final acceptance fixtures remain required. | IN PROGRESS |
-| R12 startup-only candidate pin | A configured candidate is resolved once when the strategy worker starts. It is intentionally not hot-reloaded; database or environment changes require a worker restart. | IN PROGRESS |
-| R13 bounded read-only research APIs | Validated bounded filters and worker-observed status are implemented. The complete R1-R15 behavioral matrix remains required. | IN PROGRESS |
-| R14 retention and durable evidence | Existing retention/status separation is retained. Generated-validation cleanup remains pending. | IN PROGRESS |
-| R15 fixtures, documentation, and deployment | The smoke script no longer fabricates successful governance evidence. The full event-time fixture suite and behavioral R1-R15 matrix are missing. | BLOCKED BY REMAINING IMPLEMENTATION |
+| R1 schema, constraints, indexes, idempotency | `src/ape/db/migrations.py`, `src/ape/db/models.py` | `tests/test_pr11_scope_contract.py::test_r1_single_research_migration_and_schema_contract` |
+| R2 canonical evaluator parity | `src/ape/strategy/momentum_v2.py`, `src/ape/research/archive.py` | `tests/test_pr11_scope_contract.py::test_r2_live_and_json_persisted_vectors_have_identical_evaluator_results` |
+| R3 isolated worker and public reconciliation | `src/ape/worker/main.py`, `src/ape/research/service.py` | `tests/test_worker.py`, `tests/test_worker_roles.py`, `tests/test_research_worker.py` |
+| R4 archive recovery, cursor, coverage, labels | `src/ape/research/archive.py` | `tests/test_research_archive.py` |
+| R5 zero-entry funnel and frequency classes | `src/ape/research/replay.py` | `tests/test_pr11_scope_contract.py::test_r5_zero_entry_audit_is_explicitly_unvalidatable` |
+| R6 executable labels and verified fees | `src/ape/research/archive.py`, `src/ape/research/fees.py` | `tests/test_research_archive.py`, `tests/test_pr11_scope_contract.py::test_r6_verified_taker_fee_is_nonzero_and_versioned` |
+| R7 causal lifecycle and retry semantics | `src/ape/research/replay.py`, `src/ape/strategy/observer.py` | `tests/test_replay_engine.py`, `tests/test_pr11_scope_contract.py::test_r7_ordered_replay_uses_first_book_without_future_rescue` |
+| R8 chronological folds, purge, test, holdout | `src/ape/research/calibration.py` | `tests/test_calibration.py` |
+| R9 bounded search and fold-specific logistic fitting | `src/ape/research/calibration.py` | `tests/test_calibration.py` |
+| R10 bootstrap and penalties | `src/ape/research/calibration.py` | `tests/test_calibration.py`, `tests/test_pr11_scope_contract.py::test_r10_market_bootstrap_is_two_thousand_resamples` |
+| R11 governance evidence and transitions | `src/ape/research/repository.py`, `src/ape/research/service.py` | `tests/test_candidate_governance_evidence.py`, `tests/test_research_worker.py::test_automatic_governance_uses_persisted_candidate_evidence` |
+| R12 startup-only candidate pin | `src/ape/strategy/observer.py`, `src/ape/research/pin.py` | `tests/test_candidate_pin.py` |
+| R13 bounded read-only APIs and status | `src/ape/api/main.py`, `src/ape/research/status.py` | `tests/test_research_api.py`, `tests/test_pr11_scope_contract.py::test_r13_research_api_surface_is_read_only_and_bounded` |
+| R14 retention and durable evidence | `src/ape/storage/retention.py`, `src/ape/repositories/storage_retention.py` | `tests/test_storage_retention.py`, `tests/test_storage_api.py` |
+| R15 fixtures, smoke, documentation, deployment boundaries | `src/ape/research/fixtures.py`, `scripts/research_smoke.py` | `tests/test_pr11_scope_contract.py::test_r15_eighteen_market_fixture_has_real_event_time_sources_and_labels` |
 
-## July 2026 Fee Attribution
+## Governance Evidence
 
-The fee model stores a SHA-256 of the exact canonical **parameter snapshot**, not
-a PDF-byte checksum. The Codex environment receives HTTP 429 from the official
-PDF URL, so no PDF-byte hash is claimed.
+Promotion evidence is derived from persisted source events, resolved official
+outcomes, and declared out-of-sample partitions. It records exact changed and
+protected parameter paths, candidate-side feature eligibility, per-source event
+gaps, complete eligible markets, fee metadata, and partition-specific de-duplicated
+closed trades. Search metadata is immutable and includes candidate IDs, parameter
+hashes, grids, logistic settings, governance configuration, and a snapshot SHA-256.
 
-- Source URL: `https://kalshi.com/docs/kalshi-fee-schedule.pdf`
-- Document title: `Fee Schedule for July 2026 - 7.7.26 Update`
-- Effective date: `2026-07-07`
-- Parameter snapshot SHA-256:
-  `6d625f01b407d66a8f42c3df193ed750054df489bb075de63fc98608cfe1b823`
-- KXBTC15M is not listed as non-standard; its taker multiplier is `1`, maker
-  multiplier is `0`, and settlement fee is `0`.
+Frequency targets are diagnostic governance bounds, not activation controls:
 
-## Remaining Blockers
+- Qualified setups: 5-15 per 100 markets.
+- Preferred fills: 3-10 per 100 markets.
+- Challenger hard fill band: 3-15 per 100 markets.
 
-The following GPT-audit findings remain unresolved and prevent a compliance
-claim:
+## Validation Evidence
 
-1. Full 18-market event-time fixture suite.
-2. Complete behavioral R1-R15 acceptance matrix.
-3. Generated validation-log, JUnit, and result-file cleanup.
-4. Final compliance and deployment documentation.
-5. Any further failures discovered by the next prompt-to-diff audit.
-
-## Accepted Candidate-Pin Boundary
-
-The active review suggestion to revalidate candidate pins on every observer
-evaluation is incompatible with the accepted PR 11 architecture. Candidate pins
-are immutable for a running strategy-worker process: they resolve at startup,
-never hot reload, and require a worker restart after any database or environment
-change. Invalid startup pins omit only the candidate and surface a
-candidate-specific blocker; they never alter the baseline V2, v1, or v1_fast
-variants.
-
-## Core Batch Completion
-
-Automatic governance transitions now use persisted candidate-specific calibration
-and replay evidence, retain an immutable event for every completed transition,
-and update the associated config version in the same database transaction.
-
-No paper trading, live execution, credentials, private API calls, deployment, or
-new migration is included in this remediation batch.
+The compact PR 11 collection manifest and shard aggregate report remain under
+`docs/validation/pr11/`. Regenerated raw logs, JUnit XML, result JSON, and smoke
+output are intentionally ignored. The exact unsharded `python -m pytest` run is
+the GitHub Actions gate for this draft PR.

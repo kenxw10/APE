@@ -38,3 +38,22 @@ Candidate pins resolve once when the strategy worker starts. They are deliberate
 not revalidated for each observer evaluation: changing a pin, retiring a candidate,
 or changing the environment takes effect only after a worker restart. This preserves
 an immutable running decision configuration and keeps the control variants unchanged.
+
+## Calibration Evidence
+
+Every bounded calibration run stores the complete immutable search-space snapshot:
+the deterministic seed, generation algorithm version, all grids, candidate IDs and
+parameter hashes, logistic feature order/L2/convergence settings, exact allowed
+candidate paths, protected gates, frequency governance, and snapshot SHA-256.
+
+Each candidate stores its own training, walk-forward validation, bootstrap, and
+penalty evidence. Only the selected finalist receives development-test and frozen
+holdout metrics. Candidate replay trades are persisted with an explicit partition;
+promotion uses the declared immutable out-of-sample partition and de-duplicates by
+candidate, market, source decision, entry event, and partition.
+
+Promotion evidence counts only actual `FEATURE_SNAPSHOT` rows that have a candidate
+side, mature label horizon, required first-book window, and resolved official outcome.
+It records missing sources and real per-market/per-source event gaps separately from
+coverage counts. A manifest market is not treated as complete merely because it was
+listed in the partition manifest.
