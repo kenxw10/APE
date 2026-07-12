@@ -168,6 +168,7 @@ def run_research_cycle(
                 trade=trade,
                 candidate_id=None,
                 strategy_config_version_id=baseline.strategy_config_version_id,
+                evidence_partition="full_dataset_baseline",
             )
         )
     calibration_status = "DISABLED"
@@ -229,6 +230,7 @@ def run_research_cycle(
                                     strategy_config_version_id=(
                                         baseline.strategy_config_version_id
                                     ),
+                                    evidence_partition="search_development",
                                 )
                             )
                         continue
@@ -291,6 +293,7 @@ def run_research_cycle(
                                 trade=trade,
                                 candidate_id=candidate.candidate_id,
                                 strategy_config_version_id=config_version_id,
+                                evidence_partition="search_development",
                             )
                         )
                     repository.advance_candidate_governance(
@@ -317,11 +320,15 @@ def _replay_trade_values(
     trade: ReplayTrade,
     candidate_id: str | None,
     strategy_config_version_id: str,
+    evidence_partition: str,
 ) -> dict[str, Any]:
     trade_prefix = replay_run_id if candidate_id is None else f"{replay_run_id}-{candidate_id}"
-    measurements = trade.measurements if isinstance(trade.measurements, dict) else {}
+    measurements = {
+        **(trade.measurements if isinstance(trade.measurements, dict) else {}),
+        "evidence_partition": evidence_partition,
+    }
     return {
-        "trade_id": f"{trade_prefix}-{trade.trade_id}",
+        "trade_id": f"{trade_prefix}-{evidence_partition}-{trade.trade_id}",
         "replay_run_id": replay_run_id,
         "candidate_id": candidate_id,
         "strategy_config_version_id": strategy_config_version_id,

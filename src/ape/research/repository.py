@@ -20,6 +20,7 @@ from ape.db.models import (
     ResearchReplayTrade,
     StrategyConfigVersion,
 )
+from ape.research.fees import verified_kalshi_taker_fee_model
 
 
 class ResearchRepository:
@@ -334,6 +335,48 @@ class ResearchRepository:
             if calibration and isinstance(calibration.validation_metrics, dict)
             else {}
         )
+        baseline_version = self.session.scalar(
+            select(StrategyConfigVersion).where(
+                StrategyConfigVersion.strategy_config_version_id
+                == candidate.parent_strategy_config_version_id
+            )
+        )
+        config_diff = _config_diff_evidence(
+            baseline_version.parameter_snapshot if baseline_version is not None else {},
+            candidate.parameter_snapshot,
+        )
+        coverage = (
+            (replay_run.raw_metrics or {}).get("archive_coverage", {})
+            if replay_run is not None and isinstance(replay_run.raw_metrics, dict)
+            else {}
+        )
+        coverage = coverage if isinstance(coverage, dict) else {}
+        per_market = coverage.get("per_market_coverage", {})
+        frame_count = int(coverage.get("event_count", 0))
+        partial_frames = int(coverage.get("partial_frame_count", 0))
+        unusable_frames = int(coverage.get("unusable_frame_count", 0))
+        complete_markets = int(coverage.get("complete_markets", 0))
+        total_markets = len(per_market) if isinstance(per_market, dict) else 0
+        coverage_ratio = _decimal_or_zero(coverage.get("minimum_coverage"))
+        expected_fee = verified_kalshi_taker_fee_model().metadata()
+        actual_fee = (
+            replay_run.cost_model
+            if replay_run is not None and isinstance(replay_run.cost_model, dict)
+            else {}
+        )
+        fee_keys = (
+            "effective_date",
+            "kxbtc15m_taker_multiplier",
+            "taker_formula",
+            "rounding_rule_source_text",
+            "settlement_fee",
+            "parameter_snapshot_sha256",
+        )
+        fee_mismatches = {
+            key: {"expected": expected_fee.get(key), "actual": actual_fee.get(key)}
+            for key in fee_keys
+            if expected_fee.get(key) != actual_fee.get(key)
+        }
         evidence = {
             "source": "persisted_candidate_calibration_and_replay",
             "candidate_id": candidate.candidate_id,
@@ -350,7 +393,17 @@ class ResearchRepository:
                 Decimal("5") <= qualified_setups <= Decimal("15")
             ),
             "signal_to_fill_rate": metrics.get("signal_to_fill_rate", "0"),
-            "complete_replay_coverage": "1" if replay_integrity else "0",
+            "eligible_feature_frames": frame_count,
+            "full_feature_frames": max(frame_count - partial_frames - unusable_frames, 0),
+            "partial_feature_frames": partial_frames,
+            "unusable_feature_frames": unusable_frames,
+            "complete_eligible_markets": complete_markets,
+            "total_eligible_markets": total_markets,
+            "market_coverage": str(Decimal(complete_markets) / Decimal(max(total_markets, 1))),
+            "frame_coverage": str(coverage_ratio),
+            "maximum_source_gaps": coverage.get("missing_source_counts", {}),
+            "coverage_blockers": coverage.get("replay_eligibility_blockers", []),
+            "complete_replay_coverage": str(coverage_ratio),
             "volatility_regimes": metrics.get("volatility_regime_coverage", 0),
             "liquidity_regimes": metrics.get("liquidity_regime_coverage", 0),
             "timing_tiers": metrics.get("timing_tier_coverage", 0),
@@ -373,11 +426,26 @@ class ResearchRepository:
                 * Decimal("100")
                 / Decimal(max(market_count, 1))
             ),
-            "verified_fee_model": bool(replay_run and replay_run.cost_model),
-            "beats_baseline": _decimal_or_zero(metrics.get("net_pnl_per_market"))
-            > _decimal_or_zero(baseline_metrics.get("net_pnl_per_market")),
-            "forbidden_parameter_changed": False,
-            "safety_or_data_quality_gate_changed": False,
+            "fee_metadata_expected": {key: expected_fee.get(key) for key in fee_keys},
+            "fee_metadata_mismatches": fee_mismatches,
+            "verified_fee_model": not fee_mismatches,
+            "candidate_adjusted_lower_confidence_expectancy": (
+                (metrics.get("penalties") or {}).get("adjusted_lower_confidence_expectancy", "0")
+            ),
+            "baseline_adjusted_lower_confidence_expectancy": (
+                (baseline_metrics.get("penalties") or {}).get(
+                    "adjusted_lower_confidence_expectancy", "0"
+                )
+            ),
+            "beats_baseline": _decimal_or_zero(
+                (metrics.get("penalties") or {}).get("adjusted_lower_confidence_expectancy")
+            )
+            > _decimal_or_zero(
+                (baseline_metrics.get("penalties") or {}).get(
+                    "adjusted_lower_confidence_expectancy"
+                )
+            ),
+            **config_diff,
         }
         blockers = []
         if metrics.get("status") != "EVALUATED":
@@ -386,6 +454,12 @@ class ResearchRepository:
             blockers.append("candidate_replay_trade_count_mismatch")
         if reported_closed and not trades:
             blockers.append("candidate_metrics_with_fills_missing_replay_evidence")
+        if config_diff["forbidden_parameter_changed"]:
+            blockers.append("candidate_forbidden_parameter_change")
+        if coverage_ratio < Decimal("0.95"):
+            blockers.append("candidate_replay_coverage_below_threshold")
+        if fee_mismatches:
+            blockers.append("candidate_fee_metadata_mismatch")
         return evidence, blockers
 
     def get_replay_run(self, replay_run_id: str) -> ResearchReplayRun | None:
@@ -618,3 +692,59 @@ def _int_or_none(value: Any) -> int | None:
         return int(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+_CANDIDATE_TUNABLE_PATHS = {
+    "edge_threshold_cents",
+    "calibration_overrides",
+    "tiers.early.score",
+    "tiers.early.max_ask",
+    "tiers.early.time_stop",
+    "tiers.early.max_hold",
+    "tiers.normal.score",
+    "tiers.normal.max_ask",
+    "tiers.normal.time_stop",
+    "tiers.normal.max_hold",
+    "tiers.late.score",
+    "tiers.late.max_ask",
+    "tiers.late.time_stop",
+    "tiers.late.max_hold",
+    "logistic_model",
+    "logistic_probability_threshold",
+}
+
+
+def _config_diff_evidence(baseline: Any, candidate: Any) -> dict[str, Any]:
+    before = _flatten_payload(baseline)
+    after = _flatten_payload(candidate)
+    changed = sorted(
+        path for path in set(before) | set(after) if before.get(path) != after.get(path)
+    )
+    allowed = [path for path in changed if _allowed_candidate_path(path)]
+    forbidden = [path for path in changed if path not in allowed]
+    return {
+        "changed_parameter_paths": changed,
+        "allowed_changed_parameter_paths": allowed,
+        "forbidden_changed_parameter_paths": forbidden,
+        "forbidden_parameter_changed": bool(forbidden),
+        "safety_or_data_quality_gate_changed": bool(forbidden),
+    }
+
+
+def _allowed_candidate_path(path: str) -> bool:
+    return path in _CANDIDATE_TUNABLE_PATHS or path.startswith("calibration_overrides.")
+
+
+def _flatten_payload(value: Any, prefix: str = "") -> dict[str, Any]:
+    if isinstance(value, dict):
+        flattened: dict[str, Any] = {}
+        for key, item in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            flattened.update(_flatten_payload(item, path))
+        return flattened
+    if isinstance(value, list):
+        return {
+            f"{prefix}[{index}]": item
+            for index, item in enumerate(value)
+        }
+    return {prefix: (type(value).__name__, value)}

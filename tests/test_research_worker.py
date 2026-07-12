@@ -13,6 +13,7 @@ from ape.repositories.inputs import StrategyConfigVersionInput
 from ape.repositories.strategy_v2 import StrategyV2Repository
 from ape.research import service as research_service
 from ape.research.calibration import CalibrationResult, CandidateSpec
+from ape.research.fees import verified_kalshi_taker_fee_model
 from ape.research.replay import ReplayTrade
 from ape.research.repository import ResearchRepository
 from ape.research.service import run_research_cycle
@@ -206,7 +207,10 @@ def test_research_cycle_persists_calibration_candidate_replay_trades(
                 )
             )
             assert stored is not None
-            assert stored.trade_id.endswith("candidate-fixture-candidate-trade")
+            assert stored.trade_id.endswith(
+                "candidate-fixture-search_development-candidate-trade"
+            )
+            assert stored.measurements["evidence_partition"] == "search_development"
             assert stored.strategy_config_version_id == "research-candidate-fixture"
             assert stored.market_ticker == trade.market_ticker
             assert stored.net_pnl_cents == Decimal("4")
@@ -249,7 +253,17 @@ def test_automatic_governance_uses_persisted_candidate_evidence(tmp_path) -> Non
                     "dataset_hash": "fixture",
                     "unique_market_count": 500,
                     "event_count": 500,
-                    "cost_model": {"verified": True},
+                        "cost_model": verified_kalshi_taker_fee_model().metadata(),
+                        "raw_metrics": {
+                            "archive_coverage": {
+                                "event_count": 500,
+                                "complete_markets": 500,
+                                "minimum_coverage": "1",
+                                "per_market_coverage": {
+                                    f"M{index}": {} for index in range(500)
+                                },
+                            }
+                        },
                     "started_at": at,
                 }
             )
@@ -266,10 +280,26 @@ def test_automatic_governance_uses_persisted_candidate_evidence(tmp_path) -> Non
                         "ordered_market_tickers": [f"M{index}" for index in range(500)]
                     },
                     "validation_metrics": {
-                        "candidate-baseline-v2": {"net_pnl_per_market": "0"}
+                        "candidate-baseline-v2": {
+                            "net_pnl_per_market": "0",
+                            "penalties": {"adjusted_lower_confidence_expectancy": "0"},
+                        }
                     },
                     "started_at": at,
                 }
+            )
+            StrategyV2Repository(session).ensure_config_version(
+                StrategyConfigVersionInput(
+                    strategy_config_version_id="config-baseline",
+                    strategy_id="btc15_momentum_v2",
+                    architecture_version=V2_ARCHITECTURE_VERSION,
+                    feature_schema_version=V2_FEATURE_SCHEMA_VERSION,
+                    parameter_snapshot=V2_PARAMETERS,
+                    parameter_hash="fixture-baseline",
+                    code_commit_sha="fixture",
+                    source="RESEARCH",
+                    lifecycle_state="DRAFT",
+                )
             )
             StrategyV2Repository(session).ensure_config_version(
                 StrategyConfigVersionInput(
@@ -281,6 +311,7 @@ def test_automatic_governance_uses_persisted_candidate_evidence(tmp_path) -> Non
                     parameter_hash="fixture",
                     code_commit_sha="fixture",
                     source="RESEARCH",
+                    parent_config_version_id="config-baseline",
                     lifecycle_state="DRAFT",
                     candidate_id="candidate-governance",
                 )
@@ -289,7 +320,8 @@ def test_automatic_governance_uses_persisted_candidate_evidence(tmp_path) -> Non
                 {
                     "candidate_id": "candidate-governance",
                     "strategy_config_version_id": "config-governance",
-                    "calibration_run_id": "calibration-governance",
+                        "calibration_run_id": "calibration-governance",
+                        "parent_strategy_config_version_id": "config-baseline",
                     "generated_strategy_id": "btc15_momentum_v2_candidate_governance",
                     "architecture_version": V2_ARCHITECTURE_VERSION,
                     "feature_schema_version": V2_FEATURE_SCHEMA_VERSION,
