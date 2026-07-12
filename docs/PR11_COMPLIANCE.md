@@ -58,5 +58,11 @@ change. Invalid startup pins omit only the candidate and surface a
 candidate-specific blocker; they never alter the baseline V2, v1, or v1_fast
 variants.
 
+## Core Batch Completion
+
+Automatic governance transitions now use persisted candidate-specific calibration
+and replay evidence, retain an immutable event for every completed transition,
+and update the associated config version in the same database transaction.
+
 No paper trading, live execution, credentials, private API calls, deployment, or
 new migration is included in this remediation batch.
