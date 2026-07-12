@@ -23,6 +23,8 @@ from ape.research.calibration import (
     run_bounded_calibration,
     transition_candidate,
 )
+from ape.research.repository import _config_diff_evidence
+from ape.strategy.momentum_v2 import V2_PARAMETERS
 
 
 def _outcomes(count: int) -> list[ResearchMarketOutcome]:
@@ -68,6 +70,19 @@ def test_search_is_bounded_and_deterministic() -> None:
         candidate.candidate_id for candidate in second
     ]
     assert first[0].model_type == "BASELINE"
+
+
+def test_heuristic_candidates_exclude_the_weight_multiplier_helper_override() -> None:
+    candidates = bounded_candidate_specs("calibration-governance-overrides")
+
+    for candidate in candidates:
+        if candidate.model_type != "WEIGHTED_HEURISTIC":
+            continue
+        overrides = candidate.parameters["calibration_overrides"]
+        assert "weight_multiplier" not in overrides
+        assert _config_diff_evidence(V2_PARAMETERS, candidate.parameters)[
+            "forbidden_parameter_changed"
+        ] is False
 
 
 def test_search_space_snapshot_is_reproducible_and_complete() -> None:

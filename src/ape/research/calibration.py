@@ -217,7 +217,11 @@ def bounded_candidate_specs(calibration_run_id: str) -> tuple[CandidateSpec, ...
         selected = {key: values[int(rng.integers(0, len(values)))] for key, values in grids.items()}
         parameters["edge_threshold_cents"] = selected["edge"]
         parameters["calibration_overrides"] = {
-            **selected,
+            **{
+                key: value
+                for key, value in selected.items()
+                if key != "weight_multiplier"
+            },
             "component_weight_multipliers": {
                 component: grids["weight_multiplier"][
                     int(rng.integers(0, len(grids["weight_multiplier"])))
