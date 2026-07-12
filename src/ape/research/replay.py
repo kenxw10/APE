@@ -674,6 +674,7 @@ def _closed_trade(
     fee_model: FeeModel,
     reason: str,
 ) -> ReplayTrade:
+    entry_features = position.pending.evaluation.measurements.get("features") or {}
     gross = (exit_price - position.entry_price) * Decimal("100")
     fees = fee_model.fee_cents(price=position.entry_price) + fee_model.fee_cents(price=exit_price)
     best = (position.best_bid - position.entry_price) * Decimal("100")
@@ -706,6 +707,10 @@ def _closed_trade(
         measurements={
             "replay_schema_version": REPLAY_SCHEMA_VERSION,
             "lifecycle_version": V2_LIFECYCLE_SCHEMA_VERSION,
+            "volatility_regime": entry_features.get("volatility_regime"),
+            "liquidity_regime": entry_features.get("liquidity_regime"),
+            "timing_tier": position.pending.evaluation.timing_tier,
+            "entry_feature_snapshot_id": position.pending.event_id,
         },
     )
 
