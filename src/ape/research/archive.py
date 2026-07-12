@@ -268,6 +268,7 @@ def _archive(repository: ResearchRepository, event: dict[str, Any], counts: dict
         # Mutable sources use event_time as the incremental archive cursor.
         existing.event_time = event["event_time"]
         existing.received_at = event["received_at"]
+        existing.event_hash = _normalized_event_hash(existing)
         repository.session.flush()
         return
     repository.archive_event(event)

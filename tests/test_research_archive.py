@@ -22,6 +22,7 @@ from ape.research.archive import (
     _coverage,
     _feature_event,
     _labels_for_market,
+    _normalized_event_hash,
     _orderbook_event,
     archive_research_events,
     reconcile_market_outcomes,
@@ -155,7 +156,7 @@ def test_archive_refreshes_mutable_market_payload_when_source_version_advances(t
         engine.dispose()
 
 
-def test_archive_advances_mutable_market_cursor_when_payload_is_unchanged(tmp_path) -> None:
+def test_archive_recomputes_mutable_market_replay_hash_when_cursor_advances(tmp_path) -> None:
     engine = create_engine_from_config(
         load_config(
             {"DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'market-cursor.sqlite'}"}
@@ -201,8 +202,9 @@ def test_archive_advances_mutable_market_cursor_when_payload_is_unchanged(tmp_pa
             assert third.archived_events == 0
             assert refreshed is not None
             assert refreshed.event_time == advanced_at.replace(tzinfo=UTC)
-            assert refreshed.event_hash == original_event_hash
-            assert _dataset_hash((refreshed,)) == original_dataset_hash
+            assert refreshed.event_hash != original_event_hash
+            assert refreshed.event_hash == _normalized_event_hash(refreshed)
+            assert _dataset_hash((refreshed,)) != original_dataset_hash
     finally:
         engine.dispose()
 
