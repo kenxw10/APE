@@ -316,10 +316,11 @@ def run_research_cycle(
                                     evidence_partition=partition,
                                 )
                             )
-                    repository.advance_candidate_governance(
-                        candidate_id=candidate.candidate_id,
-                        actor="ape-research-worker",
-                    )
+                    if candidate.candidate_id == calibration.selected_candidate_id:
+                        repository.advance_candidate_governance(
+                            candidate_id=candidate.candidate_id,
+                            actor="ape-research-worker",
+                        )
     repository.finish_replay_run(replay_run, status="COMPLETED", finished_at=checked_at)
     return {
         "status": "completed",

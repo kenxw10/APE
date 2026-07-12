@@ -409,6 +409,74 @@ def test_research_cycle_persists_calibration_candidate_replay_trades(
         engine.dispose()
 
 
+def test_research_cycle_advances_only_the_selected_candidate(tmp_path, monkeypatch) -> None:
+    config = load_config(
+        {
+            "DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'selected-candidate.sqlite'}",
+            "APP_MODE": "DRY_RUN",
+            "CALIBRATION_ENABLED": "true",
+            "TRADING_ENABLED": "false",
+            "EXECUTE": "false",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    factory = create_session_factory(engine)
+    at = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
+    selected = CandidateSpec(
+        candidate_id="candidate-selected",
+        generated_strategy_id="btc15_momentum_v2_candidate_selected",
+        model_type="WEIGHTED_HEURISTIC",
+        parameters={"fixture": "selected"},
+    )
+    unselected = CandidateSpec(
+        candidate_id="candidate-unselected",
+        generated_strategy_id="btc15_momentum_v2_candidate_unselected",
+        model_type="WEIGHTED_HEURISTIC",
+        parameters={"fixture": "unselected"},
+    )
+
+    def fake_calibration(**_kwargs):
+        return CalibrationResult(
+            "COMPLETED",
+            {"holdout_hash": "fixture-holdout"},
+            (selected, unselected),
+            {
+                selected.candidate_id: {"status": "EVALUATED"},
+                unselected.candidate_id: {"status": "EVALUATED"},
+            },
+            selected.candidate_id,
+            (),
+            (),
+        )
+
+    advanced: list[tuple[str, str]] = []
+
+    def capture_advance(self, *, candidate_id: str, actor: str):
+        del self
+        advanced.append((candidate_id, actor))
+        return []
+
+    monkeypatch.setattr(research_service, "run_bounded_calibration", fake_calibration)
+    monkeypatch.setattr(
+        research_service.ResearchRepository,
+        "advance_candidate_governance",
+        capture_advance,
+    )
+    try:
+        with factory() as session:
+            run_research_cycle(config, session, checked_at=at)
+            session.commit()
+        with factory() as session:
+            repository = ResearchRepository(session)
+            assert repository.get_candidate(selected.candidate_id) is not None
+            assert repository.get_candidate(unselected.candidate_id) is not None
+
+        assert advanced == [(selected.candidate_id, "ape-research-worker")]
+    finally:
+        engine.dispose()
+
+
 def test_automatic_governance_uses_persisted_candidate_evidence(tmp_path) -> None:
     config = load_config({"DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'governance.sqlite'}"})
     engine = create_engine_from_config(config)

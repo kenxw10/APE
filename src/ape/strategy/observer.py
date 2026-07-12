@@ -5162,7 +5162,15 @@ def _v2_management_state(
     held_bid: Decimal | None,
     parameters: dict[str, Any],
 ) -> tuple[str, str | None, str | None, str | None]:
-    features = (decision.measurements or {}).get("features")
+    measurements = decision.measurements if isinstance(decision.measurements, dict) else {}
+    if measurements.get("candidate_pin_cleanup") is True:
+        return (
+            STATE_V2_FORCE_EXIT,
+            "v2_candidate_pin_invalid_force_exit",
+            "FORCE",
+            None,
+        )
+    features = measurements.get("features")
     features = features if isinstance(features, dict) else {}
     age = max(
         0, int((_as_utc(decision.evaluated_at) - _as_utc(position.opened_at)).total_seconds())

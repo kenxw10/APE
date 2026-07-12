@@ -220,6 +220,12 @@ def test_pin_failure_runs_pending_candidate_intent_cleanup(tmp_path, monkeypatch
         primary_reason="fixture",
         app_mode="DRY_RUN",
         strategy_id=V2_STRATEGY_ID,
+        market_ticker="KXBTC15M-PIN-CLEANUP-OPEN",
+        candidate_side="YES",
+        boundary=Decimal("62000"),
+        brti_value=Decimal("62010"),
+        seconds_left=300,
+        measurements={"features": {"return_5s": "0", "return_15s": "0"}},
         raw_context_hash="candidate-pin-cleanup",
     )
     try:
@@ -327,6 +333,8 @@ def test_pin_failure_runs_pending_candidate_intent_cleanup(tmp_path, monkeypatch
         assert intent is not None
         assert intent.status == "EXPIRED"
         assert exit_intent is not None
+        assert exit_intent.trigger == "v2_candidate_pin_invalid_force_exit"
+        assert exit_intent.trigger_classification == "FORCE"
         assert cleanup is not None
         assert cleanup.decision_state == STATE_V2_HARD_GATE_BLOCKED
         assert cleanup.primary_reason == "candidate_pin_not_dry_run_challenger"
