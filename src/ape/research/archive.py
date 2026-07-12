@@ -425,7 +425,49 @@ def _feature_vector_for_snapshot(
     )
     measurements = decision.measurements if decision else None
     recovered = measurements.get("features") if isinstance(measurements, dict) else None
-    return recovered if isinstance(recovered, dict) else None
+    if not isinstance(recovered, dict):
+        return None
+    return _hydrate_legacy_v2_feature_vector(row, recovered)
+
+
+def _hydrate_legacy_v2_feature_vector(
+    row: StrategyFeatureSnapshot, recovered: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Complete pre-PR11 decision features from their immutable snapshot context."""
+    vector = dict(recovered)
+    for key, value in {
+        "candidate_side": row.candidate_side,
+        "candidate_mode": row.candidate_mode,
+        "boundary": row.boundary,
+        "current_brti": row.current_brti,
+        "seconds_since_open": row.seconds_since_open,
+        "seconds_left": row.seconds_left,
+        "quality_state": row.quality_state,
+        "architecture_version": row.architecture_version,
+        "feature_schema_version": row.feature_schema_version,
+        "replay_schema_version": row.replay_schema_version,
+    }.items():
+        if value is not None:
+            vector[key] = value
+    if row.seconds_since_open is not None and row.seconds_left is not None:
+        from ape.strategy.momentum_v2 import _timing_tier
+
+        vector["timing_tier"] = _timing_tier(
+            row.seconds_since_open, row.seconds_left
+        )
+    if any(
+        vector.get(key) is None
+        for key in (
+            "candidate_side",
+            "candidate_mode",
+            "boundary",
+            "seconds_since_open",
+            "seconds_left",
+            "timing_tier",
+        )
+    ):
+        return None
+    return vector
 
 
 def _lifecycle_event(row: Any, source_table: str) -> dict[str, Any]:

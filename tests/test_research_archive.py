@@ -20,6 +20,7 @@ from ape.db.session import create_engine_from_config, create_session_factory
 from ape.research.archive import (
     _counterfactual_label,
     _coverage,
+    _feature_event,
     _labels_for_market,
     archive_research_events,
     reconcile_market_outcomes,
@@ -393,6 +394,17 @@ def test_legacy_v2_snapshot_recovers_decision_vector_for_labels(tmp_path) -> Non
         key: str(value) if isinstance(value, Decimal) else value
         for key, value in replayable_feature_vector().items()
     }
+    for key in (
+        "candidate_side",
+        "candidate_mode",
+        "boundary",
+        "current_brti",
+        "seconds_since_open",
+        "seconds_left",
+        "timing_tier",
+        "quality_state",
+    ):
+        vector.pop(key)
     try:
         with factory() as session:
             market = Market(
@@ -408,9 +420,20 @@ def test_legacy_v2_snapshot_recovers_decision_vector_for_labels(tmp_path) -> Non
                 feature_schema_version="momentum_v2_features_v2",
                 context_hash="legacy-vector-context",
                 candidate_side="YES",
+                candidate_mode="CONTINUATION",
                 boundary=Decimal("62000"),
+                current_brti=Decimal("62010"),
+                seconds_since_open=360,
+                seconds_left=360,
                 complete_feature_vector=None,
                 replay_readiness=None,
+                quality_state={
+                    "market_ready": True,
+                    "reference_ready": True,
+                    "book_ready": True,
+                    "canonical_market_ready": True,
+                    "canonical_reference_ready": True,
+                },
             )
             decision = StrategyDecision(
                 decision_id="legacy-vector-decision",
@@ -434,8 +457,14 @@ def test_legacy_v2_snapshot_recovers_decision_vector_for_labels(tmp_path) -> Non
             session.add_all((market, snapshot, decision, book))
             session.flush()
 
+            archived = _feature_event(session, snapshot)
             labels = _labels_for_market(session, market, [], None)
 
+            assert archived["replay_readiness"] == "FULL"
+            assert archived["payload"]["feature_vector"]["boundary"] == "62000"
+            assert archived["payload"]["feature_vector"]["seconds_since_open"] == 360
+            assert archived["payload"]["feature_vector"]["seconds_left"] == 360
+            assert archived["payload"]["feature_vector"]["timing_tier"] == "normal"
             label = labels["counterfactual_labels"][snapshot.feature_snapshot_id]
             assert label["entry_fillable"] is True
             assert label["entry_label_readiness"] == "FULL"
