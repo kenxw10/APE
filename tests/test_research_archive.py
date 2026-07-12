@@ -120,6 +120,54 @@ def test_archive_refreshes_mutable_market_payload_when_source_version_advances(t
         engine.dispose()
 
 
+def test_archive_advances_mutable_market_cursor_when_payload_is_unchanged(tmp_path) -> None:
+    engine = create_engine_from_config(
+        load_config(
+            {"DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'market-cursor.sqlite'}"}
+        )
+    )
+    run_migrations(engine)
+    factory = create_session_factory(engine)
+    at = datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
+    try:
+        with factory() as session:
+            market = Market(
+                market_ticker="KXBTC15M-CURSOR",
+                open_time=at,
+                series_ticker="KXBTC15M",
+            )
+            session.add(market)
+            session.flush()
+            archive_research_events(session, now=at)
+            event = session.scalar(
+                select(ResearchReplayEvent).where(
+                    ResearchReplayEvent.source_table == "markets",
+                    ResearchReplayEvent.source_row_id == str(market.id),
+                )
+            )
+            assert event is not None
+
+            advanced_at = event.event_time + timedelta(seconds=1)
+            market.updated_at = advanced_at
+            session.flush()
+            second = archive_research_events(session, now=advanced_at)
+            third = archive_research_events(session, now=advanced_at + timedelta(seconds=1))
+            session.commit()
+
+            refreshed = session.scalar(
+                select(ResearchReplayEvent).where(
+                    ResearchReplayEvent.source_table == "markets",
+                    ResearchReplayEvent.source_row_id == str(market.id),
+                )
+            )
+            assert second.archived_events == 0
+            assert third.archived_events == 0
+            assert refreshed is not None
+            assert refreshed.event_time == advanced_at.replace(tzinfo=UTC)
+    finally:
+        engine.dispose()
+
+
 def test_archive_coverage_counts_readiness_only_for_feature_snapshots(tmp_path) -> None:
     engine = create_engine_from_config(
         load_config(
@@ -307,9 +355,9 @@ def test_counterfactual_label_uses_the_first_in_window_executable_book() -> None
             market_ticker=market.market_ticker,
             received_at=at + timedelta(seconds=5),
             yes_ask=Decimal("0.55"),
-            yes_ask_count=Decimal("1"),
+            yes_ask_count=Decimal("10"),
             yes_bid=Decimal("0.65"),
-            yes_bid_count=Decimal("1"),
+            yes_bid_count=Decimal("2"),
         ),
     ]
     ticks = [
@@ -325,6 +373,7 @@ def test_counterfactual_label_uses_the_first_in_window_executable_book() -> None
 
     assert label["entry_fillable"] is True
     assert label["entry_price"] == "0.60"
+    assert label["depth_5s"] == "2"
     assert label["gross_markout_5s_cents"] == "5.00"
     assert label["net_markout_5s_cents"] is not None
 

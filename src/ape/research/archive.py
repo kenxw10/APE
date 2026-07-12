@@ -247,6 +247,10 @@ def _archive(repository: ResearchRepository, event: dict[str, Any], counts: dict
         source_table=event["source_table"], source_row_id=event["source_row_id"]
     )
     if existing is not None and existing.source_hash == event["source_hash"]:
+        # Mutable sources use event_time as the incremental archive cursor.
+        existing.event_time = event["event_time"]
+        existing.received_at = event["received_at"]
+        repository.session.flush()
         return
     repository.archive_event(event)
     counts[event["event_type"]] = counts.get(event["event_type"], 0) + 1
@@ -799,7 +803,7 @@ def _counterfactual_label(
             else None
         )
         values[f"executable_bid_{seconds}s"] = mark
-        values[f"depth_{seconds}s"] = _ask_depth(mark_book, side)
+        values[f"depth_{seconds}s"] = _bid_depth(mark_book, side)
         values[f"gross_markout_{seconds}s_cents"] = (
             (mark - entry_price) * Decimal("100")
             if mark is not None and entry_price is not None
@@ -911,6 +915,19 @@ def _bid(book: OrderbookSnapshot | None, side: str | None) -> Decimal | None:
     if book is None:
         return None
     value = book.yes_bid if side == "YES" else book.no_bid if side == "NO" else None
+    return Decimal(value) if value is not None else None
+
+
+def _bid_depth(book: OrderbookSnapshot | None, side: str | None) -> Decimal | None:
+    if book is None:
+        return None
+    value = (
+        book.yes_bid_count or book.yes_bid_size
+        if side == "YES"
+        else book.no_bid_count or book.no_bid_size
+        if side == "NO"
+        else None
+    )
     return Decimal(value) if value is not None else None
 
 
