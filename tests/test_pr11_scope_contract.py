@@ -1,17 +1,21 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from sqlalchemy import inspect
+from sqlalchemy.exc import IntegrityError
 from tests.test_research_helpers import at_base, feature_event, orderbook_event, valid_vector
 
 from ape.api.main import create_app
 from ape.config import WORKER_ROLES, load_config
-from ape.db.migrations import CURRENT_SCHEMA_VERSION
-from ape.db.models import Base
+from ape.db.migrations import CURRENT_SCHEMA_VERSION, run_migrations
+from ape.db.models import Base, ResearchReplayEvent
+from ape.db.session import create_engine_from_config, create_session_factory
 from ape.repositories.storage_retention import ALLOWED_RETENTION_TABLES, ALLOWED_STATUS_READ_TABLES
+from ape.research.archive import _hydrate_persisted_feature_vector
 from ape.research.calibration import (
     LIFECYCLE_DRAFT,
     LIFECYCLE_PAPER_CANDIDATE,
@@ -41,7 +45,7 @@ from ape.strategy.momentum_v2 import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_r1_single_research_migration_and_schema_contract() -> None:
+def test_r1_single_research_migration_and_schema_contract(tmp_path) -> None:
     assert CURRENT_SCHEMA_VERSION == "0010_research_replay_calibration"
     assert {
         "research_replay_events",
@@ -52,6 +56,28 @@ def test_r1_single_research_migration_and_schema_contract() -> None:
         "research_candidates",
         "research_governance_events",
     } <= set(Base.metadata.tables)
+    engine = create_engine_from_config(
+        load_config({"DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'r1.sqlite'}"})
+    )
+    try:
+        run_migrations(engine)
+        run_migrations(engine)
+        factory = create_session_factory(engine)
+        with factory() as session:
+            session.add_all(
+                    (
+                        _replay_event("r1-first"),
+                        _replay_event("same-source"),
+                        _replay_event("same-source", event_id="r1-first"),
+                )
+            )
+            with pytest.raises(IntegrityError):
+                session.flush()
+            session.rollback()
+        indexes = inspect(engine).get_indexes("research_replay_events")
+        assert any(index["name"] == "ix_research_replay_events_market_time" for index in indexes)
+    finally:
+        engine.dispose()
 
 
 def test_r2_complete_vector_is_hashed_and_boundary_cross_remains_non_enterable() -> None:
@@ -60,6 +86,31 @@ def test_r2_complete_vector_is_hashed_and_boundary_cross_remains_non_enterable()
     vector["candidate_mode"] = "BOUNDARY_CROSS_HOLD"
     evaluation = evaluate_momentum_v2_feature_vector(vector)
     assert evaluation.state != "DRY_RUN_ENTRY_SIGNAL"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {},
+        {"candidate_mode": "BOUNDARY_CROSS_HOLD"},
+        {"quality_state": {"market_ready": False, "reference_ready": True, "book_ready": True}},
+    ),
+)
+def test_r2_live_and_json_persisted_vectors_have_identical_evaluator_results(changes) -> None:
+    live = valid_vector()
+    live.update(changes)
+    persisted = _json_safe_vector(live)
+
+    live_result = evaluate_momentum_v2_feature_vector(live)
+    persisted_result = evaluate_momentum_v2_feature_vector(
+        _hydrate_persisted_feature_vector(persisted)
+    )
+
+    assert (persisted_result.state, persisted_result.reason, persisted_result.blockers) == (
+        live_result.state,
+        live_result.reason,
+        live_result.blockers,
+    )
 
 
 def test_r3_research_role_is_explicit_and_database_only() -> None:
@@ -220,3 +271,34 @@ def test_r15_eighteen_market_fixture_has_real_event_time_sources_and_labels() ->
         "exit_retry_exhaustion",
         "partial_coverage_frozen_holdout",
     }
+
+
+def _replay_event(
+    source_row_id: str,
+    *,
+    event_id: str | None = None,
+) -> ResearchReplayEvent:
+    at = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
+    return ResearchReplayEvent(
+        event_id=event_id or source_row_id,
+        market_ticker="R1",
+        event_type="MARKET",
+        event_time=at,
+        received_at=at,
+        source_table="r1_source",
+        source_row_id=source_row_id,
+        replay_schema_version=REPLAY_SCHEMA_VERSION,
+        payload={},
+        event_hash=source_row_id,
+        replay_readiness="FULL",
+    )
+
+
+def _json_safe_vector(value):
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_safe_vector(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_vector(item) for item in value]
+    return value
