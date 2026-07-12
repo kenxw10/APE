@@ -99,6 +99,23 @@ def test_research_status_normalizes_naive_sqlite_timestamps(tmp_path) -> None:
                     blockers=[],
                 )
             )
+            session.add(
+                ResearchReplayEvent(
+                    event_id="naive-coverage-report",
+                    market_ticker=None,
+                    event_type="COVERAGE_REPORT",
+                    event_time=naive_at + timedelta(seconds=10),
+                    received_at=naive_at + timedelta(seconds=10),
+                    source_table="research_coverage_reports",
+                    source_row_id="naive-coverage",
+                    source_hash="fixture",
+                    replay_schema_version="momentum_v2_replay_v1",
+                    payload={"coverage": "synthetic"},
+                    event_hash="naive-coverage",
+                    replay_readiness="FULL",
+                    blockers=[],
+                )
+            )
             session.commit()
 
         status = build_research_status(

@@ -47,7 +47,7 @@ def archive_research_events(session: Session, *, now: datetime | None = None) ->
     for row in _unarchived_rows(session, repository, Market, "markets"):
         _archive(repository, _market_event(row), counts)
     for row in _unarchived_rows(session, repository, ReferenceTick, "reference_ticks"):
-        _archive(repository, _reference_event(row), counts)
+        _archive(repository, _reference_event(session, row), counts)
     for row in _unarchived_rows(session, repository, OrderbookSnapshot, "orderbook_snapshots"):
         _archive(repository, _orderbook_event(row), counts)
     for row in _unarchived_rows(session, repository, PublicTrade, "public_trades"):
@@ -62,6 +62,7 @@ def archive_research_events(session: Session, *, now: datetime | None = None) ->
         session, repository, StrategyPositionOutcome, "strategy_position_outcomes"
     ):
         _archive(repository, _lifecycle_event(row, "strategy_position_outcomes"), counts)
+    _associate_unassigned_reference_events(session)
     _refresh_mature_labels(session, repository)
     coverage = _coverage(session, data_cutoff=checked_at)
     repository.archive_event(_coverage_event(coverage, checked_at))
@@ -248,13 +249,14 @@ def _market_event(row: Market) -> dict[str, Any]:
     )
 
 
-def _reference_event(row: ReferenceTick) -> dict[str, Any]:
+def _reference_event(session: Session, row: ReferenceTick) -> dict[str, Any]:
+    event_time = _utc(row.source_ts or row.received_at)
     return _event(
         row=row,
         source_table="reference_ticks",
         event_type="REFERENCE",
-        market_ticker=None,
-        event_time=row.source_ts or row.received_at,
+        market_ticker=_active_btc15_market_ticker(session, event_time),
+        event_time=event_time,
         received_at=row.received_at,
         sequence_number=row.sequence_number,
         payload={
@@ -265,6 +267,53 @@ def _reference_event(row: ReferenceTick) -> dict[str, Any]:
             "source_age_ms": row.source_age_ms,
         },
     )
+
+
+def _active_btc15_market_ticker(session: Session, event_time: datetime) -> str | None:
+    """Associate a reference tick with exactly one active BTC15 market interval."""
+    return session.scalar(
+        select(Market.market_ticker)
+        .where(
+            Market.open_time.is_not(None),
+            Market.close_time.is_not(None),
+            Market.open_time <= event_time,
+            Market.close_time > event_time,
+            or_(
+                Market.series_ticker == "KXBTC15M",
+                Market.market_ticker.ilike("KXBTC15M%"),
+            ),
+        )
+        .order_by(Market.open_time.desc(), Market.id.desc())
+        .limit(1)
+    )
+
+
+def _associate_unassigned_reference_events(session: Session) -> None:
+    """Backfill legacy global reference events when their BTC15 window is known."""
+    active_market_exists = exists(
+        select(1).where(
+            Market.open_time.is_not(None),
+            Market.close_time.is_not(None),
+            Market.open_time <= ResearchReplayEvent.event_time,
+            Market.close_time > ResearchReplayEvent.event_time,
+            or_(
+                Market.series_ticker == "KXBTC15M",
+                Market.market_ticker.ilike("KXBTC15M%"),
+            ),
+        )
+    )
+    rows = session.scalars(
+        select(ResearchReplayEvent)
+        .where(
+            ResearchReplayEvent.event_type == "REFERENCE",
+            ResearchReplayEvent.market_ticker.is_(None),
+            active_market_exists,
+        )
+        .order_by(ResearchReplayEvent.id.asc())
+        .limit(ARCHIVE_BATCH_SIZE)
+    )
+    for event in rows:
+        event.market_ticker = _active_btc15_market_ticker(session, _utc(event.event_time))
 
 
 def _orderbook_event(row: OrderbookSnapshot) -> dict[str, Any]:

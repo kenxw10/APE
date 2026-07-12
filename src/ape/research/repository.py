@@ -526,6 +526,7 @@ class ResearchRepository:
     def latest_event(self) -> ResearchReplayEvent | None:
         return self.session.scalar(
             select(ResearchReplayEvent)
+            .where(ResearchReplayEvent.event_type != "COVERAGE_REPORT")
             .order_by(desc(ResearchReplayEvent.event_time), desc(ResearchReplayEvent.id))
             .limit(1)
         )

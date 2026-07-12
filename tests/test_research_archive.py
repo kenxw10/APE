@@ -57,6 +57,109 @@ def test_archive_is_idempotent_and_keeps_only_normalized_market_values(tmp_path)
         engine.dispose()
 
 
+def test_archive_assigns_reference_ticks_to_the_active_btc15_market(tmp_path) -> None:
+    engine = create_engine_from_config(
+        load_config({"DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'reference-market.sqlite'}"})
+    )
+    run_migrations(engine)
+    factory = create_session_factory(engine)
+    at = datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
+    try:
+        with factory() as session:
+            session.add_all(
+                (
+                    Market(
+                        market_ticker="KXBTC15M-REFERENCE-MARKET",
+                        series_ticker="KXBTC15M",
+                        open_time=at,
+                        close_time=at + timedelta(minutes=15),
+                        functional_strike=Decimal("62000"),
+                    ),
+                    ReferenceTick(
+                        source="kalshi_cfbenchmarks_brti",
+                        received_at=at + timedelta(seconds=5),
+                        parsed_value=Decimal("62001"),
+                        parse_status="valid",
+                    ),
+                    ReferenceTick(
+                        source="kalshi_cfbenchmarks_brti",
+                        received_at=at + timedelta(minutes=15),
+                        parsed_value=Decimal("62002"),
+                        parse_status="valid",
+                    ),
+                )
+            )
+            session.commit()
+
+            archive_research_events(session, now=at + timedelta(minutes=15))
+            session.commit()
+
+            reference_events = list(
+                session.scalars(
+                    select(ResearchReplayEvent)
+                    .where(ResearchReplayEvent.event_type == "REFERENCE")
+                    .order_by(ResearchReplayEvent.event_time.asc())
+                )
+            )
+            assert [event.market_ticker for event in reference_events] == [
+                "KXBTC15M-REFERENCE-MARKET",
+                None,
+            ]
+    finally:
+        engine.dispose()
+
+
+def test_archive_backfills_legacy_global_reference_events(tmp_path) -> None:
+    engine = create_engine_from_config(
+        load_config({"DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'legacy-reference.sqlite'}"})
+    )
+    run_migrations(engine)
+    factory = create_session_factory(engine)
+    at = datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
+    try:
+        with factory() as session:
+            session.add_all(
+                (
+                    Market(
+                        market_ticker="KXBTC15M-LEGACY-REFERENCE",
+                        series_ticker="KXBTC15M",
+                        open_time=at,
+                        close_time=at + timedelta(minutes=15),
+                        functional_strike=Decimal("62000"),
+                    ),
+                    ResearchReplayEvent(
+                        event_id="legacy-global-reference",
+                        market_ticker=None,
+                        event_type="REFERENCE",
+                        event_time=at + timedelta(seconds=5),
+                        received_at=at + timedelta(seconds=5),
+                        source_table="reference_ticks",
+                        source_row_id="legacy-reference",
+                        source_hash="fixture",
+                        replay_schema_version="momentum_v2_replay_v1",
+                        payload={"parsed_value": "62001"},
+                        event_hash="legacy-global-reference",
+                        replay_readiness="FULL",
+                        blockers=[],
+                    ),
+                )
+            )
+            session.commit()
+
+            archive_research_events(session, now=at + timedelta(minutes=15))
+            session.commit()
+
+            event = session.scalar(
+                select(ResearchReplayEvent).where(
+                    ResearchReplayEvent.event_id == "legacy-global-reference"
+                )
+            )
+            assert event is not None
+            assert event.market_ticker == "KXBTC15M-LEGACY-REFERENCE"
+    finally:
+        engine.dispose()
+
+
 def test_counterfactual_label_uses_the_first_in_window_executable_book() -> None:
     at = datetime(2026, 7, 11, 12, 5, tzinfo=UTC)
     market = Market(
