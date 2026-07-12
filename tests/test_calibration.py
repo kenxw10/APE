@@ -6,11 +6,13 @@ from decimal import Decimal
 import pytest
 from tests.test_research_helpers import at_base
 
+import ape.research.calibration as calibration
 from ape.db.models import ResearchMarketOutcome
 from ape.research.calibration import (
     LIFECYCLE_BACKTESTED,
     LIFECYCLE_DRAFT,
     LIFECYCLE_PAPER_CANDIDATE,
+    CandidateSpec,
     GovernanceError,
     bounded_candidate_specs,
     build_partition_manifest,
@@ -77,6 +79,34 @@ def test_bootstrap_uses_exactly_two_thousand_deterministic_resamples() -> None:
     first = market_bootstrap({"M1": Decimal("1"), "M2": Decimal("-1")}, "run")
     assert first == market_bootstrap({"M1": Decimal("1"), "M2": Decimal("-1")}, "run")
     assert first["resamples"] == "2000"
+
+
+def test_walk_forward_metrics_preserves_manifest_validation_order(monkeypatch) -> None:
+    captured: list[tuple[str, ...]] = []
+
+    class FakeReplayEngine:
+        def __init__(self, *, parameters) -> None:
+            del parameters
+
+        def replay(self, *_args, **_kwargs):
+            return type("Replay", (), {"trades": ()})()
+
+    def fake_metrics(*_args, market_tickers, **_kwargs):
+        captured.append(tuple(market_tickers))
+        return {"net_pnl_per_market": "0"}
+
+    monkeypatch.setattr(calibration, "DeterministicReplayEngine", FakeReplayEngine)
+    monkeypatch.setattr(calibration, "replay_metrics", fake_metrics)
+
+    calibration._walk_forward_metrics(
+        CandidateSpec("candidate", "strategy", "BASELINE", {}),
+        {"folds": [{"fold": 1, "train": ["M2", "M1"], "validation": ["M4", "M3"]}]},
+        [],
+        [],
+        "run",
+    )
+
+    assert captured == [("M4", "M3")]
 
 
 def test_governance_rejects_paper_live_transitions() -> None:

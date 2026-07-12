@@ -500,10 +500,13 @@ def run_bounded_calibration(
         None,
         Decimal("-Infinity"),
     )
-    search_development = set(manifest["search_development"])
-    development_events = [event for event in events if event.market_ticker in search_development]
+    search_development = list(manifest["search_development"])
+    search_development_members = set(search_development)
+    development_events = [
+        event for event in events if event.market_ticker in search_development_members
+    ]
     development_outcomes = [
-        outcome for outcome in outcomes if outcome.market_ticker in search_development
+        outcome for outcome in outcomes if outcome.market_ticker in search_development_members
     ]
     labeled_rows, labeled_targets = _labeled_feature_rows(development_events, development_outcomes)
     for candidate in candidates:
@@ -582,10 +585,13 @@ def run_bounded_calibration(
             )
             candidates[selected_index] = chosen
             metrics[selected]["model_artifact"] = artifact
-        development_test = set(manifest["development_test"])
+        development_test = list(manifest["development_test"])
+        development_test_members = set(development_test)
         test_result = DeterministicReplayEngine(parameters=chosen.parameters).replay(
-            [event for event in events if event.market_ticker in development_test],
-            outcomes=[outcome for outcome in outcomes if outcome.market_ticker in development_test],
+            [event for event in events if event.market_ticker in development_test_members],
+            outcomes=[
+                outcome for outcome in outcomes if outcome.market_ticker in development_test_members
+            ],
         )
         metrics[selected]["development_test"] = replay_metrics(
             test_result.trades,
@@ -593,9 +599,12 @@ def run_bounded_calibration(
             calibration_run_id=f"{calibration_run_id}-development-test",
             market_tickers=development_test,
         )
-        holdout = set(manifest["holdout"])
-        holdout_events = [event for event in events if event.market_ticker in holdout]
-        holdout_outcomes = [outcome for outcome in outcomes if outcome.market_ticker in holdout]
+        holdout = list(manifest["holdout"])
+        holdout_members = set(holdout)
+        holdout_events = [event for event in events if event.market_ticker in holdout_members]
+        holdout_outcomes = [
+            outcome for outcome in outcomes if outcome.market_ticker in holdout_members
+        ]
         holdout_result = DeterministicReplayEngine(parameters=chosen.parameters).replay(
             holdout_events, outcomes=holdout_outcomes
         )
@@ -646,15 +655,17 @@ def _walk_forward_metrics(
 ) -> list[dict[str, Any]]:
     metrics: list[dict[str, Any]] = []
     for fold in manifest["folds"]:
-        train = set(fold["train"])
-        validation = set(fold["validation"])
+        train = list(fold["train"])
+        validation = list(fold["validation"])
         if not train or not validation:
             continue
+        train_members = set(train)
+        validation_members = set(validation)
         evaluated_candidate = candidate
         if candidate.model_type == "L2_LOGISTIC":
             train_rows, train_targets = _labeled_feature_rows(
-                [event for event in events if event.market_ticker in train],
-                [outcome for outcome in outcomes if outcome.market_ticker in train],
+                [event for event in events if event.market_ticker in train_members],
+                [outcome for outcome in outcomes if outcome.market_ticker in train_members],
             )
             try:
                 artifact = fit_l2_logistic(
@@ -676,8 +687,10 @@ def _walk_forward_metrics(
         replay = DeterministicReplayEngine(parameters=evaluated_candidate.parameters).replay(
             # The model is trained only from this fold's earlier markets.
             # Validation receives the fitted artifact and never refits it.
-            [event for event in events if event.market_ticker in validation],
-            outcomes=[outcome for outcome in outcomes if outcome.market_ticker in validation],
+            [event for event in events if event.market_ticker in validation_members],
+            outcomes=[
+                outcome for outcome in outcomes if outcome.market_ticker in validation_members
+            ],
         )
         metrics.append(
             {
