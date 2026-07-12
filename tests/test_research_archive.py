@@ -147,6 +147,8 @@ def test_archive_advances_mutable_market_cursor_when_payload_is_unchanged(tmp_pa
                 )
             )
             assert event is not None
+            original_dataset_hash = _dataset_hash((event,))
+            original_event_hash = event.event_hash
 
             advanced_at = event.event_time + timedelta(seconds=1)
             market.updated_at = advanced_at
@@ -165,6 +167,8 @@ def test_archive_advances_mutable_market_cursor_when_payload_is_unchanged(tmp_pa
             assert third.archived_events == 0
             assert refreshed is not None
             assert refreshed.event_time == advanced_at.replace(tzinfo=UTC)
+            assert refreshed.event_hash == original_event_hash
+            assert _dataset_hash((refreshed,)) == original_dataset_hash
     finally:
         engine.dispose()
 

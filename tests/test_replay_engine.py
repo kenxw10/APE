@@ -45,6 +45,37 @@ def test_first_in_window_book_cannot_be_rescued_by_a_later_book() -> None:
     assert [trade.status for trade in result.trades] == ["ENTRY_NO_FILL"]
 
 
+def test_replay_orders_same_timestamp_books_by_sequence_before_source_id() -> None:
+    at = at_base()
+    source_id_ten = orderbook_event(
+        at=at + timedelta(milliseconds=600),
+        event_id="book-10",
+        yes_ask="0.79",
+    )
+    source_id_ten.sequence_number = 10
+    source_id_two = orderbook_event(
+        at=at + timedelta(milliseconds=600),
+        event_id="book-2",
+        yes_ask="0.60",
+    )
+    source_id_two.sequence_number = 2
+    outcome = ResearchMarketOutcome(
+        outcome_id="sequence-order",
+        market_ticker="M1",
+        outcome_status="RESOLVED",
+        result_side="YES",
+        resolved_at=at + timedelta(minutes=15),
+    )
+
+    result = DeterministicReplayEngine().replay(
+        [feature_event(at=at), source_id_ten, source_id_two], outcomes=[outcome]
+    )
+
+    assert len(result.trades) == 1
+    assert result.trades[0].entry_fill_event_id == "book-2"
+    assert result.trades[0].status == "CLOSED"
+
+
 def test_first_in_window_exit_book_cannot_be_rescued_by_a_later_book() -> None:
     at = at_base()
     result = DeterministicReplayEngine().replay(
