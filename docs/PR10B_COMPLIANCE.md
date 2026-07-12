@@ -15,3 +15,5 @@ Railway service, paper execution, live execution, order placement, cancellation,
 private channel, account read, balance read, threshold change, timing change, or
 new strategy mode. `BOUNDARY_CROSS_HOLD` remains persisted research evidence only;
 `CONTINUATION` remains the sole mode that can proceed toward a V2 entry signal.
+Prerequisite readiness remains the highest-priority diagnostic for every candidate
+mode, including `BOUNDARY_CROSS_HOLD`.

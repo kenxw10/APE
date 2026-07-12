@@ -222,11 +222,16 @@ def evaluate_momentum_v2(
         "edge": {"lower_bound_cents": str(edge), "threshold_cents": str(edge_threshold)},
     }
     snapshot = _feature_snapshot(context, features, execution=measurements["edge"])
-    if mode == "BOUNDARY_CROSS_HOLD":
+    if hard_gates:
+        state = (
+            STATE_V2_FEATURES_NOT_READY
+            if hard_gates[0].startswith("v2_prerequisite")
+            else STATE_V2_HARD_GATE_BLOCKED
+        )
         return V2Evaluation(
-            STATE_V2_HARD_GATE_BLOCKED,
-            "v2_candidate_mode_not_enabled",
-            ["v2_candidate_mode_not_enabled"],
+            state,
+            hard_gates[0],
+            hard_gates,
             warnings,
             candidate_side,
             mode,
@@ -238,16 +243,11 @@ def evaluate_momentum_v2(
             snapshot,
             measurements,
         )
-    if hard_gates:
-        state = (
-            STATE_V2_FEATURES_NOT_READY
-            if hard_gates[0].startswith("v2_prerequisite")
-            else STATE_V2_HARD_GATE_BLOCKED
-        )
+    if mode == "BOUNDARY_CROSS_HOLD":
         return V2Evaluation(
-            state,
-            hard_gates[0],
-            hard_gates,
+            STATE_V2_HARD_GATE_BLOCKED,
+            "v2_candidate_mode_not_enabled",
+            ["v2_candidate_mode_not_enabled"],
             warnings,
             candidate_side,
             mode,

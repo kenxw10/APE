@@ -103,6 +103,14 @@ def test_pr10b_r1_boundary_cross_hold_is_research_only_and_cannot_create_entry(
     assert result.intended_entry_price is None
     assert result.candidate_mode == "BOUNDARY_CROSS_HOLD"
 
+    features["quality_state"]["reference_ready"] = False
+    not_ready_result = momentum_v2.evaluate_momentum_v2(context, config=load_config({}))
+
+    assert not_ready_result.state == momentum_v2.STATE_V2_FEATURES_NOT_READY
+    assert not_ready_result.reason == "v2_prerequisite_data_missing_or_stale"
+    assert "v2_prerequisite_data_missing_or_stale" in not_ready_result.blockers
+    assert not_ready_result.candidate_mode == "BOUNDARY_CROSS_HOLD"
+
     observer_module._apply_v2_hypothetical_lifecycle(
         config=load_config({}),
         session=session,
