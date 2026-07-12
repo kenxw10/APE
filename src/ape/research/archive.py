@@ -179,12 +179,7 @@ def reconcile_market_outcomes(session: Session, *, client, now: datetime | None 
         official = official if isinstance(official, dict) else {}
         result_side = _official_result_side(official)
         official_status = str(official.get("status") or "").strip().lower()
-        resolved = result_side is not None and official_status in {
-            "settled",
-            "resolved",
-            "finalized",
-            "closed",
-        }
+        resolved = result_side is not None and _official_is_settled(official, official_status)
         status = "RESOLVED" if resolved else "PENDING" if official else "UNAVAILABLE"
         final_value = (
             Decimal(final_tick.parsed_value)
@@ -245,11 +240,37 @@ def _is_btc15_market(market: Market) -> bool:
 
 def _official_result_side(payload: dict[str, Any]) -> str | None:
     value = str(payload.get("result") or payload.get("result_side") or "").strip().upper()
-    return value if value in {"YES", "NO"} else None
+    if value in {"YES", "NO"}:
+        return value
+    for key in ("settlement_value_dollars", "settlement_value", "settlement_price"):
+        value = payload.get(key)
+        if value is None:
+            continue
+        try:
+            settlement = Decimal(str(value))
+        except (ArithmeticError, ValueError):
+            continue
+        if settlement == Decimal("1"):
+            return "YES"
+        if settlement == Decimal("0"):
+            return "NO"
+    return None
+
+
+def _official_is_settled(payload: dict[str, Any], official_status: str) -> bool:
+    return official_status in {"settled", "resolved", "finalized", "closed"} or bool(
+        payload.get("settlement_ts")
+    )
 
 
 def _official_settlement_value(payload: dict[str, Any]) -> Decimal | None:
-    for key in ("settlement_value", "settlement_price", "result_value"):
+    for key in (
+        "expiration_value",
+        "settlement_value",
+        "settlement_value_dollars",
+        "settlement_price",
+        "result_value",
+    ):
         value = payload.get(key)
         if value is None:
             continue
