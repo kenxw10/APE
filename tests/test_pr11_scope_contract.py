@@ -753,7 +753,9 @@ def test_r11_only_qualified_candidates_can_reach_dry_run_challenger() -> None:
             )
 
 
-def test_r12_candidate_pin_is_startup_only_and_fails_closed(tmp_path, monkeypatch) -> None:
+def test_r12_candidate_pin_is_revalidated_each_cycle_and_fails_closed(
+    tmp_path, monkeypatch
+) -> None:
     config = load_config(
         {
             "DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'r12.sqlite'}",
@@ -808,17 +810,11 @@ def test_r12_candidate_pin_is_startup_only_and_fails_closed(tmp_path, monkeypatc
         observer.evaluate_once()
         resolved[0] = (second, None)
         observer.evaluate_once()
-        assert observed == [first, first]
+        assert observed == [first, second]
 
-        restarted = StrategyObserver(
-            config=config,
-            safety=assess_startup_safety(config),
-            session_factory=session_factory,
-            started_at=at + timedelta(seconds=1),
-            now=lambda: at + timedelta(seconds=1),
-        )
-        restarted.evaluate_once()
-        assert observed[-1] == second
+        resolved[0] = (None, "candidate_pin_missing")
+        observer.evaluate_once()
+        assert observed[-1] is None
     finally:
         engine.dispose()
 

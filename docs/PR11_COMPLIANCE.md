@@ -2,8 +2,9 @@
 
 PR 11 is DRY_RUN-only research infrastructure. It does not add paper trading,
 live trading, orders, cancels, private channels, account reads, credentials, or
-execution capability. Candidate pins remain startup-only: a changed pin requires
-a strategy-worker restart and is never hot reloaded.
+execution capability. Candidate pins are revalidated against persisted governance
+state on every strategy-observer cycle, so approval and revocation take effect
+without a worker restart.
 
 | Requirement | Implementation evidence | Behavioral evidence |
 | --- | --- | --- |
@@ -18,7 +19,7 @@ a strategy-worker restart and is never hot reloaded.
 | R9 bounded search and fold-specific logistic fitting | `src/ape/research/calibration.py` | `test_r9_bounded_search_and_logistic_artifacts_are_deterministic` verifies the 256-candidate cap, deterministic snapshot hash, tier grids, and reproducible L2 artifact. |
 | R10 bootstrap and penalties | `src/ape/research/calibration.py` | `test_r10_market_normalization_bootstrap_and_penalties_are_explicit` verifies zero-trade-market normalization, exact 2,000 resamples, and lower-confidence penalties. |
 | R11 governance evidence and transitions | `src/ape/research/repository.py`, `src/ape/research/service.py` | `test_r11_only_qualified_candidates_can_reach_dry_run_challenger` verifies the promotion threshold, under-sampled rejection, and paper/live rejection; smoke supplies persisted 500-market evidence. |
-| R12 startup-only candidate pin | `src/ape/strategy/observer.py`, `src/ape/research/pin.py` | `test_r12_candidate_pin_is_startup_only_and_fails_closed` verifies a changed pin is ignored until restart. |
+| R12 governed candidate pin | `src/ape/strategy/observer.py`, `src/ape/research/pin.py` | `test_r12_candidate_pin_is_revalidated_each_cycle_and_fails_closed` verifies missing, approved, and revoked pin states are applied without restart. |
 | R13 bounded read-only APIs and status | `src/ape/api/main.py`, `src/ape/research/status.py` | `tests/test_research_api.py`, `test_r13_research_api_surface_is_read_only_and_bounded`, and smoke's research/storage read-route map. |
 | R14 retention and durable evidence | `src/ape/storage/retention.py`, `src/ape/repositories/storage_retention.py` | `test_r14_retention_and_durable_status_tables_are_separate` proves status reads remain separate from all four mutation paths and raw-payload reads. |
 | R15 fixtures, smoke, documentation, deployment boundaries | `src/ape/research/fixtures.py`, `scripts/research_smoke.py` | `test_r15_eighteen_market_fixture_has_real_event_time_sources_and_labels`, real fixture replay outcomes, and machine-readable smoke invariants. |
@@ -29,7 +30,7 @@ R1-R15 were not reduced, deferred, substituted, or relabeled. The scope contract
 executes direct behavioral checks for the migration, evaluator parity, worker
 ownership, archive recovery, zero-entry funnel, fee model, causal lifecycle,
 chronological partitions, deterministic bounded search, market-normalized
-metrics, governance, startup-only pins, read APIs, retention boundaries, and
+metrics, governance, per-cycle candidate pin revalidation, read APIs, retention boundaries, and
 the event-time fixture corpus.
 
 ## Governance Evidence

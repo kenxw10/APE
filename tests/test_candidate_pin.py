@@ -106,7 +106,7 @@ def test_invalid_candidate_pin_fails_closed_without_a_baseline_substitute(tmp_pa
         engine.dispose()
 
 
-def test_strategy_observer_candidate_pin_is_resolved_once_until_restart(
+def test_strategy_observer_candidate_pin_is_revalidated_each_cycle(
     tmp_path, monkeypatch
 ) -> None:
     config = load_config(
@@ -165,28 +165,12 @@ def test_strategy_observer_candidate_pin_is_resolved_once_until_restart(
         resolved[0] = (second, None)  # Represents a changed pin row after startup.
         observer.evaluate_once()
 
-        assert resolver_calls == [first]
-        assert observed == [(first, None), (first, None)]
-
-        restarted = StrategyObserver(
-            config=config,
-            safety=assess_startup_safety(config),
-            session_factory=factory,
-            started_at=datetime(2026, 7, 12, 12, 1, tzinfo=UTC),
-            now=lambda: datetime(2026, 7, 12, 12, 1, tzinfo=UTC),
-        )
-        restarted.evaluate_once()
         assert resolver_calls == [first, second]
+        assert observed == [(first, None), (second, None)]
 
         resolved[0] = (None, "candidate_pin_missing")
-        invalid_restart = StrategyObserver(
-            config=config,
-            safety=assess_startup_safety(config),
-            session_factory=factory,
-            started_at=datetime(2026, 7, 12, 12, 2, tzinfo=UTC),
-            now=lambda: datetime(2026, 7, 12, 12, 2, tzinfo=UTC),
-        )
-        invalid_restart.evaluate_once()
+        observer.evaluate_once()
+        assert resolver_calls == [first, second, None]
         assert observed[-1] == (None, "candidate_pin_missing")
     finally:
         engine.dispose()
