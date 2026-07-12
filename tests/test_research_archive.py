@@ -22,6 +22,7 @@ from ape.research.archive import (
     _coverage,
     _feature_event,
     _labels_for_market,
+    _orderbook_event,
     archive_research_events,
     reconcile_market_outcomes,
 )
@@ -59,6 +60,39 @@ def test_archive_is_idempotent_and_keeps_only_normalized_market_values(tmp_path)
             assert "raw_payload" not in market_event.payload
     finally:
         engine.dispose()
+
+
+def test_archive_preserves_zero_fixed_point_orderbook_depth() -> None:
+    event = _orderbook_event(
+        OrderbookSnapshot(
+            market_ticker="KXBTC15M-ZERO-DEPTH",
+            received_at=datetime(2026, 7, 12, 12, 0, tzinfo=UTC),
+            yes_bid_count=Decimal("0"),
+            yes_bid_size=7,
+            yes_ask_count=Decimal("0"),
+            yes_ask_size=8,
+            no_bid_count=Decimal("0"),
+            no_bid_size=9,
+            no_ask_count=Decimal("0"),
+            no_ask_size=10,
+        )
+    )
+
+    assert event["payload"] == {
+        "yes_bid": None,
+        "yes_ask": None,
+        "no_bid": None,
+        "no_ask": None,
+        "yes_bid_size": "0",
+        "yes_ask_size": "0",
+        "no_bid_size": "0",
+        "no_ask_size": "0",
+        "yes_bid_ladder": None,
+        "yes_ask_ladder": None,
+        "no_bid_ladder": None,
+        "no_ask_ladder": None,
+        "book_status": None,
+    }
 
 
 def test_archive_refreshes_mutable_market_payload_when_source_version_advances(tmp_path) -> None:

@@ -374,10 +374,10 @@ def _orderbook_event(row: OrderbookSnapshot) -> dict[str, Any]:
             "yes_ask": row.yes_ask,
             "no_bid": row.no_bid,
             "no_ask": row.no_ask,
-            "yes_bid_size": row.yes_bid_count or row.yes_bid_size,
-            "yes_ask_size": row.yes_ask_count or row.yes_ask_size,
-            "no_bid_size": row.no_bid_count or row.no_bid_size,
-            "no_ask_size": row.no_ask_count or row.no_ask_size,
+            "yes_bid_size": _fixed_count_or_legacy_size(row.yes_bid_count, row.yes_bid_size),
+            "yes_ask_size": _fixed_count_or_legacy_size(row.yes_ask_count, row.yes_ask_size),
+            "no_bid_size": _fixed_count_or_legacy_size(row.no_bid_count, row.no_bid_size),
+            "no_ask_size": _fixed_count_or_legacy_size(row.no_ask_count, row.no_ask_size),
             "yes_bid_ladder": _top_ladder(row.yes_bid_ladder),
             "yes_ask_ladder": _top_ladder(row.yes_ask_ladder),
             "no_bid_ladder": _top_ladder(row.no_bid_ladder),
@@ -385,6 +385,12 @@ def _orderbook_event(row: OrderbookSnapshot) -> dict[str, Any]:
             "book_status": row.book_status,
         },
     )
+
+
+def _fixed_count_or_legacy_size(
+    fixed_count: Decimal | None, legacy_size: int | None
+) -> Decimal | int | None:
+    return fixed_count if fixed_count is not None else legacy_size
 
 
 def _trade_event(row: PublicTrade) -> dict[str, Any]:

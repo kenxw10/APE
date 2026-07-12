@@ -163,6 +163,31 @@ def test_research_cycle_archives_and_records_isolated_heartbeat(tmp_path) -> Non
         engine.dispose()
 
 
+def test_research_cycle_loads_the_complete_archive(tmp_path, monkeypatch) -> None:
+    config = load_config(
+        {"DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'complete-archive.sqlite'}"}
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    factory = create_session_factory(engine)
+    captured_limits: list[int | None] = []
+    original_list_events = ResearchRepository.list_events
+
+    def list_events(self, *, market_ticker=None, limit=500):
+        captured_limits.append(limit)
+        return original_list_events(self, market_ticker=market_ticker, limit=limit)
+
+    monkeypatch.setattr(ResearchRepository, "list_events", list_events)
+    try:
+        with factory() as session:
+            run_research_cycle(config, session)
+            session.commit()
+
+        assert captured_limits == [None]
+    finally:
+        engine.dispose()
+
+
 def test_market_outcome_reconciler_uses_public_rest_configuration(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

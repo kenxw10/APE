@@ -119,7 +119,7 @@ def run_research_cycle(
     checked_at = checked_at or datetime.now(UTC)
     archive = archive_research_events(session, now=checked_at)
     repository = ResearchRepository(session)
-    events = repository.list_events(limit=1_000_000)
+    events = repository.list_events(limit=None)
     outcomes = repository.list_complete_outcomes()
     baseline = StrategyV2Repository(session).ensure_config_version(
         built_in_config_version("btc15_momentum_v2", V2_PARAMETERS)

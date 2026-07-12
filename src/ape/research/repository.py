@@ -484,22 +484,21 @@ class ResearchRepository:
         )
 
     def list_events(
-        self, *, market_ticker: str | None = None, limit: int = 500
+        self, *, market_ticker: str | None = None, limit: int | None = 500
     ) -> list[ResearchReplayEvent]:
         statement = select(ResearchReplayEvent)
         statement = statement.where(ResearchReplayEvent.event_type != "COVERAGE_REPORT")
         if market_ticker is not None:
             statement = statement.where(ResearchReplayEvent.market_ticker == market_ticker)
-        return list(
-            self.session.scalars(
-                statement.order_by(
-                    ResearchReplayEvent.event_time.asc(),
-                    ResearchReplayEvent.received_at.asc(),
-                    ResearchReplayEvent.source_row_id.asc(),
-                    ResearchReplayEvent.event_id.asc(),
-                ).limit(limit)
-            )
+        statement = statement.order_by(
+            ResearchReplayEvent.event_time.asc(),
+            ResearchReplayEvent.received_at.asc(),
+            ResearchReplayEvent.source_row_id.asc(),
+            ResearchReplayEvent.event_id.asc(),
         )
+        if limit is not None:
+            statement = statement.limit(limit)
+        return list(self.session.scalars(statement))
 
     def list_events_for_markets(self, market_tickers: list[str]) -> list[ResearchReplayEvent]:
         if not market_tickers:
