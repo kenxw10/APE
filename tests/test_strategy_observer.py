@@ -105,6 +105,87 @@ def test_strategy_observer_evaluates_observer_only_market(session) -> None:
     assert "ENTER" not in decision.decision_state
 
 
+def test_strategy_observer_revalidates_candidate_pin_each_cycle(tmp_path, monkeypatch) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config(
+        {
+            "DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'candidate-pin-refresh.sqlite'}",
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+            "TRADING_ENABLED": "false",
+            "EXECUTE": "false",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    session_factory = create_session_factory(engine)
+    candidate = PinnedCandidate(
+        "btc15_momentum_v2_candidate_fixture",
+        "candidate-config",
+        V2_PARAMETERS,
+        "candidate-commit",
+    )
+    pin_states = iter(
+        (
+            (None, "candidate_pin_missing"),
+            (candidate, None),
+            (None, "candidate_pin_not_dry_run_challenger"),
+        )
+    )
+    observed_pin_states: list[tuple[PinnedCandidate | None, str | None]] = []
+    decision = StrategyDecisionInput(
+        decision_id="candidate-pin-refresh",
+        evaluated_at=now,
+        decision_state=STATE_OBSERVE_ONLY_MARKET,
+        primary_reason="fixture",
+        app_mode="DRY_RUN",
+        strategy_id=CONTROL_STRATEGY_ID,
+    )
+
+    def fake_resolve_pinned_candidate(_config, _session):
+        return next(pin_states)
+
+    def fake_evaluate_strategy_variants(**kwargs):
+        observed_pin_states.append(
+            (kwargs["pinned_candidate"], kwargs["pin_blocker"])
+        )
+        return [(config, decision)]
+
+    monkeypatch.setattr(
+        observer_module, "resolve_pinned_candidate", fake_resolve_pinned_candidate
+    )
+    monkeypatch.setattr(
+        observer_module, "evaluate_strategy_variants", fake_evaluate_strategy_variants
+    )
+    monkeypatch.setattr(
+        observer_module,
+        "_apply_dry_run_ledger",
+        lambda **_kwargs: observer_module.DryRunLedgerResult(),
+    )
+    try:
+        observer = StrategyObserver(
+            config=config,
+            safety=assess_startup_safety(config),
+            session_factory=session_factory,
+            started_at=now - timedelta(minutes=1),
+            now=lambda: now,
+        )
+        monkeypatch.setattr(observer, "record_heartbeat", lambda: None)
+
+        observer.evaluate_once()
+        observer.evaluate_once()
+        observer.evaluate_once()
+
+        assert observed_pin_states == [
+            (None, "candidate_pin_missing"),
+            (candidate, None),
+            (None, "candidate_pin_not_dry_run_challenger"),
+        ]
+    finally:
+        engine.dispose()
+
+
 def test_v2_boundary_cross_decision_does_not_create_an_entry_intent(session) -> None:
     now = datetime(2026, 7, 11, 12, 10, tzinfo=UTC)
 
