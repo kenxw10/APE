@@ -6,7 +6,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, select, text
 from sqlalchemy.orm import Session
 
 from ape.db.models import (
@@ -83,6 +83,20 @@ class ResearchRepository:
                 )
             )
             or 0
+        )
+
+    def _lock_challenger_architecture(self, architecture_version: str) -> None:
+        """Serialize challenger admission without introducing a schema migration.
+
+        PostgreSQL advisory transaction locks exist even before any challenger row
+        does, so concurrent transitions cannot both observe an empty active set.
+        SQLite ignores this production-only lock in local tests.
+        """
+        if self.session.get_bind().dialect.name != "postgresql":
+            return
+        self.session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:architecture_version))"),
+            {"architecture_version": architecture_version},
         )
 
     def upsert_market_outcome(self, values: dict[str, Any]) -> ResearchMarketOutcome:
@@ -179,13 +193,12 @@ class ResearchRepository:
             raise ValueError(f"Unknown research candidate: {candidate_id}")
         from ape.research.calibration import transition_candidate
 
-        if (
-            to_state == "DRY_RUN_CHALLENGER"
-            and self.active_challenger_count(candidate.architecture_version) > 0
-        ):
-            raise ValueError(
-                "Only one non-retired DRY_RUN_CHALLENGER is allowed per architecture."
-            )
+        if to_state == "DRY_RUN_CHALLENGER":
+            self._lock_challenger_architecture(candidate.architecture_version)
+            if self.active_challenger_count(candidate.architecture_version) > 0:
+                raise ValueError(
+                    "Only one non-retired DRY_RUN_CHALLENGER is allowed per architecture."
+                )
 
         next_state, transition = transition_candidate(
             from_state=candidate.lifecycle_state,
