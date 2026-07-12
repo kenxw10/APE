@@ -34,6 +34,45 @@ STATE_V2_SCORE_BELOW_THRESHOLD = "V2_SCORE_BELOW_THRESHOLD"
 STATE_V2_EDGE_BELOW_THRESHOLD = "V2_EDGE_BELOW_THRESHOLD"
 STATE_V2_ENTRY_SIGNAL = "DRY_RUN_ENTRY_SIGNAL"
 
+STATE_V2_MANAGE_POSITION = "V2_MANAGE_POSITION"
+STATE_V2_EXIT_SIGNAL = "V2_EXIT_SIGNAL"
+STATE_V2_FORCE_EXIT = "V2_FORCE_EXIT"
+
+# Every live exit trigger consumes these current-vector fields. Entry-state values
+# are immutable position data and are supplied alongside this vector at management time.
+V2_LIFECYCLE_VECTOR_FIELDS = frozenset(
+    {
+        "candidate_side",
+        "boundary",
+        "current_brti",
+        "seconds_left",
+        "return_5s",
+        "return_15s",
+        "reversal_beyond_origin",
+        "persistent_adverse_microstructure",
+        "response_residual_cents",
+        "desired_bid",
+        "desired_bid_depth",
+        "timing_tier",
+    }
+)
+V2_LIFECYCLE_INPUT_FIELDS = frozenset(
+    {
+        *V2_LIFECYCLE_VECTOR_FIELDS,
+        "market_matches",
+        "entry_price",
+        "entry_boundary",
+        "entry_side",
+        "entry_score_threshold",
+        "entry_time_stop_seconds",
+        "entry_max_hold_seconds",
+        "age_seconds",
+        "score",
+        "edge_lower_bound_cents",
+        "held_bid",
+    }
+)
+
 V2_PARAMETERS: dict[str, Any] = {
     "feature_windows_seconds": [3, 5, 10, 15, 30, 60, 120],
     "decision_to_book_latency_ms": 500,
@@ -86,6 +125,7 @@ class V2Evaluation:
     edge_lower_bound_cents: Decimal | None
     feature_snapshot: StrategyFeatureSnapshotInput
     measurements: dict[str, JsonPayload]
+    feature_vector: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -104,6 +144,13 @@ class V2FeatureEvaluation:
     score_threshold: Decimal | None
     edge_lower_bound_cents: Decimal | None
     measurements: dict[str, JsonPayload]
+
+
+@dataclass(frozen=True)
+class V2LifecycleEvaluation:
+    state: str
+    trigger: str | None
+    classification: str | None
 
 
 def built_in_config_version(
@@ -173,6 +220,7 @@ def evaluate_momentum_v2(
         evaluation.edge_lower_bound_cents,
         snapshot,
         evaluation.measurements,
+        feature_vector,
     )
 
 
@@ -189,13 +237,8 @@ def build_momentum_v2_feature_vector(
     vector["architecture_version"] = V2_ARCHITECTURE_VERSION
     vector["feature_schema_version"] = V2_FEATURE_SCHEMA_VERSION
     vector["replay_schema_version"] = REPLAY_SCHEMA_VERSION
-    vector["exit_state_inputs"] = {
-        "desired_bid": vector.get("desired_bid"),
-        "desired_ask": vector.get("desired_ask"),
-        "desired_bid_depth": vector.get("desired_bid_depth"),
-        "desired_ask_depth": vector.get("desired_ask_depth"),
-        "seconds_left": context.seconds_left,
-        "timing_tier": vector["timing_tier"],
+    vector["lifecycle_inputs"] = {
+        key: vector.get(key) for key in sorted(V2_LIFECYCLE_VECTOR_FIELDS)
     }
     blockers = [
         "v2_feature_vector_missing_market"
@@ -206,6 +249,120 @@ def build_momentum_v2_feature_vector(
     vector["replay_blockers"] = blockers
     vector["feature_vector_hash"] = feature_vector_hash(vector)
     return vector
+
+
+def evaluate_momentum_v2_lifecycle(
+    lifecycle_inputs: dict[str, Any],
+    parameters: dict[str, Any] | None = None,
+) -> V2LifecycleEvaluation:
+    """Apply the production V2 exit-trigger order from immutable current and entry inputs."""
+    parameters = parameters or V2_PARAMETERS
+    missing = V2_LIFECYCLE_INPUT_FIELDS - set(lifecycle_inputs)
+    if missing:
+        raise ValueError(f"Missing V2 lifecycle inputs: {', '.join(sorted(missing))}")
+    entry = _as_decimal(lifecycle_inputs["entry_price"])
+    held_bid = _as_decimal(lifecycle_inputs["held_bid"])
+    score = _as_decimal(lifecycle_inputs["score"])
+    edge = _as_decimal(lifecycle_inputs["edge_lower_bound_cents"])
+    entry_threshold = _as_decimal(lifecycle_inputs["entry_score_threshold"])
+    hard_stop = _override_decimal(
+        (parameters.get("calibration_overrides") or {}), "hard_stop", Decimal("12")
+    ) / Decimal("100")
+    soft_stop = _override_decimal(
+        (parameters.get("calibration_overrides") or {}), "soft_stop", Decimal("8")
+    ) / Decimal("100")
+    profit_target = _override_decimal(
+        (parameters.get("calibration_overrides") or {}), "profit_target", Decimal("10")
+    ) / Decimal("100")
+    if not lifecycle_inputs["market_matches"] or held_bid is None:
+        return V2LifecycleEvaluation(
+            STATE_V2_FORCE_EXIT, "v2_force_market_lifecycle_failure", "FORCE"
+        )
+    if _as_int(lifecycle_inputs["seconds_left"]) is not None and _as_int(
+        lifecycle_inputs["seconds_left"]
+    ) <= 20:
+        return V2LifecycleEvaluation(STATE_V2_FORCE_EXIT, "v2_final_twenty_seconds", "FORCE")
+    if entry is None:
+        return V2LifecycleEvaluation(STATE_V2_FORCE_EXIT, "v2_entry_price_missing", "FORCE")
+    if held_bid <= entry - hard_stop:
+        return V2LifecycleEvaluation(STATE_V2_EXIT_SIGNAL, "v2_hard_loss", "SIGNAL")
+    if _held_side_adverse_cross_from_inputs(lifecycle_inputs):
+        return V2LifecycleEvaluation(
+            STATE_V2_EXIT_SIGNAL, "v2_adverse_boundary_cross", "SIGNAL"
+        )
+    if bool(lifecycle_inputs["reversal_beyond_origin"]):
+        return V2LifecycleEvaluation(
+            STATE_V2_EXIT_SIGNAL, "v2_reversal_beyond_impulse_origin", "SIGNAL"
+        )
+    return_5s = _as_decimal(lifecycle_inputs["return_5s"])
+    return_15s = _as_decimal(lifecycle_inputs["return_15s"])
+    weak = (
+        (return_5s is not None and return_5s <= 0)
+        or (return_15s is not None and return_15s <= 0)
+        or (score is not None and entry_threshold is not None and score < entry_threshold)
+        or (edge is not None and edge <= 0)
+    )
+    if held_bid <= entry - soft_stop and weak:
+        return V2LifecycleEvaluation(
+            STATE_V2_EXIT_SIGNAL, "v2_soft_loss_with_weakening", "SIGNAL"
+        )
+    if return_5s is not None and return_5s <= Decimal("-1"):
+        return V2LifecycleEvaluation(STATE_V2_EXIT_SIGNAL, "v2_held_side_return_5s", "SIGNAL")
+    if return_15s is not None and return_15s <= Decimal("-1.5"):
+        return V2LifecycleEvaluation(STATE_V2_EXIT_SIGNAL, "v2_held_side_return_15s", "SIGNAL")
+    if bool(lifecycle_inputs["persistent_adverse_microstructure"]):
+        return V2LifecycleEvaluation(
+            STATE_V2_EXIT_SIGNAL, "v2_persistent_adverse_microstructure", "SIGNAL"
+        )
+    if edge is not None and edge <= 0:
+        return V2LifecycleEvaluation(
+            STATE_V2_EXIT_SIGNAL, "v2_edge_lower_bound_nonpositive", "SIGNAL"
+        )
+    residual = _as_decimal(lifecycle_inputs["response_residual_cents"])
+    if residual is not None and residual <= Decimal("0.5") and held_bid > entry:
+        return V2LifecycleEvaluation(
+            STATE_V2_EXIT_SIGNAL, "v2_underreaction_resolved", "SIGNAL"
+        )
+    if held_bid >= entry + profit_target:
+        return V2LifecycleEvaluation(STATE_V2_EXIT_SIGNAL, "v2_profit_target", "SIGNAL")
+    if held_bid >= Decimal("0.88"):
+        return V2LifecycleEvaluation(STATE_V2_EXIT_SIGNAL, "v2_high_bid_target", "SIGNAL")
+    age = _as_int(lifecycle_inputs["age_seconds"]) or 0
+    time_stop = _as_int(lifecycle_inputs["entry_time_stop_seconds"])
+    if time_stop is not None and age >= time_stop and (
+        (score is not None and entry_threshold is not None and score < entry_threshold)
+        or (edge is not None and edge <= 0)
+    ):
+        return V2LifecycleEvaluation(STATE_V2_EXIT_SIGNAL, "v2_tier_time_stop", "SIGNAL")
+    max_hold = _as_int(lifecycle_inputs["entry_max_hold_seconds"])
+    if max_hold is not None and age >= max_hold:
+        return V2LifecycleEvaluation(STATE_V2_EXIT_SIGNAL, "v2_absolute_max_hold", "SIGNAL")
+    return V2LifecycleEvaluation(STATE_V2_MANAGE_POSITION, None, None)
+
+
+def _held_side_adverse_cross_from_inputs(inputs: dict[str, Any]) -> bool:
+    boundary = _as_decimal(inputs["entry_boundary"])
+    current = _as_decimal(inputs["current_brti"])
+    if boundary is None or current is None or boundary == 0:
+        return False
+    crossed = current < boundary if inputs["entry_side"] == "YES" else current > boundary
+    return crossed and abs(current - boundary) / abs(boundary) * Decimal("10000") >= Decimal("1.5")
+
+
+def _as_decimal(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except (ArithmeticError, ValueError):
+        return None
+
+
+def _as_int(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def feature_vector_hash(feature_vector: dict[str, Any]) -> str:

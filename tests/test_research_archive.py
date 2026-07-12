@@ -16,6 +16,7 @@ from ape.db.models import (
 )
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.research.archive import _counterfactual_label, archive_research_events
+from ape.research.fixtures import replayable_feature_vector
 
 
 def test_archive_is_idempotent_and_keeps_only_normalized_market_values(tmp_path) -> None:
@@ -39,13 +40,13 @@ def test_archive_is_idempotent_and_keeps_only_normalized_market_values(tmp_path)
             first = archive_research_events(session, now=at)
             second = archive_research_events(session, now=at)
             session.commit()
-            event = session.scalar(select(ResearchReplayEvent))
+            events = list(session.scalars(select(ResearchReplayEvent)))
             assert first.archived_events == 1
             assert second.archived_events == 0
-            assert session.scalar(select(func.count()).select_from(ResearchReplayEvent)) == 1
-            assert event is not None
-            assert event.event_type == "MARKET"
-            assert "raw_payload" not in event.payload
+            assert session.scalar(select(func.count()).select_from(ResearchReplayEvent)) == 2
+            assert {event.event_type for event in events} == {"MARKET", "COVERAGE_REPORT"}
+            market_event = next(event for event in events if event.event_type == "MARKET")
+            assert "raw_payload" not in market_event.payload
     finally:
         engine.dispose()
 
@@ -65,7 +66,7 @@ def test_counterfactual_label_uses_the_first_in_window_executable_book() -> None
         context_hash="context",
         candidate_side="YES",
         boundary=Decimal("62000"),
-        complete_feature_vector={"candidate_side": "YES", "boundary": "62000"},
+        complete_feature_vector=replayable_feature_vector(),
     )
     books = [
         OrderbookSnapshot(

@@ -50,7 +50,7 @@ from ape.repositories.strategy_dry_run import (
 )
 from ape.repositories.strategy_v2 import StrategyV2Repository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
-from ape.research.pin import resolve_pinned_candidate
+from ape.research.pin import PinnedCandidate, resolve_pinned_candidate
 from ape.safety import SafetyAssessment, assess_startup_safety
 from ape.strategy.context import StrategyEvaluationContext, load_strategy_evaluation_context
 from ape.strategy.momentum_v2 import (
@@ -59,10 +59,10 @@ from ape.strategy.momentum_v2 import (
     V2_LIFECYCLE_SCHEMA_VERSION,
     V2_PARAMETERS,
     V2_STRATEGY_ID,
-    build_momentum_v2_feature_vector,
     built_in_config_version,
     evaluate_momentum_v2,
     evaluate_momentum_v2_feature_vector,
+    evaluate_momentum_v2_lifecycle,
 )
 from ape.worker.feed_liveness import load_market_feed_liveness, load_reference_feed_liveness
 from ape.worker.services import (
@@ -398,6 +398,9 @@ class StrategyObserver:
         self.status = StrategyObserverRuntimeStatus(enabled=config.strategy_observer_enabled)
         self.status.dry_run_enabled = _dry_run_runtime_enabled(config, safety)
         self._last_strategy_heartbeat_at: datetime | None = None
+        self._pinned_candidate: PinnedCandidate | None = None
+        self._candidate_pin_blocker: str | None = None
+        self._candidate_pin_resolved = False
 
     async def run(
         self,
@@ -429,11 +432,19 @@ class StrategyObserver:
 
         try:
             with self.session_factory() as session:
+                if not self._candidate_pin_resolved:
+                    self._pinned_candidate, self._candidate_pin_blocker = resolve_pinned_candidate(
+                        self.config, session
+                    )
+                    self._candidate_pin_resolved = True
                 decisions = evaluate_strategy_variants(
                     config=self.config,
                     safety=self.safety,
                     session=session,
                     now=self.now(),
+                    pinned_candidate=self._pinned_candidate,
+                    pin_blocker=self._candidate_pin_blocker,
+                    pin_resolved=True,
                 )
                 repository = StrategyDecisionsRepository(session)
                 ledger_results: dict[str, DryRunLedgerResult] = {}
@@ -1613,6 +1624,9 @@ def evaluate_strategy_variants(
     safety: SafetyAssessment,
     session: Session,
     now: datetime | None = None,
+    pinned_candidate: PinnedCandidate | None = None,
+    pin_blocker: str | None = None,
+    pin_resolved: bool = False,
 ) -> list[tuple[AppConfig, StrategyDecisionInput]]:
     """Evaluate variants against one timestamp and one canonical v2 feature record."""
 
@@ -1714,7 +1728,8 @@ def evaluate_strategy_variants(
             raw_context_hash=context_hash,
         )
         results.append((v2_config, v2_decision))
-        pinned_candidate, pin_blocker = resolve_pinned_candidate(config, session)
+        if not pin_resolved:
+            pinned_candidate, pin_blocker = resolve_pinned_candidate(config, session)
         if pin_blocker is not None:
             results[-1] = (
                 v2_config,
@@ -1724,7 +1739,7 @@ def evaluate_strategy_variants(
                 ),
             )
         elif pinned_candidate is not None:
-            candidate_vector = build_momentum_v2_feature_vector(context, config)
+            candidate_vector = dict(v2_evaluation.feature_vector)
             candidate_evaluation = evaluate_momentum_v2_feature_vector(
                 candidate_vector, pinned_candidate.parameters
             )
@@ -5081,75 +5096,42 @@ def _v2_management_state(
 ) -> tuple[str, str | None, str | None, str | None]:
     features = (decision.measurements or {}).get("features")
     features = features if isinstance(features, dict) else {}
-    score = _measurement_decimal(decision.measurements, "score", "total")
-    edge = _measurement_decimal(decision.measurements, "edge", "lower_bound_cents")
     age = max(
         0, int((_as_utc(decision.evaluated_at) - _as_utc(position.opened_at)).total_seconds())
     )
-    entry = Decimal(position.open_price)
-    hard_stop = _v2_override_cents(parameters, "hard_stop", Decimal("12")) / Decimal("100")
-    soft_stop = _v2_override_cents(parameters, "soft_stop", Decimal("8")) / Decimal("100")
-    profit_target = _v2_override_cents(parameters, "profit_target", Decimal("10")) / Decimal("100")
-    if decision.market_ticker != position.market_ticker or held_bid is None:
-        return STATE_V2_FORCE_EXIT, "v2_force_market_lifecycle_failure", "FORCE", None
-    if decision.seconds_left is not None and decision.seconds_left <= 20:
-        return STATE_V2_FORCE_EXIT, "v2_final_twenty_seconds", "FORCE", None
-    if held_bid <= entry - hard_stop:
-        return STATE_V2_EXIT_SIGNAL, "v2_hard_loss", "SIGNAL", None
-    if _held_side_adverse_cross(position, decision):
-        return STATE_V2_EXIT_SIGNAL, "v2_adverse_boundary_cross", "SIGNAL", None
-    if bool(features.get("reversal_beyond_origin")):
-        return STATE_V2_EXIT_SIGNAL, "v2_reversal_beyond_impulse_origin", "SIGNAL", None
-    weak = any(
-        value
-        for value in (
-            _decimal_or_none(features.get("return_5s")) is not None
-            and _decimal_or_none(features.get("return_5s")) <= 0,
-            _decimal_or_none(features.get("return_15s")) is not None
-            and _decimal_or_none(features.get("return_15s")) <= 0,
-            score is not None
-            and position.entry_score_threshold is not None
-            and score < Decimal(position.entry_score_threshold),
-            edge is not None and edge <= 0,
-        )
+    lifecycle = evaluate_momentum_v2_lifecycle(
+        {
+            "candidate_side": position.side_candidate,
+            "boundary": position.entry_boundary or position.boundary,
+            "current_brti": decision.brti_value,
+            "seconds_left": decision.seconds_left,
+            "return_5s": features.get("return_5s"),
+            "return_15s": features.get("return_15s"),
+            "reversal_beyond_origin": bool(features.get("reversal_beyond_origin")),
+            "persistent_adverse_microstructure": bool(
+                features.get("persistent_adverse_microstructure")
+            ),
+            "response_residual_cents": features.get("response_residual_cents"),
+            "desired_bid": features.get("desired_bid"),
+            "desired_bid_depth": features.get("desired_bid_depth"),
+            "timing_tier": _measurement_text(decision.measurements, "timing_tier"),
+            "market_matches": decision.market_ticker == position.market_ticker,
+            "entry_price": position.open_price,
+            "entry_boundary": position.entry_boundary or position.boundary,
+            "entry_side": position.side_candidate,
+            "entry_score_threshold": position.entry_score_threshold,
+            "entry_time_stop_seconds": position.entry_time_stop_seconds,
+            "entry_max_hold_seconds": position.entry_max_hold_seconds,
+            "age_seconds": age,
+            "score": _measurement_decimal(decision.measurements, "score", "total"),
+            "edge_lower_bound_cents": _measurement_decimal(
+                decision.measurements, "edge", "lower_bound_cents"
+            ),
+            "held_bid": held_bid,
+        },
+        parameters,
     )
-    if held_bid <= entry - soft_stop and weak:
-        return STATE_V2_EXIT_SIGNAL, "v2_soft_loss_with_weakening", "SIGNAL", None
-    if _decimal_or_none(features.get("return_5s")) is not None and _decimal_or_none(
-        features.get("return_5s")
-    ) <= Decimal("-1"):
-        return STATE_V2_EXIT_SIGNAL, "v2_held_side_return_5s", "SIGNAL", None
-    if _decimal_or_none(features.get("return_15s")) is not None and _decimal_or_none(
-        features.get("return_15s")
-    ) <= Decimal("-1.5"):
-        return STATE_V2_EXIT_SIGNAL, "v2_held_side_return_15s", "SIGNAL", None
-    if bool(features.get("persistent_adverse_microstructure")):
-        return STATE_V2_EXIT_SIGNAL, "v2_persistent_adverse_microstructure", "SIGNAL", None
-    if edge is not None and edge <= 0:
-        return STATE_V2_EXIT_SIGNAL, "v2_edge_lower_bound_nonpositive", "SIGNAL", None
-    residual = _decimal_or_none(features.get("response_residual_cents"))
-    if residual is not None and residual <= Decimal("0.5") and held_bid > entry:
-        return STATE_V2_EXIT_SIGNAL, "v2_underreaction_resolved", "SIGNAL", None
-    if held_bid >= entry + profit_target:
-        return STATE_V2_EXIT_SIGNAL, "v2_profit_target", "SIGNAL", None
-    if held_bid >= Decimal("0.88"):
-        return STATE_V2_EXIT_SIGNAL, "v2_high_bid_target", "SIGNAL", None
-    if (
-        position.entry_time_stop_seconds is not None
-        and age >= position.entry_time_stop_seconds
-        and (
-            (
-                score is not None
-                and position.entry_score_threshold is not None
-                and score < position.entry_score_threshold
-            )
-            or (edge is not None and edge <= 0)
-        )
-    ):
-        return STATE_V2_EXIT_SIGNAL, "v2_tier_time_stop", "SIGNAL", None
-    if position.entry_max_hold_seconds is not None and age >= position.entry_max_hold_seconds:
-        return STATE_V2_EXIT_SIGNAL, "v2_absolute_max_hold", "SIGNAL", None
-    return STATE_V2_MANAGE_POSITION, None, None, None
+    return lifecycle.state, lifecycle.trigger, lifecycle.classification, None
 
 
 def _held_side_adverse_cross(

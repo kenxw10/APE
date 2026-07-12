@@ -1,78 +1,55 @@
-# PR 11 Compliance Matrix
+# PR 11 Remediation Status
 
-`PR 11 — Deterministic replay, zero-entry audit, and governed calibration`
+`WIP — PR 11 remediation in progress; do not merge`
 
-| Requirement | Exact implementation files | Exact behavioral tests | Status |
-| --- | --- | --- | --- |
-| R1 immutable research schema and migration | `src/ape/db/models.py`, `src/ape/db/migrations.py` | `tests/test_db_schema.py`, `tests/test_pr11_scope_contract.py` | COMPLIANT |
-| R2 canonical feature vector and evaluator parity | `src/ape/strategy/momentum_v2.py`, `src/ape/repositories/inputs.py` | `tests/test_momentum_v2.py`, `tests/test_replay_engine.py`, `tests/test_pr11_scope_contract.py` | COMPLIANT |
-| R3 isolated research worker | `src/ape/worker/main.py`, `src/ape/research/service.py`, `src/ape/worker/services.py` | `tests/test_research_worker.py`, `tests/test_pr11_scope_contract.py` | COMPLIANT |
-| R4 normalized archival and public outcome reconciliation | `src/ape/research/archive.py`, `src/ape/research/repository.py` | `tests/test_research_archive.py`, `tests/test_research_worker.py`, `tests/test_pr11_scope_contract.py` | COMPLIANT |
-| R5 zero-entry audit | `src/ape/research/replay.py` | `tests/test_replay_engine.py`, `tests/test_pr11_scope_contract.py` | COMPLIANT |
-| R6 executable labels and verified fee model | `src/ape/research/archive.py`, `src/ape/research/fees.py` | `tests/test_research_archive.py`, `tests/test_replay_engine.py`, `tests/test_pr11_scope_contract.py` | COMPLIANT |
-| R7 deterministic no-lookahead replay | `src/ape/research/replay.py` | `tests/test_replay_engine.py`, `tests/test_pr11_scope_contract.py` | COMPLIANT |
-| R8 market partitions and frozen holdout | `src/ape/research/calibration.py`, `src/ape/research/service.py` | `tests/test_calibration.py`, `tests/test_research_worker.py`, `tests/test_pr11_scope_contract.py` | COMPLIANT |
-| R9 bounded heuristic and NumPy logistic search | `pyproject.toml`, `src/ape/research/calibration.py` | `tests/test_calibration.py`, `tests/test_pr11_scope_contract.py` | COMPLIANT |
-| R10 objective, penalties, and market bootstrap | `src/ape/research/calibration.py` | `tests/test_calibration.py`, `tests/test_pr11_scope_contract.py` | COMPLIANT |
-| R11 immutable governance limits | `src/ape/research/calibration.py`, `src/ape/research/repository.py` | `tests/test_calibration.py`, `tests/test_pr11_scope_contract.py` | COMPLIANT |
-| R12 operator-pinned DRY_RUN challenger | `src/ape/research/pin.py`, `src/ape/strategy/observer.py` | `tests/test_candidate_pin.py`, `tests/test_pr11_scope_contract.py` | COMPLIANT |
-| R13 bounded read-only research APIs | `src/ape/api/main.py`, `src/ape/research/status.py` | `tests/test_research_api.py`, `tests/test_pr11_scope_contract.py` | COMPLIANT |
-| R14 retention and durable evidence | `src/ape/storage/retention.py`, `src/ape/repositories/storage_retention.py` | `tests/test_storage_retention.py`, `tests/test_storage_api.py`, `tests/test_pr11_scope_contract.py` | COMPLIANT |
-| R15 fixture tests, documentation, and deployment | `tests/test_pr11_scope_contract.py`, `docs/RESEARCH_AND_CALIBRATION.md`, `README.md`, `PROJECT_CONTEXT.md`, `docs/RAILWAY.md`, `docs/PR_RUNBOOK.md` | `tests/test_pr11_scope_contract.py` | COMPLIANT |
+The current branch contains a partial remediation batch. PR 11 is not yet
+compliant and must not be merged or deployed.
 
-The single migration is `0010_research_replay_calibration`. Retained tables are
-`research_replay_events` (30 days) and `research_replay_trades` (180 days).
-Market outcomes, replay-run summaries, calibration runs, candidates, governance
-events, and strategy config versions are durable. The verified general Kalshi taker
-fee model is `ceil(0.07 * contracts * price * (1 - price), $0.01)` from the
-2026-02-05 fee schedule; each replay run stores source metadata and a checksum.
+| Requirement | Current remediation evidence | Status |
+| --- | --- | --- |
+| R1 immutable research schema and migration | Existing `0010_research_replay_calibration` foundation retained. | IN PROGRESS |
+| R2 canonical feature vector and evaluator parity | Complete lifecycle input vector and shared lifecycle helper are being added. The full behavioral parity matrix is still missing. | IN PROGRESS |
+| R3 isolated research worker | Archive no longer reconciles outcomes; public outcome reconciliation is being moved to the market-data role. | IN PROGRESS |
+| R4 normalized archive, labels, and coverage | Idempotent archive protection, immutable coverage reports, and fail-closed malformed labels are in this batch. | IN PROGRESS |
+| R5 zero-entry audit and frequency governance | Funnel and zero-market bootstrap corrections are in this batch; required audit coverage remains incomplete. | IN PROGRESS |
+| R6 executable labels and fee model | July 7, 2026 parameter attribution and published fee-table examples are pinned; complete label-horizon evidence remains incomplete. | IN PROGRESS |
+| R7 deterministic production-parity replay | Shared lifecycle logic and first-book handling are in progress; complete production/replay parity coverage is missing. | IN PROGRESS |
+| R8 chronological partitions and frozen holdout | Development-test and fold corrections are in progress; the required complete leakage-control proof is missing. | IN PROGRESS |
+| R9 bounded search and fold-specific logistic preprocessing | Canonical logistic feature names and fold-specific replay usage are in this batch. Full calibration evidence remains incomplete. | IN PROGRESS |
+| R10 objective, penalties, and bootstrap | Zero-trade market handling and regime aggregation corrections are in this batch. Full metric fixtures remain incomplete. | IN PROGRESS |
+| R11 automatic governance | Database-owned challenger checks are in this batch. Automatic candidate progression and immutable transition proof are not complete. | BLOCKED BY REMAINING IMPLEMENTATION |
+| R12 startup-only candidate pin | Candidate pin validation has been strengthened. Startup-only runtime and compatibility coverage remains incomplete. | IN PROGRESS |
+| R13 bounded read-only research APIs | Worker/API status separation is in progress. Required validated API filters are not implemented. | BLOCKED BY REMAINING IMPLEMENTATION |
+| R14 retention and durable evidence | Existing retention/status separation is retained. Generated-validation cleanup remains pending. | IN PROGRESS |
+| R15 fixtures, documentation, and deployment | The smoke script no longer fabricates successful governance evidence. The full event-time fixture suite and behavioral R1-R15 matrix are missing. | BLOCKED BY REMAINING IMPLEMENTATION |
 
-No required scope was deferred, simplified, substituted, broadened, or relabeled.
+## July 2026 Fee Attribution
 
-## Sandbox-Sharded Full-Suite Verification
+The fee model stores a SHA-256 of the exact canonical **parameter snapshot**, not
+a PDF-byte checksum. The Codex environment receives HTTP 429 from the official
+PDF URL, so no PDF-byte hash is claimed.
 
-The hosted sandbox terminates a foreground process at approximately 30 seconds,
-so the required exact collection command and a deterministic test sharding
-procedure were used for local full-suite coverage. The implementation scope was
-not changed to accommodate that infrastructure limit.
+- Source URL: `https://kalshi.com/docs/kalshi-fee-schedule.pdf`
+- Document title: `Fee Schedule for July 2026 - 7.7.26 Update`
+- Effective date: `2026-07-07`
+- Parameter snapshot SHA-256:
+  `6d625f01b407d66a8f42c3df193ed750054df489bb075de63fc98608cfe1b823`
+- KXBTC15M is not listed as non-standard; its taker multiplier is `1`, maker
+  multiplier is `0`, and settlement fee is `0`.
 
-- Direct collection command: `python -m pytest --collect-only -q`
-- Direct collection output: `docs/validation/pr11/collect-only-output.txt`
-- Direct collection summary: `docs/validation/pr11/collect-only-summary.json`
-- Complete sorted node-ID manifest: `docs/validation/pr11/collected-nodeids.json`
-- Deterministic shard plan and exact commands: `docs/validation/pr11/shard-plan.json`
-- Per-shard complete output: `docs/validation/pr11/logs/`
-- Per-shard JUnit XML: `docs/validation/pr11/junit/`
-- Per-shard exit status and assigned nodes: `docs/validation/pr11/results/`
-- Aggregate coverage proof, counts, commands, exit codes, and timings:
-  `docs/validation/pr11/shard-report.json`
+## Remaining Blockers
 
-The direct collection command reported 394 tests, matching the 394-node
-manifest. The plan divides that sorted collection into 47 non-overlapping
-shards, using whole test files where possible and eight-node sorted shards only
-for `tests/test_kalshi_ws_collector.py` and
-`tests/test_strategy_observer.py`.
+The following GPT-audit findings remain unresolved and prevent a compliance
+claim:
 
-The aggregate verifier result is exact: 394 collected, 394 assigned, 394
-executed, 394 unique assigned, 394 unique executed, 0 omitted, 0 unexecuted,
-0 duplicate assignments, and 0 duplicate executions. JUnit recorded 394
-passed, 0 failed, 0 errors, and 0 skipped. Every shard exited 0.
+1. Automatic governance transitions with candidate-specific immutable evidence.
+2. Candidate-attributed replay-trade persistence for every evaluated candidate.
+3. Validated bounded research API filters.
+4. Full event-time market fixtures.
+5. Complete behavioral R1-R15 acceptance matrix.
+6. Compliance-document cleanup outside this WIP correction.
+7. Generated validation-log, JUnit, and result-file cleanup.
+8. Any further failures discovered by the next prompt-to-diff audit.
 
-The longest individual tests were 4.110 seconds
-(`tests.test_worker::test_worker_enabled_storage_retention_runs_periodic_task`)
-and 3.503 seconds
-(`tests.test_kalshi_ws_collector::test_collector_persists_market_liveness_heartbeats_before_stream_gate`).
-The largest cumulative files were `tests/test_kalshi_ws_collector.py` at
-115.810 seconds and `tests/test_strategy_observer.py` at 99.369 seconds. The
-sum of all shard durations was 543.815 seconds. JUnit test-call time totals
-319.261 seconds; the remaining 224.554 seconds is the expected repeated
-collection, process startup, and fixture cost of 47 isolated pytest processes,
-not a claim about unsharded duration. The required 136-test focused command
-also completed locally in approximately 108 seconds. This explains the earlier
-approximately-18-percent foreground observation as normal suite duration, not
-an implementation regression or a hanging test: every isolated shard completed
-within the sandbox limit and passed.
-
-Sandbox-sharded full-suite coverage passed; exact unsharded `python -m pytest`
-is required in PR CI. R1-R15 were not reduced, deferred, substituted, or
-relabeled for the sandbox limitation.
+No paper trading, live execution, credentials, private API calls, deployment, or
+new migration is included in this remediation batch.

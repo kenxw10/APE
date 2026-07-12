@@ -50,16 +50,40 @@ class ResearchRepository:
 
     def latest_archived_source_row_id(self, source_table: str) -> int | None:
         """Return the latest numeric source primary key archived for one source table."""
-        value = self.session.scalar(
-            select(ResearchReplayEvent.source_row_id)
-            .where(ResearchReplayEvent.source_table == source_table)
-            .order_by(desc(ResearchReplayEvent.id))
+        values = self.session.scalars(
+            select(ResearchReplayEvent.source_row_id).where(
+                ResearchReplayEvent.source_table == source_table
+            )
+        )
+        numeric = []
+        for value in values:
+            try:
+                numeric.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        return max(numeric, default=None)
+
+    def latest_coverage_report(self) -> dict[str, Any] | None:
+        event = self.session.scalar(
+            select(ResearchReplayEvent)
+            .where(ResearchReplayEvent.event_type == "COVERAGE_REPORT")
+            .order_by(desc(ResearchReplayEvent.event_time), desc(ResearchReplayEvent.id))
             .limit(1)
         )
-        try:
-            return int(value) if value is not None else None
-        except (TypeError, ValueError):
+        if event is None or not isinstance(event.payload, dict):
             return None
+        return deepcopy(event.payload)
+
+    def active_challenger_count(self, architecture_version: str) -> int:
+        return int(
+            self.session.scalar(
+                select(func.count()).select_from(ResearchCandidate).where(
+                    ResearchCandidate.architecture_version == architecture_version,
+                    ResearchCandidate.lifecycle_state == "DRY_RUN_CHALLENGER",
+                )
+            )
+            or 0
+        )
 
     def upsert_market_outcome(self, values: dict[str, Any]) -> ResearchMarketOutcome:
         row = self.session.scalar(
@@ -148,7 +172,6 @@ class ResearchRepository:
         actor: str,
         reason: str,
         evidence: dict[str, Any],
-        existing_challenger_count: int = 0,
     ) -> ResearchGovernanceEvent:
         """Apply only a governed database-state transition and preserve immutable evidence."""
         candidate = self.get_candidate(candidate_id)
@@ -156,11 +179,18 @@ class ResearchRepository:
             raise ValueError(f"Unknown research candidate: {candidate_id}")
         from ape.research.calibration import transition_candidate
 
+        if (
+            to_state == "DRY_RUN_CHALLENGER"
+            and self.active_challenger_count(candidate.architecture_version) > 0
+        ):
+            raise ValueError(
+                "Only one non-retired DRY_RUN_CHALLENGER is allowed per architecture."
+            )
+
         next_state, transition = transition_candidate(
             from_state=candidate.lifecycle_state,
             to_state=to_state,
             evidence=evidence,
-            existing_challenger_count=existing_challenger_count,
         )
         event_id = (
             "governance-"
@@ -228,6 +258,7 @@ class ResearchRepository:
         self, *, market_ticker: str | None = None, limit: int = 500
     ) -> list[ResearchReplayEvent]:
         statement = select(ResearchReplayEvent)
+        statement = statement.where(ResearchReplayEvent.event_type != "COVERAGE_REPORT")
         if market_ticker is not None:
             statement = statement.where(ResearchReplayEvent.market_ticker == market_ticker)
         return list(

@@ -20,13 +20,11 @@ from ape.research.archive import archive_research_events
 from ape.research.calibration import (
     LIFECYCLE_DRAFT,
     LIFECYCLE_PAPER_CANDIDATE,
-    LIFECYCLE_SHADOW,
     GovernanceError,
     bounded_candidate_specs,
     build_partition_manifest,
     market_bootstrap,
     run_bounded_calibration,
-    transition_candidate,
 )
 from ape.research.fixtures import fixture_event, fixture_time, replayable_feature_vector
 from ape.research.replay import DeterministicReplayEngine
@@ -129,32 +127,11 @@ def main() -> int:
         manifest = build_partition_manifest(outcomes)
         candidates = bounded_candidate_specs("smoke")
         bootstrap = market_bootstrap({"M1": Decimal("1"), "M2": Decimal("-1")}, "smoke")
-        evidence = {
-            "complete_unique_markets": 500,
-            "closed_simulated_trades": 50,
-            "entry_frequency_per_100_markets_min": 1,
-            "signal_to_fill_rate": "0.50",
-            "complete_replay_coverage": "0.95",
-            "volatility_regimes": 2,
-            "liquidity_regimes": 2,
-            "timing_tiers": 2,
-            "holdout_mean_net_pnl_per_market": "0.01",
-            "holdout_lower_95": "0.01",
-            "adjusted_lower_confidence_expectancy": "0.01",
-            "entry_frequency_per_100_markets": 2,
-            "dominant_regime_entry_share": "0.5",
-            "max_drawdown_per_100_markets": 10,
-            "verified_fee_model": True,
-            "beats_baseline": True,
-        }
-        promoted = transition_candidate(
-            from_state=LIFECYCLE_SHADOW,
-            to_state="DRY_RUN_CHALLENGER",
-            evidence=evidence,
-        )[0]
         paper_live_failed = []
         for target in (LIFECYCLE_PAPER_CANDIDATE, "LIVE_CANDIDATE"):
             try:
+                from ape.research.calibration import transition_candidate
+
                 transition_candidate(from_state=LIFECYCLE_DRAFT, to_state=target, evidence={})
             except GovernanceError:
                 paper_live_failed.append(target)
@@ -173,7 +150,7 @@ def main() -> int:
             "bounded_candidate_count": len(candidates),
             "partition_manifest_hash": manifest["manifest_hash"],
             "bootstrap": bootstrap,
-            "governance_promoted_to": promoted,
+            "governance_transition": "not_fabricated_by_smoke_test",
             "paper_live_transitions_failed": paper_live_failed,
         }
         print(json.dumps(payload, sort_keys=True, default=str, indent=2))

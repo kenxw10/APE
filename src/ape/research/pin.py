@@ -47,6 +47,14 @@ def resolve_pinned_candidate(
         return None, "candidate_pin_artifact_checksum_invalid"
     if version.candidate_id != candidate.candidate_id:
         return None, "candidate_pin_config_association_invalid"
+    if version.strategy_id != candidate.generated_strategy_id:
+        return None, "candidate_pin_strategy_id_mismatch"
+    if version.architecture_version != candidate.architecture_version:
+        return None, "candidate_pin_config_architecture_mismatch"
+    if version.feature_schema_version != candidate.feature_schema_version:
+        return None, "candidate_pin_config_feature_schema_mismatch"
+    if _hash(version.parameter_snapshot or {}) != _hash(candidate.parameter_snapshot or {}):
+        return None, "candidate_pin_parameter_hash_mismatch"
     if version.lifecycle_state != LIFECYCLE_DRY_RUN_CHALLENGER:
         return None, "candidate_pin_config_not_approved"
     return PinnedCandidate(

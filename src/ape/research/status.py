@@ -17,6 +17,13 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
     base = {
         "configured_enabled": config.research_enabled,
         "configured_calibration_enabled": config.calibration_enabled,
+        "api_local_configuration": {
+            "research_enabled": config.research_enabled,
+            "calibration_enabled": config.calibration_enabled,
+        },
+        "worker_observed_configuration": None,
+        "worker_observed_safety": None,
+        "heartbeat_fresh": False,
         "effective_enabled": False,
         "worker_role": "research",
         "worker_heartbeat": None,
@@ -49,12 +56,29 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
                 heartbeat.metadata_ if heartbeat and isinstance(heartbeat.metadata_, dict) else {}
             )
             details = metadata.get("research") if isinstance(metadata.get("research"), dict) else {}
+            heartbeat_at = heartbeat.heartbeat_at if heartbeat is not None else None
+            heartbeat_fresh = bool(
+                heartbeat_at is not None
+                and (checked_at - heartbeat_at).total_seconds()
+                <= max(config.research_poll_seconds * 2, 60.0)
+            )
             latest_replay = repository.latest_replay_run()
             latest_calibration = repository.latest_calibration_run()
             outcomes = repository.list_complete_outcomes()
             latest_event = repository.latest_event()
             base.update(
-                effective_enabled=bool(details.get("enabled", False)),
+                effective_enabled=bool(details.get("enabled", False))
+                and bool(heartbeat.is_safe if heartbeat is not None else False)
+                and heartbeat_fresh,
+                worker_observed_configuration={
+                    "research_enabled": details.get("enabled"),
+                    "calibration_enabled": details.get("calibration_enabled"),
+                    "worker_role": details.get("worker_role"),
+                }
+                if heartbeat
+                else None,
+                worker_observed_safety=heartbeat.is_safe if heartbeat is not None else None,
+                heartbeat_fresh=heartbeat_fresh,
                 worker_heartbeat={
                     "at": heartbeat.heartbeat_at.isoformat() if heartbeat else None,
                     "metadata": details,
@@ -76,6 +100,8 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
                 if latest_event
                 else None,
             )
+            if heartbeat is not None and not heartbeat_fresh:
+                base["warnings"].append("research_worker_heartbeat_stale")
             if not base["effective_enabled"] and config.research_enabled:
                 base["warnings"].append("research_worker_waiting_for_heartbeat")
     except SQLAlchemyError:
@@ -93,8 +119,13 @@ def build_research_records(config: AppConfig, *, kind: str, limit: int) -> dict[
         factory = create_session_factory(engine)
         with factory() as session:
             repository = ResearchRepository(session)
+            if kind == "coverage":
+                return {
+                    "kind": kind,
+                    "configured": True,
+                    "coverage": repository.latest_coverage_report(),
+                }
             loaders = {
-                "coverage": lambda: repository.list_complete_outcomes()[:limit],
                 "replay_runs": lambda: repository.list_recent_replay_runs(limit),
                 "replay_trades": lambda: repository.list_recent_replay_trades(limit),
                 "calibration_runs": lambda: repository.list_recent_calibration_runs(limit),

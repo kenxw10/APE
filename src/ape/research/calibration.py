@@ -56,8 +56,8 @@ LOGISTIC_FEATURE_COLUMNS = (
     "contract_move_15s_cents",
     "contract_move_30s_cents",
     "response_residual_cents",
-    "response_ratio_15s",
-    "response_ratio_30s",
+    "contract_brti_response_ratio_15s",
+    "contract_brti_response_ratio_30s",
     "level1_imbalance",
     "level3_imbalance",
     "top5_imbalance",
@@ -72,6 +72,17 @@ LOGISTIC_FEATURE_COLUMNS = (
     "volatility_regime",
     "liquidity_regime",
 )
+
+FREQUENCY_GOVERNANCE_VERSION = "frequency_governance_v1"
+FREQUENCY_GOVERNANCE = {
+    "version": FREQUENCY_GOVERNANCE_VERSION,
+    "qualified_setup_target_min_per_100": "5",
+    "qualified_setup_target_max_per_100": "15",
+    "preferred_fill_min_per_100": "3",
+    "preferred_fill_max_per_100": "10",
+    "hard_fill_min_for_challenger_per_100": "3",
+    "hard_fill_max_for_challenger_per_100": "15",
+}
 
 
 class GovernanceError(ValueError):
@@ -112,20 +123,33 @@ def build_partition_manifest(outcomes: Iterable[ResearchMarketOutcome]) -> dict[
     holdout_count = max(1, int(round(len(tickers) * 0.20))) if tickers else 0
     development = tickers[:-holdout_count] if holdout_count else []
     holdout = tickers[-holdout_count:] if holdout_count else []
+    development_test_count = max(1, int(round(len(development) * 0.20))) if development else 0
+    search_development = (
+        development[:-development_test_count] if development_test_count else development
+    )
+    development_test = development[-development_test_count:] if development_test_count else []
     folds: list[dict[str, Any]] = []
-    block_size = max(1, len(development) // 5) if development else 0
+    # Reserve the first chronological block for fold-one training, then evaluate
+    # five expanding-train validation folds without looking into the future.
+    block_size = max(1, len(search_development) // 6) if search_development else 0
     for index in range(5):
-        start = index * block_size
-        end = len(development) if index == 4 else min(len(development), start + block_size)
-        validation = development[start:end]
+        start = min(len(search_development), (index + 1) * block_size)
+        end = (
+            len(search_development)
+            if index == 4
+            else min(len(search_development), start + block_size)
+        )
+        validation = search_development[start:end]
         boundary_rows = [row for row in rows if row.market_ticker in validation]
         boundary_at = _utc(boundary_rows[0].market_open_at) if boundary_rows else None
-        purged = _purged_markets(rows, development, start, end, boundary_at)
+        purged = _purged_markets(rows, search_development, start, end, boundary_at)
         purged_tickers = {item["market_ticker"] for item in purged}
         folds.append(
             {
                 "fold": index + 1,
-                "train": [ticker for ticker in development[:start] if ticker not in purged_tickers],
+                "train": [
+                    ticker for ticker in search_development[:start] if ticker not in purged_tickers
+                ],
                 "validation": [ticker for ticker in validation if ticker not in purged_tickers],
                 "purged": purged,
             }
@@ -139,9 +163,21 @@ def build_partition_manifest(outcomes: Iterable[ResearchMarketOutcome]) -> dict[
         "statistical_unit": "unique_btc15_market",
         "ordered_market_tickers": tickers,
         "development": development,
-        "test": [],
+        "search_development": search_development,
+        "test": development_test,
+        "development_test": development_test,
         "holdout": holdout,
         "folds": folds,
+        "assignments": {
+            ticker: (
+                "frozen_holdout"
+                if ticker in holdout
+                else "development_test"
+                if ticker in development_test
+                else "search_walk_forward"
+            )
+            for ticker in tickers
+        },
         "data_cutoff": max(cutoff_times).isoformat() if cutoff_times else None,
         "replay_schema_version": REPLAY_SCHEMA_VERSION,
         "feature_schema_version": V2_FEATURE_SCHEMA_VERSION,
@@ -165,7 +201,9 @@ def bounded_candidate_specs(calibration_run_id: str) -> tuple[CandidateSpec, ...
         "early": [70, 75, 80, 85, 90],
         "normal": [60, 65, 70, 75, 80, 85],
         "late": [65, 70, 75, 80, 85, 90],
-        "max_ask": ["0.68", "0.70", "0.72", "0.74", "0.76", "0.78"],
+        "early_max_ask": ["0.68", "0.70", "0.72"],
+        "normal_max_ask": ["0.70", "0.72", "0.74", "0.76", "0.78"],
+        "late_max_ask": ["0.68", "0.70", "0.72", "0.74"],
         "time_stop": [15, 30, 45, 60],
         "max_hold": [30, 60, 90, 120],
         "profit_target": [8, 10, 12],
@@ -205,10 +243,11 @@ def bounded_candidate_specs(calibration_run_id: str) -> tuple[CandidateSpec, ...
             ("normal", selected["normal"]),
             ("late", selected["late"]),
         ):
+            max_ask_key = f"{tier}_max_ask"
             parameters["tiers"][tier].update(
                 {
                     "score": score,
-                    "max_ask": selected["max_ask"],
+                    "max_ask": selected[max_ask_key],
                     "time_stop": selected["time_stop"],
                     "max_hold": selected["max_hold"],
                 }
@@ -290,7 +329,11 @@ def market_bootstrap(
 
 
 def replay_metrics(
-    trades: Iterable[ReplayTrade], *, market_count: int, calibration_run_id: str
+    trades: Iterable[ReplayTrade],
+    *,
+    market_count: int,
+    calibration_run_id: str,
+    market_tickers: Iterable[str] = (),
 ) -> dict[str, Any]:
     all_trades = list(trades)
     closed = [
@@ -298,7 +341,8 @@ def replay_metrics(
         for trade in all_trades
         if trade.status == "CLOSED" and trade.net_pnl_cents is not None
     ]
-    by_market: dict[str, Decimal] = {}
+    eligible_markets = tuple(dict.fromkeys(str(ticker) for ticker in market_tickers))
+    by_market: dict[str, Decimal] = {ticker: Decimal("0") for ticker in eligible_markets}
     for trade in closed:
         by_market[trade.market_ticker] = by_market.get(trade.market_ticker, Decimal("0")) + (
             trade.net_pnl_cents or Decimal("0")
@@ -324,7 +368,8 @@ def replay_metrics(
             key = str(value)
             counts[key] = counts.get(key, 0) + 1
     dominant_entries = max(timing_counts.values(), default=0)
-    ordered_market_pnl = [by_market[market] for market in sorted(by_market)]
+    ordered_markets = eligible_markets or tuple(sorted(by_market))
+    ordered_market_pnl = [by_market.get(market, Decimal("0")) for market in ordered_markets]
     cumulative = Decimal("0")
     peak = Decimal("0")
     max_drawdown = Decimal("0")
@@ -334,6 +379,19 @@ def replay_metrics(
         max_drawdown = max(max_drawdown, peak - cumulative)
     net_values = [float(trade.net_pnl_cents or Decimal("0")) for trade in closed]
     bootstrap = market_bootstrap(by_market, calibration_run_id)
+    regime_pnl: dict[str, Decimal] = {}
+    for trade in closed:
+        measurements = trade.measurements if isinstance(trade.measurements, dict) else {}
+        regime = ":".join(
+            (
+                str(measurements.get("volatility_regime") or "unknown"),
+                str(measurements.get("liquidity_regime") or "unknown"),
+                str(trade.timing_tier or "unknown"),
+            )
+        )
+        regime_pnl[regime] = regime_pnl.get(regime, Decimal("0")) + (
+            trade.net_pnl_cents or Decimal("0")
+        )
     return {
         "net_pnl_per_market": str(net / Decimal(max(market_count, 1))),
         "net_pnl_per_trade": str(net / Decimal(max(len(closed), 1))),
@@ -363,15 +421,23 @@ def replay_metrics(
             Decimal(dominant_entries) / Decimal(max(len(closed), 1))
         ),
         "dominant_regime_pnl_share": str(
-            max((abs(value) for value in by_market.values()), default=Decimal("0"))
+            max((abs(value) for value in regime_pnl.values()), default=Decimal("0"))
             / max(abs(net), Decimal("1"))
         ),
         "bootstrap": {
             "net_pnl_per_market": bootstrap,
-            "net_pnl_per_trade": _bootstrap_trade_metric(closed, calibration_run_id, "net"),
-            "win_rate": _bootstrap_trade_metric(closed, calibration_run_id, "win"),
+            "net_pnl_per_trade": _bootstrap_trade_metric(
+                closed, calibration_run_id, "net", market_tickers=ordered_markets
+            ),
+            "win_rate": _bootstrap_trade_metric(
+                closed, calibration_run_id, "win", market_tickers=ordered_markets
+            ),
             "entry_frequency_per_100_markets": _bootstrap_trade_metric(
-                closed, calibration_run_id, "frequency", market_count
+                closed,
+                calibration_run_id,
+                "frequency",
+                market_count,
+                market_tickers=ordered_markets,
             ),
         },
         "market_net_pnl": {market: str(value) for market, value in by_market.items()},
@@ -434,41 +500,13 @@ def run_bounded_calibration(
         None,
         Decimal("-Infinity"),
     )
-    development = set(manifest["development"])
-    development_events = [event for event in events if event.market_ticker in development]
-    development_outcomes = [outcome for outcome in outcomes if outcome.market_ticker in development]
+    search_development = set(manifest["search_development"])
+    development_events = [event for event in events if event.market_ticker in search_development]
+    development_outcomes = [
+        outcome for outcome in outcomes if outcome.market_ticker in search_development
+    ]
     labeled_rows, labeled_targets = _labeled_feature_rows(development_events, development_outcomes)
-    for index, candidate in enumerate(candidates):
-        if candidate.model_type == "L2_LOGISTIC":
-            try:
-                artifact = fit_l2_logistic(
-                    labeled_rows,
-                    labeled_targets,
-                    l2=float((candidate.model_artifact or {}).get("l2", "1")),
-                )
-            except ValueError as exc:
-                metrics[candidate.candidate_id] = {
-                    "status": "BLOCKED",
-                    "reason": str(exc),
-                    "training_row_count": len(labeled_rows),
-                }
-                continue
-            candidate = replace(
-                candidate,
-                parameters={
-                    **candidate.parameters,
-                    "logistic_model": artifact,
-                    "logistic_probability_threshold": "0.50",
-                },
-                model_artifact=artifact,
-            )
-            candidates[index] = candidate
-        result = DeterministicReplayEngine(parameters=candidate.parameters).replay(
-            development_events, outcomes=development_outcomes
-        )
-        values = replay_metrics(
-            result.trades, market_count=len(development), calibration_run_id=calibration_run_id
-        )
+    for candidate in candidates:
         fold_metrics = _walk_forward_metrics(
             candidate,
             manifest,
@@ -476,6 +514,26 @@ def run_bounded_calibration(
             outcomes,
             calibration_run_id,
         )
+        if candidate.model_type == "L2_LOGISTIC":
+            if not fold_metrics:
+                metrics[candidate.candidate_id] = {
+                    "status": "BLOCKED",
+                    "reason": "logistic_fold_training_unavailable",
+                    "training_row_count": len(labeled_rows),
+                }
+                continue
+            values = _aggregate_fold_metrics(fold_metrics)
+            result = DeterministicReplayEngine(parameters=candidate.parameters).replay([])
+        else:
+            result = DeterministicReplayEngine(parameters=candidate.parameters).replay(
+                development_events, outcomes=development_outcomes
+            )
+            values = replay_metrics(
+                result.trades,
+                market_count=len(search_development),
+                calibration_run_id=calibration_run_id,
+                market_tickers=search_development,
+            )
         lower = Decimal(values["bootstrap"]["net_pnl_per_market"]["lower"])
         penalties = adjusted_lower_confidence_expectancy(
             bootstrap_lower=lower,
@@ -502,6 +560,39 @@ def run_bounded_calibration(
             best_lower, selected = adjusted_lower, candidate.candidate_id
     if selected is not None:
         chosen = next(candidate for candidate in candidates if candidate.candidate_id == selected)
+        if chosen.model_type == "L2_LOGISTIC":
+            artifact = fit_l2_logistic(
+                labeled_rows,
+                labeled_targets,
+                l2=float((chosen.model_artifact or {}).get("l2", "1")),
+            )
+            chosen = replace(
+                chosen,
+                parameters={
+                    **chosen.parameters,
+                    "logistic_model": artifact,
+                    "logistic_probability_threshold": "0.50",
+                },
+                model_artifact=artifact,
+            )
+            selected_index = next(
+                index
+                for index, item in enumerate(candidates)
+                if item.candidate_id == selected
+            )
+            candidates[selected_index] = chosen
+            metrics[selected]["model_artifact"] = artifact
+        development_test = set(manifest["development_test"])
+        test_result = DeterministicReplayEngine(parameters=chosen.parameters).replay(
+            [event for event in events if event.market_ticker in development_test],
+            outcomes=[outcome for outcome in outcomes if outcome.market_ticker in development_test],
+        )
+        metrics[selected]["development_test"] = replay_metrics(
+            test_result.trades,
+            market_count=len(development_test),
+            calibration_run_id=f"{calibration_run_id}-development-test",
+            market_tickers=development_test,
+        )
         holdout = set(manifest["holdout"])
         holdout_events = [event for event in events if event.market_ticker in holdout]
         holdout_outcomes = [outcome for outcome in outcomes if outcome.market_ticker in holdout]
@@ -512,6 +603,7 @@ def run_bounded_calibration(
             holdout_result.trades,
             market_count=len(holdout),
             calibration_run_id=calibration_run_id,
+            market_tickers=holdout,
         )
     return CalibrationResult("COMPLETED", manifest, tuple(candidates), metrics, selected, (), ())
 
@@ -554,10 +646,36 @@ def _walk_forward_metrics(
 ) -> list[dict[str, Any]]:
     metrics: list[dict[str, Any]] = []
     for fold in manifest["folds"]:
+        train = set(fold["train"])
         validation = set(fold["validation"])
-        if not validation:
+        if not train or not validation:
             continue
-        replay = DeterministicReplayEngine(parameters=candidate.parameters).replay(
+        evaluated_candidate = candidate
+        if candidate.model_type == "L2_LOGISTIC":
+            train_rows, train_targets = _labeled_feature_rows(
+                [event for event in events if event.market_ticker in train],
+                [outcome for outcome in outcomes if outcome.market_ticker in train],
+            )
+            try:
+                artifact = fit_l2_logistic(
+                    train_rows,
+                    train_targets,
+                    l2=float((candidate.model_artifact or {}).get("l2", "1")),
+                )
+            except ValueError:
+                continue
+            evaluated_candidate = replace(
+                candidate,
+                parameters={
+                    **candidate.parameters,
+                    "logistic_model": artifact,
+                    "logistic_probability_threshold": "0.50",
+                },
+                model_artifact=artifact,
+            )
+        replay = DeterministicReplayEngine(parameters=evaluated_candidate.parameters).replay(
+            # The model is trained only from this fold's earlier markets.
+            # Validation receives the fitted artifact and never refits it.
             [event for event in events if event.market_ticker in validation],
             outcomes=[outcome for outcome in outcomes if outcome.market_ticker in validation],
         )
@@ -568,10 +686,32 @@ def _walk_forward_metrics(
                     replay.trades,
                     market_count=len(validation),
                     calibration_run_id=f"{calibration_run_id}-fold-{fold['fold']}",
+                    market_tickers=validation,
                 ),
             }
         )
     return metrics
+
+
+def _aggregate_fold_metrics(fold_metrics: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize validation-only fold evidence without introducing a global fit."""
+    if not fold_metrics:
+        return {}
+    exemplar = fold_metrics[-1]
+    numeric_keys = (
+        "net_pnl_per_market",
+        "net_pnl_per_trade",
+        "entry_frequency_per_100_markets",
+        "signal_to_fill_rate",
+        "dominant_regime_entry_share",
+    )
+    values = dict(exemplar)
+    for key in numeric_keys:
+        values[key] = str(
+            sum(Decimal(str(item[key])) for item in fold_metrics) / Decimal(len(fold_metrics))
+        )
+    values["bootstrap"] = exemplar["bootstrap"]
+    return values
 
 
 def _changed_parameter_count(parameters: dict[str, Any]) -> int:
@@ -616,9 +756,15 @@ def _flatten_parameters(
 
 
 def _bootstrap_trade_metric(
-    trades: list[ReplayTrade], calibration_run_id: str, metric: str, market_count: int | None = None
+    trades: list[ReplayTrade],
+    calibration_run_id: str,
+    metric: str,
+    market_count: int | None = None,
+    *,
+    market_tickers: Iterable[str] = (),
 ) -> dict[str, str]:
-    if not trades:
+    eligible_markets = tuple(dict.fromkeys(str(ticker) for ticker in market_tickers))
+    if not trades and not eligible_markets:
         return {"resamples": "2000", "lower": "0", "upper": "0", "mean": "0"}
     rng = np.random.default_rng(
         int(hashlib.sha256(f"{calibration_run_id}-{metric}".encode()).hexdigest()[:16], 16)
@@ -626,7 +772,9 @@ def _bootstrap_trade_metric(
     by_market: dict[str, list[ReplayTrade]] = {}
     for trade in trades:
         by_market.setdefault(trade.market_ticker, []).append(trade)
-    markets = tuple(sorted(by_market))
+    markets = eligible_markets or tuple(sorted(by_market))
+    for market in markets:
+        by_market.setdefault(market, [])
     samples = np.asarray(
         [
             _sample_trade_metric(
@@ -652,11 +800,13 @@ def _sample_trade_metric(
     values = [float(trade.net_pnl_cents or Decimal("0")) for trade in sampled]
     if metric == "win":
         return sum(value > 0 for value in values) / max(len(values), 1)
-    return sum(values) / max(len(values), 1)
+    # Net-P&L bootstrap is a market statistic: sampled zero-trade markets
+    # remain zero-valued observations instead of disappearing from the mean.
+    return sum(values) / max(len(sampled_markets), 1)
 
 
 def transition_candidate(
-    *, from_state: str, to_state: str, evidence: dict[str, Any], existing_challenger_count: int = 0
+    *, from_state: str, to_state: str, evidence: dict[str, Any]
 ) -> tuple[str, dict[str, Any]]:
     if to_state not in GOVERNANCE_STATES:
         raise GovernanceError(f"Unknown lifecycle state {to_state!r}.")
@@ -676,10 +826,6 @@ def transition_candidate(
     }:
         raise GovernanceError(f"Forbidden automatic transition {from_state} -> {to_state}.")
     if to_state == LIFECYCLE_DRY_RUN_CHALLENGER:
-        if existing_challenger_count > 0:
-            raise GovernanceError(
-                "Only one non-retired DRY_RUN_CHALLENGER is allowed per architecture."
-            )
         failures = _promotion_failures(evidence)
         if failures:
             raise GovernanceError(
@@ -696,7 +842,9 @@ def _promotion_failures(evidence: dict[str, Any]) -> list[str]:
     minimums = {
         "complete_unique_markets": 500,
         "closed_simulated_trades": 50,
-        "entry_frequency_per_100_markets_min": 1,
+        "entry_frequency_per_100_markets_min": Decimal(
+            FREQUENCY_GOVERNANCE["hard_fill_min_for_challenger_per_100"]
+        ),
         "signal_to_fill_rate": Decimal("0.50"),
         "complete_replay_coverage": Decimal("0.95"),
         "volatility_regimes": 2,
@@ -715,7 +863,9 @@ def _promotion_failures(evidence: dict[str, Any]) -> list[str]:
     ):
         if Decimal(str(evidence.get(key, 0))) <= 0:
             failures.append(key)
-    if Decimal(str(evidence.get("entry_frequency_per_100_markets", 0))) > 15:
+    if Decimal(str(evidence.get("entry_frequency_per_100_markets", 0))) > Decimal(
+        FREQUENCY_GOVERNANCE["hard_fill_max_for_challenger_per_100"]
+    ):
         failures.append("entry_frequency_per_100_markets_max")
     if Decimal(str(evidence.get("dominant_regime_entry_share", 1))) > Decimal("0.60"):
         failures.append("dominant_regime_entry_share")

@@ -90,7 +90,7 @@ def test_r5_zero_entry_audit_is_explicitly_unvalidatable() -> None:
 def test_r6_verified_taker_fee_is_nonzero_and_versioned() -> None:
     fee = verified_kalshi_taker_fee_model()
     assert fee.fee_cents(price=Decimal("0.50")) == Decimal("2.00")
-    assert fee.metadata()["schedule_version"] == "2026-02-05"
+    assert fee.metadata()["schedule_version"] == "2026-07-07"
 
 
 def test_r7_ordered_replay_uses_first_book_without_future_rescue() -> None:
@@ -157,7 +157,10 @@ def test_r14_retention_and_durable_status_tables_are_separate() -> None:
 
 def test_r15_documentation_versions_and_safety_contract_are_present() -> None:
     compliance = (ROOT / "docs/PR11_COMPLIANCE.md").read_text()
-    assert compliance.count("COMPLIANT") == 15
+    assert "PR 11 is not yet\ncompliant" in compliance
+    assert "COMPLIANT" not in compliance
+    assert "Automatic governance transitions" in compliance
+    assert "Generated validation-log, JUnit, and result-file cleanup" in compliance
     assert (ROOT / "docs/RESEARCH_AND_CALIBRATION.md").exists()
     assert "ape-research-worker" in (ROOT / "docs/RAILWAY.md").read_text()
     assert (

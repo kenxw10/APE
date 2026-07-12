@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import String, cast, desc, exists, func, select
 from sqlalchemy.orm import Session
 
 from ape.db.models import (
@@ -15,12 +15,14 @@ from ape.db.models import (
     OrderbookSnapshot,
     PublicTrade,
     ReferenceTick,
+    ResearchMarketOutcome,
     ResearchReplayEvent,
     StrategyDecision,
     StrategyFeatureSnapshot,
     StrategyPositionOutcome,
     StrategyTradeIntent,
 )
+from ape.kalshi.errors import KalshiError
 from ape.kalshi.reference_messages import BRTI_SOURCE
 from ape.research import REPLAY_SCHEMA_VERSION, RESEARCH_LABEL_SCHEMA_VERSION
 from ape.research.fees import verified_kalshi_taker_fee_model
@@ -60,25 +62,41 @@ def archive_research_events(session: Session, *, now: datetime | None = None) ->
         session, repository, StrategyPositionOutcome, "strategy_position_outcomes"
     ):
         _archive(repository, _lifecycle_event(row, "strategy_position_outcomes"), counts)
-    reconciled = reconcile_market_outcomes(session, now=checked_at)
-    coverage = _coverage(session)
-    return ArchiveResult(sum(counts.values()), counts, reconciled, coverage)
+    _refresh_mature_labels(session, repository)
+    coverage = _coverage(session, data_cutoff=checked_at)
+    repository.archive_event(_coverage_event(coverage, checked_at))
+    return ArchiveResult(sum(counts.values()), counts, 0, coverage)
 
 
 def _unarchived_rows(session: Session, repository: ResearchRepository, model, source_table: str):
-    last_id = repository.latest_archived_source_row_id(source_table)
-    statement = select(model).order_by(model.id.asc()).limit(ARCHIVE_BATCH_SIZE)
-    if last_id is not None:
-        statement = statement.where(model.id > last_id)
+    # A cursor based only on the last inserted archive row can skip an interrupted
+    # or out-of-order source row. The anti-join makes every source primary key
+    # independently idempotent while repository.latest_archived_source_row_id()
+    # remains a numeric-only diagnostic cursor.
+    del repository
+    archived = exists(
+        select(1).where(
+            ResearchReplayEvent.source_table == source_table,
+            ResearchReplayEvent.source_row_id == cast(model.id, String),
+        )
+    )
+    statement = select(model).where(~archived).order_by(model.id.asc()).limit(ARCHIVE_BATCH_SIZE)
     return session.scalars(statement)
 
 
-def reconcile_market_outcomes(session: Session, *, now: datetime | None = None) -> int:
+def reconcile_market_outcomes(session: Session, *, client, now: datetime | None = None) -> int:
     """Public-data-only market outcome reconciliation owned by the market-data service."""
     checked_at = _utc(now or datetime.now(UTC))
     repository = ResearchRepository(session)
     changed = 0
-    for market in session.scalars(select(Market).order_by(Market.id.asc())):
+    for market in session.scalars(
+        select(Market)
+        .where(Market.close_time.is_not(None), Market.close_time <= checked_at)
+        .order_by(Market.close_time.desc(), Market.id.desc())
+        .limit(500)
+    ):
+        if not _is_btc15_market(market):
+            continue
         if market.close_time is None:
             continue
         close_at = _utc(market.close_time)
@@ -99,19 +117,21 @@ def reconcile_market_outcomes(session: Session, *, now: datetime | None = None) 
         )
         final_tick = ticks[-1] if ticks else None
         boundary = market.functional_strike or market.floor_strike
-        resolved = (
-            expiration <= checked_at
-            and final_tick is not None
-            and final_tick.parsed_value is not None
-            and boundary is not None
-        )
-        status = (
-            "RESOLVED"
-            if resolved
-            else "UNAVAILABLE"
-            if expiration + timedelta(hours=1) < checked_at
-            else "PENDING"
-        )
+        try:
+            response = client.get_market(market.market_ticker)
+        except KalshiError:
+            response = {}
+        official = response.get("market") if isinstance(response.get("market"), dict) else response
+        official = official if isinstance(official, dict) else {}
+        result_side = _official_result_side(official)
+        official_status = str(official.get("status") or "").strip().lower()
+        resolved = result_side is not None and official_status in {
+            "settled",
+            "resolved",
+            "finalized",
+            "closed",
+        }
+        status = "RESOLVED" if resolved else "PENDING" if official else "UNAVAILABLE"
         final_value = (
             Decimal(final_tick.parsed_value)
             if final_tick and final_tick.parsed_value is not None
@@ -137,32 +157,53 @@ def reconcile_market_outcomes(session: Session, *, now: datetime | None = None) 
                 "market_close_at": market.close_time,
                 "expiration_at": market.expiration_time or market.latest_expiration_time,
                 "boundary": Decimal(boundary) if boundary is not None else None,
-                "result_side": "YES"
-                if resolved and final_value >= Decimal(boundary)
-                else "NO"
-                if resolved
-                else None,
-                "settlement_value": final_value if resolved else None,
+                "result_side": result_side if resolved else None,
+                "settlement_value": _official_settlement_value(official) if resolved else None,
                 "final_reference_value": final_value,
                 "final_minute_reference_average": sum(final_minute, Decimal("0"))
                 / len(final_minute)
                 if final_minute
                 else None,
                 "outcome_status": status,
-                "outcome_source": "public_reference_ticks",
-                "source_payload_hash": _hash(
-                    {"market": market.market_ticker, "tick": getattr(final_tick, "id", None)}
-                ),
+                "outcome_source": "kalshi_public_market_detail",
+                "source_payload_hash": _hash(official),
                 "resolved_at": checked_at if resolved else None,
                 "expected_frame_count": expected,
                 "actual_frame_count": actual,
                 "coverage_percentage": Decimal(actual) / Decimal(expected),
                 "maximum_event_gap_seconds": max(gaps, default=None),
-                "quality_flags": _labels_for_market(session, market, ticks),
+                "quality_flags": {
+                    "official_outcome_available": resolved,
+                    "official_status": official_status or None,
+                },
             }
         )
         changed += 1
     return changed
+
+
+def _is_btc15_market(market: Market) -> bool:
+    return bool(
+        market.series_ticker == "KXBTC15M"
+        or (market.market_ticker or "").upper().startswith("KXBTC15M")
+    )
+
+
+def _official_result_side(payload: dict[str, Any]) -> str | None:
+    value = str(payload.get("result") or payload.get("result_side") or "").strip().upper()
+    return value if value in {"YES", "NO"} else None
+
+
+def _official_settlement_value(payload: dict[str, Any]) -> Decimal | None:
+    for key in ("settlement_value", "settlement_price", "result_value"):
+        value = payload.get(key)
+        if value is None:
+            continue
+        try:
+            return Decimal(str(value))
+        except (ArithmeticError, ValueError):
+            continue
+    return None
 
 
 def _archive(repository: ResearchRepository, event: dict[str, Any], counts: dict[str, int]) -> None:
@@ -354,35 +395,87 @@ def _event(
     }
 
 
-def _coverage(session: Session) -> dict[str, Any]:
+def _coverage(session: Session, *, data_cutoff: datetime) -> dict[str, Any]:
     repository = ResearchRepository(session)
     outcomes = repository.list_complete_outcomes()
-    event_count = session.scalar(select(func.count()).select_from(ResearchReplayEvent)) or 0
+    event_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(ResearchReplayEvent)
+            .where(ResearchReplayEvent.event_type != "COVERAGE_REPORT")
+        )
+        or 0
+    )
     by_type = dict(
         session.execute(
-            select(ResearchReplayEvent.event_type, func.count()).group_by(
-                ResearchReplayEvent.event_type
-            )
+            select(ResearchReplayEvent.event_type, func.count())
+            .where(ResearchReplayEvent.event_type != "COVERAGE_REPORT")
+            .group_by(ResearchReplayEvent.event_type)
         ).all()
     )
     earliest, latest = session.execute(
-        select(func.min(ResearchReplayEvent.event_time), func.max(ResearchReplayEvent.event_time))
+        select(
+            func.min(ResearchReplayEvent.event_time),
+            func.max(ResearchReplayEvent.event_time),
+        ).where(ResearchReplayEvent.event_type != "COVERAGE_REPORT")
     ).one()
     readiness = dict(
         session.execute(
-            select(ResearchReplayEvent.replay_readiness, func.count()).group_by(
-                ResearchReplayEvent.replay_readiness
-            )
+            select(ResearchReplayEvent.replay_readiness, func.count())
+            .where(ResearchReplayEvent.event_type != "COVERAGE_REPORT")
+            .group_by(ResearchReplayEvent.replay_readiness)
         ).all()
     )
+    per_market: dict[str, dict[str, Any]] = {}
+    event_rows = session.execute(
+        select(
+            ResearchReplayEvent.market_ticker,
+            ResearchReplayEvent.event_type,
+            ResearchReplayEvent.event_time,
+        )
+        .where(
+            ResearchReplayEvent.market_ticker.is_not(None),
+            ResearchReplayEvent.event_type != "COVERAGE_REPORT",
+        )
+        .order_by(ResearchReplayEvent.market_ticker, ResearchReplayEvent.event_time)
+    ).all()
+    for market_ticker, event_type, event_time in event_rows:
+        if market_ticker is None:
+            continue
+        current = per_market.setdefault(
+            market_ticker,
+            {"event_count": 0, "event_counts_by_type": {}, "maximum_event_gap_seconds": 0},
+        )
+        current["event_count"] += 1
+        counts = current["event_counts_by_type"]
+        counts[str(event_type)] = int(counts.get(str(event_type), 0)) + 1
+        previous = current.get("last_event_time")
+        if previous is not None:
+            current["maximum_event_gap_seconds"] = max(
+                int(current["maximum_event_gap_seconds"]),
+                max(0, int((_utc(event_time) - _utc(previous)).total_seconds())),
+            )
+        current["last_event_time"] = event_time
+    for values in per_market.values():
+        values.pop("last_event_time", None)
+        source_types = set(values["event_counts_by_type"])
+        values["missing_source_count"] = len(
+            {"MARKET", "ORDERBOOK", "FEATURE_SNAPSHOT"} - source_types
+        )
+        values["coverage_percentage"] = str(
+            Decimal(values["event_count"]) / Decimal(max(event_count, 1))
+        )
     return {
+        "coverage_schema_version": "research_coverage_v1",
+        "data_cutoff": _utc(data_cutoff).isoformat(),
         "complete_markets": len(outcomes),
         "event_count": int(event_count),
         "earliest_event_time": _utc(earliest).isoformat() if earliest else None,
         "latest_event_time": _utc(latest).isoformat() if latest else None,
         "unique_markets": session.scalar(
             select(func.count(func.distinct(ResearchReplayEvent.market_ticker))).where(
-                ResearchReplayEvent.market_ticker.is_not(None)
+                ResearchReplayEvent.market_ticker.is_not(None),
+                ResearchReplayEvent.event_type != "COVERAGE_REPORT",
             )
         )
         or 0,
@@ -399,11 +492,73 @@ def _coverage(session: Session) -> dict[str, Any]:
         "minimum_coverage": min(
             (float(row.coverage_percentage or 0) for row in outcomes), default=0.0
         ),
+        "missing_source_counts": {
+            market: int(values["missing_source_count"])
+            for market, values in sorted(per_market.items())
+        },
+        "per_market_coverage": per_market,
     }
 
 
+def _coverage_event(coverage: dict[str, Any], checked_at: datetime) -> dict[str, Any]:
+    checksum = _hash(coverage)
+    return {
+        "event_id": _identifier("coverage", checksum),
+        "market_ticker": None,
+        "event_type": "COVERAGE_REPORT",
+        "event_time": checked_at,
+        "received_at": checked_at,
+        "source_table": "research_coverage_reports",
+        "source_row_id": checksum,
+        "source_hash": checksum,
+        "sequence_number": None,
+        "feature_snapshot_id": None,
+        "feature_schema_version": None,
+        "architecture_version": None,
+        "replay_schema_version": REPLAY_SCHEMA_VERSION,
+        "payload": _json_safe(coverage),
+        "event_hash": checksum,
+        "replay_readiness": "FULL",
+        "blockers": [],
+    }
+
+
+def _refresh_mature_labels(session: Session, repository: ResearchRepository) -> None:
+    outcomes = repository.list_complete_outcomes()
+    for outcome in outcomes:
+        market = session.scalar(
+            select(Market).where(Market.market_ticker == outcome.market_ticker)
+        )
+        if market is None:
+            continue
+        ticks = list(
+            session.scalars(
+                select(ReferenceTick)
+                .where(
+                    ReferenceTick.source == BRTI_SOURCE,
+                    ReferenceTick.received_at
+                    >= _utc(
+                        market.open_time
+                        or outcome.market_open_at
+                        or market.close_time
+                        or outcome.market_close_at
+                    ),
+                )
+                .order_by(ReferenceTick.received_at.asc(), ReferenceTick.id.asc())
+            )
+        )
+        outcome.quality_flags = {
+            **(outcome.quality_flags if isinstance(outcome.quality_flags, dict) else {}),
+            **_labels_for_market(session, market, ticks, outcome),
+        }
+    session.flush()
+
+
 def _labels_for_market(
-    session: Session, market: Market, ticks: list[ReferenceTick]
+    session: Session,
+    market: Market,
+    ticks: list[ReferenceTick],
+    outcome: ResearchMarketOutcome | None = None,
 ) -> dict[str, Any]:
     """Generate labels only after archival; replay never consumes future values."""
     books = list(
@@ -421,8 +576,10 @@ def _labels_for_market(
     ):
         vector = event.complete_feature_vector or {}
         side = vector.get("candidate_side") or event.candidate_side
-        if side in {"YES", "NO"}:
-            labels[event.feature_snapshot_id] = _counterfactual_label(event, books, ticks, market)
+        if event.replay_readiness == "FULL" and side in {"YES", "NO"}:
+            labels[event.feature_snapshot_id] = _counterfactual_label(
+                event, books, ticks, market, outcome
+            )
     return {"label_schema_version": RESEARCH_LABEL_SCHEMA_VERSION, "counterfactual_labels": labels}
 
 
@@ -431,6 +588,7 @@ def _counterfactual_label(
     books: list[OrderbookSnapshot],
     ticks: list[ReferenceTick],
     market: Market,
+    outcome: ResearchMarketOutcome | None = None,
 ) -> dict[str, Any]:
     at = _utc(feature.evaluated_at)
     vector = feature.complete_feature_vector or {}
@@ -443,12 +601,28 @@ def _counterfactual_label(
     )
     first_ask = _ask(entry, side) if entry else None
     entry_depth = _ask_depth(entry, side) if entry else None
+    from ape.strategy.momentum_v2 import evaluate_momentum_v2_feature_vector
+
+    try:
+        evaluation = evaluate_momentum_v2_feature_vector(vector)
+    except (KeyError, TypeError, ValueError):
+        return _json_safe(
+            {
+                "entry_fillable": False,
+                "entry_label_readiness": "UNAVAILABLE",
+                "entry_label_blockers": ["feature_vector_incomplete"],
+                "settlement_label_readiness": "UNAVAILABLE",
+                "settlement_label_blockers": ["executable_label_not_available"],
+            }
+        )
+    intended_limit = evaluation.intended_entry_price
     entry_price = (
         first_ask
         if first_ask is not None
         and entry_depth is not None
         and entry_depth >= Decimal("1")
-        and first_ask <= Decimal("0.78")
+        and intended_limit is not None
+        and first_ask <= intended_limit
         else None
     )
     fee_model = verified_kalshi_taker_fee_model()
@@ -458,14 +632,36 @@ def _counterfactual_label(
         "first_book_ask": first_ask,
         "first_book_ask_depth": entry_depth,
         "entry_price": entry_price,
+        "entry_intended_limit": intended_limit,
+        "entry_label_readiness": "FULL" if entry_price is not None else "UNAVAILABLE",
+        "entry_label_blockers": [] if entry_price is not None else ["first_book_not_executable"],
         "fee_model": fee_model.metadata(),
     }
     for seconds in (5, 15, 30, 60):
         label_at = at + timedelta(seconds=seconds)
         tick = next((row for row in ticks if _utc(row.received_at) >= label_at), None)
-        mark_book = next((book for book in books if _utc(book.received_at) >= label_at), None)
+        mark_book = next(
+            (
+                book
+                for book in books
+                if label_at <= _utc(book.received_at) <= label_at + timedelta(seconds=5)
+            ),
+            None,
+        )
         mark = _bid(mark_book, side)
         values[f"brti_{seconds}s"] = tick.parsed_value if tick else None
+        values[f"target_timestamp_{seconds}s"] = label_at
+        values[f"selected_event_id_{seconds}s"] = mark_book.id if mark_book else None
+        values[f"selected_event_timestamp_{seconds}s"] = (
+            mark_book.received_at if mark_book else None
+        )
+        values[f"event_age_ms_{seconds}s"] = (
+            int((_utc(mark_book.received_at) - label_at).total_seconds() * 1000)
+            if mark_book
+            else None
+        )
+        values[f"executable_bid_{seconds}s"] = mark
+        values[f"depth_{seconds}s"] = _ask_depth(mark_book, side)
         values[f"gross_markout_{seconds}s_cents"] = (
             (mark - entry_price) * Decimal("100")
             if mark is not None and entry_price is not None
@@ -478,6 +674,8 @@ def _counterfactual_label(
             if mark is not None and entry_price is not None
             else None
         )
+        values[f"label_readiness_{seconds}s"] = "FULL" if mark is not None else "UNAVAILABLE"
+        values[f"label_blockers_{seconds}s"] = [] if mark is not None else ["bounded_mark_missing"]
     held_bids = [
         (_bid(book, side), _utc(book.received_at))
         for book in books
@@ -514,23 +712,19 @@ def _counterfactual_label(
         and close_at - timedelta(seconds=60) <= _utc(book.received_at) <= close_at
         and _bid(book, side) is not None
     ]
-    final_tick = ticks[-1] if ticks else None
-    boundary = vector.get("boundary") or feature.boundary
     values["final_minute_mark"] = (
         sum(final_minute_bids, Decimal("0")) / len(final_minute_bids) if final_minute_bids else None
     )
     values["settlement_payout"] = (
-        Decimal("1")
-        if final_tick is not None
-        and final_tick.parsed_value is not None
-        and boundary is not None
-        and (
-            (side == "YES" and Decimal(final_tick.parsed_value) >= Decimal(str(boundary)))
-            or (side == "NO" and Decimal(final_tick.parsed_value) < Decimal(str(boundary)))
-        )
-        else Decimal("0")
-        if final_tick is not None and final_tick.parsed_value is not None and boundary is not None
+        (Decimal("1") if outcome.result_side == side else Decimal("0"))
+        if outcome is not None and outcome.result_side is not None
         else None
+    )
+    values["settlement_source"] = outcome.outcome_source if outcome is not None else None
+    values["settlement_status"] = outcome.outcome_status if outcome is not None else None
+    values["settlement_label_readiness"] = "FULL" if outcome is not None else "UNAVAILABLE"
+    values["settlement_label_blockers"] = (
+        [] if outcome is not None else ["official_outcome_missing"]
     )
     return _json_safe(values)
 

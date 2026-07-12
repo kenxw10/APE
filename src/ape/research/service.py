@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy.exc import SQLAlchemyError
 
 from ape.config import AppConfig
+from ape.kalshi.client import KalshiRestClient
 from ape.repositories.inputs import StrategyConfigVersionInput, WorkerHeartbeatInput
 from ape.repositories.strategy_v2 import StrategyV2Repository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
@@ -75,11 +76,24 @@ class ResearchWorker:
 class MarketOutcomeReconciler:
     """Public-data-only reconciler run by the market-data worker, never research credentials."""
 
-    def __init__(self, *, config: AppConfig, safety, session_factory, started_at: datetime) -> None:
+    def __init__(
+        self,
+        *,
+        config: AppConfig,
+        safety,
+        session_factory,
+        started_at: datetime,
+        market_client: KalshiRestClient | None = None,
+    ) -> None:
         self.config = config
         self.safety = safety
         self.session_factory = session_factory
         self.started_at = started_at
+        # Deliberately omit credentials: reconciliation owns only public market detail.
+        self.market_client = market_client or KalshiRestClient(
+            base_url=config.kalshi_api_base_url,
+            timeout_seconds=config.kalshi_request_timeout_seconds,
+        )
 
     async def run(self, *, stop_event, max_iterations: int | None = None) -> None:
         iterations = 0
@@ -87,7 +101,7 @@ class MarketOutcomeReconciler:
             if self.session_factory is not None:
                 try:
                     with self.session_factory() as session:
-                        reconcile_market_outcomes(session)
+                        reconcile_market_outcomes(session, client=self.market_client)
                         session.commit()
                 except SQLAlchemyError:
                     LOGGER.warning("Market outcome reconciliation failed.", exc_info=True)

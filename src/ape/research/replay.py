@@ -15,6 +15,7 @@ from ape.strategy.momentum_v2 import (
     V2_PARAMETERS,
     V2FeatureEvaluation,
     evaluate_momentum_v2_feature_vector,
+    evaluate_momentum_v2_lifecycle,
 )
 
 
@@ -61,6 +62,7 @@ class ReplayResult:
 @dataclass
 class _PendingEntry:
     evaluation: V2FeatureEvaluation
+    market_ticker: str
     event_id: str
     decision_at: datetime
     effective_after: datetime
@@ -77,7 +79,18 @@ class _OpenPosition:
     worst_bid: Decimal
     best_at: datetime
     worst_at: datetime
-    exit_checked: bool = False
+    exit_attempts: int = 0
+
+
+@dataclass
+class _PendingExit:
+    position: _OpenPosition
+    market_ticker: str
+    trigger: str
+    classification: str
+    effective_after: datetime
+    expires_at: datetime
+    intended_limit: Decimal
 
 
 class DeterministicReplayEngine:
@@ -104,7 +117,10 @@ class DeterministicReplayEngine:
         trades: list[ReplayTrade] = []
         samples: list[tuple[str, V2FeatureEvaluation]] = []
         pending: dict[str, _PendingEntry] = {}
-        open_positions: dict[str, _OpenPosition] = {}
+        entry_attempted_markets: set[str] = set()
+        open_position: _OpenPosition | None = None
+        pending_exit: _PendingExit | None = None
+        latest_books: dict[str, tuple[dict[str, Any], str, datetime]] = {}
         funnel = _new_funnel()
         blockers: dict[str, int] = {}
 
@@ -135,10 +151,13 @@ class DeterministicReplayEngine:
                 if (
                     evaluation.state == "DRY_RUN_ENTRY_SIGNAL"
                     and market not in pending
-                    and market not in open_positions
+                    and market not in entry_attempted_markets
+                    and open_position is None
                 ):
+                    entry_attempted_markets.add(market)
                     pending[market] = _PendingEntry(
                         evaluation=evaluation,
+                        market_ticker=market,
                         event_id=event.event_id,
                         decision_at=at,
                         effective_after=at
@@ -148,14 +167,65 @@ class DeterministicReplayEngine:
                             )
                         ),
                         expires_at=at
+                        + timedelta(
+                            milliseconds=int(
+                                self.parameters.get("decision_to_book_latency_ms", 500)
+                            )
+                        )
                         + timedelta(seconds=float(self.parameters.get("intent_expiry_seconds", 2))),
                     )
                     funnel["intent"] += 1
+                if open_position is not None and pending_exit is None:
+                    # A decision for a rolled market forces the held market through the same
+                    # lifecycle helper that production uses.
+                    held_payload = latest_books.get(
+                        open_position.pending.market_ticker,
+                        ({}, "", at),
+                    )[0]
+                    side = open_position.pending.evaluation.candidate_side or "YES"
+                    held_bid, _ = _bid(held_payload or {}, side)
+                    lifecycle = evaluate_momentum_v2_lifecycle(
+                        _lifecycle_inputs(
+                            position=open_position,
+                            evaluation=evaluation,
+                            features=vector,
+                            held_bid=held_bid,
+                            market_matches=market == open_position.pending.market_ticker,
+                            evaluated_at=at,
+                        ),
+                        self.parameters,
+                    )
+                    if lifecycle.trigger is not None and held_bid is not None:
+                        if open_position.exit_attempts < 3:
+                            pending_exit = _PendingExit(
+                                position=open_position,
+                                market_ticker=open_position.pending.market_ticker,
+                                trigger=lifecycle.trigger,
+                                classification=lifecycle.classification or "SIGNAL",
+                                effective_after=at
+                                + timedelta(
+                                    milliseconds=int(
+                                        self.parameters.get("decision_to_book_latency_ms", 500)
+                                    )
+                                ),
+                                expires_at=at
+                                + timedelta(
+                                    milliseconds=int(
+                                        self.parameters.get("decision_to_book_latency_ms", 500)
+                                    )
+                                )
+                                + timedelta(
+                                    seconds=float(self.parameters.get("intent_expiry_seconds", 2))
+                                ),
+                                intended_limit=max(held_bid - Decimal("0.01"), Decimal("0.01")),
+                            )
+                            funnel["exit_intent"] += 1
                 continue
 
             if event.event_type != "ORDERBOOK" or market is None:
                 continue
             payload = event.payload or {}
+            latest_books[market] = (payload, event.event_id, at)
             pending_entry = pending.get(market)
             if pending_entry is not None:
                 if at > pending_entry.expires_at:
@@ -171,7 +241,7 @@ class DeterministicReplayEngine:
                         and ask <= pending_entry.evaluation.intended_entry_price
                     ):
                         bid, _ = _bid(payload, side)
-                        open_positions[market] = _OpenPosition(
+                        open_position = _OpenPosition(
                             pending=pending_entry,
                             entry_at=at,
                             entry_price=ask,
@@ -187,7 +257,42 @@ class DeterministicReplayEngine:
                         trades.append(_no_fill_trade(pending_entry, market, "ENTRY_NO_FILL"))
                     del pending[market]
 
-            position = open_positions.get(market)
+            if pending_exit is not None and pending_exit.market_ticker == market:
+                if at > pending_exit.expires_at:
+                    pending_exit.position.exit_attempts += 1
+                    pending_exit = None
+                elif at >= pending_exit.effective_after:
+                    side = pending_exit.position.pending.evaluation.candidate_side or "YES"
+                    bid, bid_size = _bid(payload, side)
+                    if (
+                        bid is not None
+                        and bid_size >= Decimal("1")
+                        and bid >= pending_exit.intended_limit
+                    ):
+                        trades.append(
+                            _closed_trade(
+                                pending_exit.position,
+                                market,
+                                at,
+                                event.event_id,
+                                bid,
+                                self.fee_model,
+                                pending_exit.trigger,
+                            )
+                        )
+                        funnel["exit"] += 1
+                        funnel["exit_fill"] += 1
+                        funnel["closed"] += 1
+                        open_position = None
+                    else:
+                        pending_exit.position.exit_attempts += 1
+                    pending_exit = None
+
+            position = (
+                open_position
+                if open_position and open_position.pending.market_ticker == market
+                else None
+            )
             if position is None:
                 continue
             side = position.pending.evaluation.candidate_side or "YES"
@@ -197,38 +302,29 @@ class DeterministicReplayEngine:
                     position.best_bid, position.best_at = bid, at
                 if bid < position.worst_bid:
                     position.worst_bid, position.worst_at = bid, at
-            max_hold = _max_hold(self.parameters, position.pending.evaluation.timing_tier)
-            if not position.exit_checked and at >= position.entry_at + timedelta(seconds=max_hold):
-                position.exit_checked = True
-                funnel["exit_intent"] += 1
-                # Same first-book rule for exits. A thin/invalid first book cannot be rescued later.
-                if bid is not None and bid_size >= Decimal("1"):
-                    trades.append(
-                        _closed_trade(
-                            position, market, at, event.event_id, bid, self.fee_model, "TIME_STOP"
-                        )
-                    )
-                    funnel["exit"] += 1
-                    funnel["exit_fill"] += 1
-                    funnel["closed"] += 1
-                    del open_positions[market]
-
         for market, entry in pending.items():
             trades.append(_no_fill_trade(entry, market, "ENTRY_EXPIRED"))
-        for market, position in open_positions.items():
+        if open_position is not None:
+            market = open_position.pending.market_ticker
             outcome = outcome_by_market.get(market)
             if outcome and outcome.outcome_status == "RESOLVED" and outcome.result_side:
                 exit_price = (
                     Decimal("1")
-                    if outcome.result_side == position.pending.evaluation.candidate_side
+                    if outcome.result_side == open_position.pending.evaluation.candidate_side
                     else Decimal("0")
                 )
                 closed_at = _utc(
-                    outcome.resolved_at or outcome.market_close_at or position.entry_at
+                    outcome.resolved_at or outcome.market_close_at or open_position.entry_at
                 )
                 trades.append(
                     _closed_trade(
-                        position, market, closed_at, None, exit_price, self.fee_model, "SETTLEMENT"
+                        open_position,
+                        market,
+                        closed_at,
+                        None,
+                        exit_price,
+                        self.fee_model,
+                        "SETTLEMENT",
                     )
                 )
                 funnel["exit"] += 1
@@ -263,23 +359,12 @@ def zero_entry_audit(
     """Describe strategy frequency as an evidence gap, never as selectivity."""
     observed_samples = list(samples)
     observed_trades = list(trades)
-    entries_per_100 = (
+    fills_per_100 = (
         Decimal("0")
         if market_count == 0
-        else Decimal(funnel.get("opened", 0)) * 100 / Decimal(market_count)
+        else Decimal(funnel.get("fill", 0)) * 100 / Decimal(market_count)
     )
-    if entries_per_100 == 0:
-        classification = "ZERO_ENTRY_UNVALIDATABLE"
-    elif entries_per_100 < 1:
-        classification = "TOO_RARE_UNVALIDATABLE"
-    elif entries_per_100 < 2:
-        classification = "BELOW_RESEARCH_TARGET"
-    elif entries_per_100 <= 10:
-        classification = "RESEARCH_TARGET_RANGE"
-    elif entries_per_100 <= 15:
-        classification = "ABOVE_RESEARCH_TARGET"
-    else:
-        classification = "EXCESSIVE_FREQUENCY"
+    classification = _fill_frequency_classification(fills_per_100)
     denominator = max(funnel.get("all_samples", 0), 1)
     first_blockers: dict[str, int] = {}
     blocker_combinations: dict[str, int] = {}
@@ -294,6 +379,8 @@ def zero_entry_audit(
     maxima: dict[str, dict[str, str]] = {}
     near_misses: list[dict[str, Any]] = []
     continuation_markets: set[str] = set()
+    qualified_markets: set[str] = set()
+    signal_markets: set[str] = set()
     for market, evaluation in observed_samples:
         features = evaluation.measurements.get("features") or {}
         mode = str(evaluation.candidate_mode or "missing")
@@ -302,6 +389,14 @@ def zero_entry_audit(
         timing_tiers[tier] = timing_tiers.get(tier, 0) + 1
         if evaluation.candidate_mode == "CONTINUATION":
             continuation_markets.add(market)
+        if evaluation.state in {
+            "V2_SCORE_BELOW_THRESHOLD",
+            "V2_EDGE_BELOW_THRESHOLD",
+            "DRY_RUN_ENTRY_SIGNAL",
+        }:
+            qualified_markets.add(market)
+        if evaluation.state == "DRY_RUN_ENTRY_SIGNAL":
+            signal_markets.add(market)
         blockers = list(evaluation.blockers)
         if blockers:
             first_blockers[blockers[0]] = first_blockers.get(blockers[0], 0) + 1
@@ -382,18 +477,62 @@ def zero_entry_audit(
         "per_market_maxima": maxima,
         "top_near_miss_samples": near_misses[:25],
         "markets_with_signal_but_no_fill": sorted(
-            {trade.market_ticker for trade in observed_trades if trade.status == "ENTRY_NO_FILL"}
+            {
+                trade.market_ticker
+                for trade in observed_trades
+                if trade.status in {"ENTRY_NO_FILL", "ENTRY_EXPIRED"}
+            }
         ),
         "markets_without_eligible_continuation": sorted(
             {market for market, _ in observed_samples} - continuation_markets
         ),
         "market_count": market_count,
-        "entries_per_100_markets": str(entries_per_100.quantize(Decimal("0.01"))),
+        "unique_market_rates_per_100": {
+            "qualified_setups": _per_100(len(qualified_markets), market_count),
+            "entry_signals": _per_100(len(signal_markets), market_count),
+            "entry_intents": _per_100(funnel.get("intent", 0), market_count),
+            "executable_fills": _per_100(funnel.get("fill", 0), market_count),
+            "closed_positions": _per_100(funnel.get("closed", 0), market_count),
+        },
+        "qualified_setup_frequency_classification": _setup_frequency_classification(
+            Decimal(_per_100(len(qualified_markets), market_count))
+        ),
+        "fill_frequency_classification": classification,
+        # Retained for consumers of the previous endpoint shape.
+        "entries_per_100_markets": str(fills_per_100.quantize(Decimal("0.01"))),
         "frequency_classification": classification,
         "validation_status": "UNVALIDATABLE"
         if classification == "ZERO_ENTRY_UNVALIDATABLE"
         else "REQUIRES_REVIEW",
     }
+
+
+def _per_100(count: int, market_count: int) -> str:
+    if market_count <= 0:
+        return "0.00"
+    return str((Decimal(count) * 100 / Decimal(market_count)).quantize(Decimal("0.01")))
+
+
+def _fill_frequency_classification(fills_per_100: Decimal) -> str:
+    if fills_per_100 == 0:
+        return "ZERO_ENTRY_UNVALIDATABLE"
+    if fills_per_100 < 1:
+        return "TOO_RARE_UNVALIDATABLE"
+    if fills_per_100 < 3:
+        return "ECONOMICALLY_INADEQUATE"
+    if fills_per_100 <= 10:
+        return "PREFERRED_OPERATING_RANGE"
+    if fills_per_100 <= 15:
+        return "ABOVE_PREFERRED_RANGE"
+    return "EXCESSIVE_FREQUENCY"
+
+
+def _setup_frequency_classification(setups_per_100: Decimal) -> str:
+    if setups_per_100 < 5:
+        return "BELOW_TARGET_RANGE"
+    if setups_per_100 <= 15:
+        return "WITHIN_TARGET_RANGE"
+    return "ABOVE_TARGET_RANGE"
 
 
 def _count_values(values: Iterable[str]) -> dict[str, int]:
@@ -446,10 +585,52 @@ def _add_funnel(funnel: dict[str, int], evaluation: V2FeatureEvaluation) -> None
         "V2_FEATURES_NOT_READY",
         "V2_HARD_GATE_BLOCKED",
         "V2_SCORE_BELOW_THRESHOLD",
+        "V2_EDGE_BELOW_THRESHOLD",
     }:
         funnel["edge"] += 1
     if evaluation.state == "DRY_RUN_ENTRY_SIGNAL":
         funnel["signal"] += 1
+
+
+def _lifecycle_inputs(
+    *,
+    position: _OpenPosition,
+    evaluation: V2FeatureEvaluation,
+    features: dict[str, Any],
+    held_bid: Decimal | None,
+    market_matches: bool,
+    evaluated_at: datetime,
+) -> dict[str, Any]:
+    entry_features = position.pending.evaluation.measurements.get("features") or {}
+    tier = position.pending.evaluation.timing_tier
+    tier_parameters = V2_PARAMETERS["tiers"].get(tier or "", {})
+    return {
+        "candidate_side": evaluation.candidate_side,
+        "boundary": features.get("boundary"),
+        "current_brti": features.get("current_brti"),
+        "seconds_left": features.get("seconds_left"),
+        "return_5s": features.get("return_5s"),
+        "return_15s": features.get("return_15s"),
+        "reversal_beyond_origin": bool(features.get("reversal_beyond_origin")),
+        "persistent_adverse_microstructure": bool(
+            features.get("persistent_adverse_microstructure")
+        ),
+        "response_residual_cents": features.get("response_residual_cents"),
+        "desired_bid": features.get("desired_bid"),
+        "desired_bid_depth": features.get("desired_bid_depth"),
+        "timing_tier": evaluation.timing_tier,
+        "market_matches": market_matches,
+        "entry_price": position.entry_price,
+        "entry_boundary": entry_features.get("boundary"),
+        "entry_side": position.pending.evaluation.candidate_side,
+        "entry_score_threshold": position.pending.evaluation.score_threshold,
+        "entry_time_stop_seconds": tier_parameters.get("time_stop"),
+        "entry_max_hold_seconds": tier_parameters.get("max_hold"),
+        "age_seconds": max(0, int((evaluated_at - position.entry_at).total_seconds())),
+        "score": evaluation.score,
+        "edge_lower_bound_cents": evaluation.edge_lower_bound_cents,
+        "held_bid": held_bid,
+    }
 
 
 def _no_fill_trade(pending: _PendingEntry, market: str, reason: str) -> ReplayTrade:
