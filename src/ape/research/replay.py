@@ -66,6 +66,7 @@ class _PendingEntry:
     evaluation: V2FeatureEvaluation
     market_ticker: str
     event_id: str
+    feature_snapshot_id: str | None
     decision_at: datetime
     effective_after: datetime
     expires_at: datetime
@@ -162,6 +163,7 @@ class DeterministicReplayEngine:
                         evaluation=evaluation,
                         market_ticker=market,
                         event_id=event.event_id,
+                        feature_snapshot_id=event.feature_snapshot_id or event.event_id,
                         decision_at=at,
                         effective_after=at
                         + timedelta(
@@ -688,6 +690,22 @@ def _closed_trade(
     fees = fee_model.fee_cents(price=position.entry_price) + fee_model.fee_cents(price=exit_price)
     best = (position.best_bid - position.entry_price) * Decimal("100")
     worst = (position.worst_bid - position.entry_price) * Decimal("100")
+    mfe_cents = max(Decimal("0"), best, gross)
+    mae_cents = min(Decimal("0"), worst, gross)
+    time_to_mfe_ms = int(
+        (
+            (exit_at if gross > max(Decimal("0"), best) else position.best_at)
+            - position.entry_at
+        ).total_seconds()
+        * 1000
+    )
+    time_to_mae_ms = int(
+        (
+            (exit_at if gross < min(Decimal("0"), worst) else position.worst_at)
+            - position.entry_at
+        ).total_seconds()
+        * 1000
+    )
     return ReplayTrade(
         trade_id=_trade_id(position.pending, market, f"closed-{exit_at.isoformat()}"),
         market_ticker=market,
@@ -708,10 +726,10 @@ def _closed_trade(
         fee_cents=fees,
         net_pnl_cents=gross - fees,
         holding_duration_ms=int((exit_at - position.entry_at).total_seconds() * 1000),
-        mfe_cents=max(Decimal("0"), best, gross),
-        mae_cents=min(Decimal("0"), worst, gross),
-        time_to_mfe_ms=int((position.best_at - position.entry_at).total_seconds() * 1000),
-        time_to_mae_ms=int((position.worst_at - position.entry_at).total_seconds() * 1000),
+        mfe_cents=mfe_cents,
+        mae_cents=mae_cents,
+        time_to_mfe_ms=time_to_mfe_ms,
+        time_to_mae_ms=time_to_mae_ms,
         entry_reason=position.pending.evaluation.reason,
         exit_reason=reason,
         timing_tier=position.pending.evaluation.timing_tier,
@@ -721,7 +739,7 @@ def _closed_trade(
             "volatility_regime": entry_features.get("volatility_regime"),
             "liquidity_regime": entry_features.get("liquidity_regime"),
             "timing_tier": position.pending.evaluation.timing_tier,
-            "entry_feature_snapshot_id": position.pending.event_id,
+            "entry_feature_snapshot_id": position.pending.feature_snapshot_id,
         },
     )
 

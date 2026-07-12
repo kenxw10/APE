@@ -110,6 +110,29 @@ def test_replay_preserves_exit_trigger_intent_and_fill_values() -> None:
     assert trade.exit_limit == Decimal("0.57")
     assert trade.exit_fill_at == at + timedelta(seconds=62)
     assert trade.exit_fill_price == Decimal("0.65")
+    assert trade.mfe_cents == Decimal("5")
+    assert trade.time_to_mfe_ms == 61_400
+
+
+def test_replay_closed_trade_keeps_the_source_feature_snapshot_id() -> None:
+    at = at_base()
+    feature = feature_event(at=at, event_id="replay-event-feature")
+    feature.feature_snapshot_id = "immutable-feature-snapshot"
+    outcome = ResearchMarketOutcome(
+        outcome_id="feature-snapshot-source",
+        market_ticker="M1",
+        outcome_status="RESOLVED",
+        result_side="YES",
+        resolved_at=at + timedelta(minutes=15),
+    )
+
+    result = DeterministicReplayEngine().replay(
+        [feature, orderbook_event(at=at + timedelta(milliseconds=600), event_id="entry")],
+        outcomes=[outcome],
+    )
+
+    trade = next(trade for trade in result.trades if trade.status == "CLOSED")
+    assert trade.measurements["entry_feature_snapshot_id"] == "immutable-feature-snapshot"
 
 
 def test_zero_entry_audit_is_not_reported_as_healthy_selectivity() -> None:
@@ -182,6 +205,30 @@ def test_replay_seeds_excursions_with_a_zero_bid() -> None:
     assert trade.mae_cents == Decimal("-60")
 
 
+def test_replay_uses_settlement_time_for_a_worst_excursion() -> None:
+    at = at_base()
+    settled_at = at + timedelta(minutes=15)
+    outcome = ResearchMarketOutcome(
+        outcome_id="settlement-worst-excursion",
+        market_ticker="M1",
+        outcome_status="RESOLVED",
+        result_side="NO",
+        resolved_at=settled_at,
+    )
+
+    result = DeterministicReplayEngine().replay(
+        [
+            feature_event(at=at),
+            orderbook_event(at=at + timedelta(milliseconds=600), event_id="entry"),
+        ],
+        outcomes=[outcome],
+    )
+
+    trade = next(trade for trade in result.trades if trade.status == "CLOSED")
+    assert trade.mae_cents == Decimal("-60")
+    assert trade.time_to_mae_ms == 899_400
+
+
 def test_replay_lifecycle_inputs_use_candidate_tier_hold_windows() -> None:
     at = at_base()
     evaluation = evaluate_momentum_v2_feature_vector(valid_vector())
@@ -189,6 +236,7 @@ def test_replay_lifecycle_inputs_use_candidate_tier_hold_windows() -> None:
         evaluation=evaluation,
         market_ticker="M1",
         event_id="entry",
+        feature_snapshot_id="feature-entry",
         decision_at=at,
         effective_after=at,
         expires_at=at + timedelta(seconds=2),
