@@ -768,8 +768,8 @@ def test_r12_candidate_pin_is_startup_only_and_fails_closed(tmp_path, monkeypatc
     run_migrations(engine)
     session_factory = create_session_factory(engine)
     at = at_base()
-    first = PinnedCandidate("candidate-first", "candidate-config", {})
-    second = PinnedCandidate("candidate-second", "candidate-config", {})
+    first = PinnedCandidate("candidate-first", "candidate-config", {}, "first")
+    second = PinnedCandidate("candidate-second", "candidate-config", {}, "second")
     resolved: list[tuple[PinnedCandidate | None, str | None]] = [(first, None)]
     observed: list[PinnedCandidate | None] = []
 

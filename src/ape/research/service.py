@@ -125,11 +125,16 @@ def run_research_cycle(
         built_in_config_version("btc15_momentum_v2", V2_PARAMETERS)
     )
     replay = DeterministicReplayEngine().replay(events, outcomes=outcomes)
+    outcome_input_hash = _replay_outcome_input_hash(outcomes)
     run_id = (
         "replay-"
-        + _hash({"dataset": replay.dataset_hash, "baseline": baseline.strategy_config_version_id})[
-            :24
-        ]
+        + _hash(
+            {
+                "dataset": replay.dataset_hash,
+                "outcomes": outcome_input_hash,
+                "baseline": baseline.strategy_config_version_id,
+            }
+        )[:24]
     )
     replay_run = repository.create_replay_run(
         {
@@ -155,6 +160,7 @@ def run_research_cycle(
                 "decision_count": len(replay.decisions),
                 "trade_count": len(replay.trades),
                 "archive_coverage": archive.coverage,
+                "outcome_input_hash": outcome_input_hash,
             },
             "adjusted_metrics": None,
             "warnings": [],
@@ -419,3 +425,33 @@ def _hash(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     ).hexdigest()
+
+
+def _replay_outcome_input_hash(outcomes) -> str:
+    """Hash every resolved-outcome field that can change replay or label evidence."""
+    return _hash(
+        [
+            {
+                "outcome_id": outcome.outcome_id,
+                "market_ticker": outcome.market_ticker,
+                "market_open_at": outcome.market_open_at,
+                "market_close_at": outcome.market_close_at,
+                "expiration_at": outcome.expiration_at,
+                "boundary": outcome.boundary,
+                "result_side": outcome.result_side,
+                "settlement_value": outcome.settlement_value,
+                "final_reference_value": outcome.final_reference_value,
+                "final_minute_reference_average": outcome.final_minute_reference_average,
+                "outcome_status": outcome.outcome_status,
+                "outcome_source": outcome.outcome_source,
+                "source_payload_hash": outcome.source_payload_hash,
+                "resolved_at": outcome.resolved_at,
+                "expected_frame_count": outcome.expected_frame_count,
+                "actual_frame_count": outcome.actual_frame_count,
+                "coverage_percentage": outcome.coverage_percentage,
+                "maximum_event_gap_seconds": outcome.maximum_event_gap_seconds,
+                "quality_flags": outcome.quality_flags,
+            }
+            for outcome in outcomes
+        ]
+    )

@@ -28,11 +28,13 @@ from ape.repositories.strategy_decisions import StrategyDecisionsRepository
 from ape.repositories.strategy_dry_run import StrategyDryRunRepository
 from ape.repositories.strategy_v2 import StrategyV2Repository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
+from ape.research.pin import PinnedCandidate
 from ape.safety import assess_startup_safety
 from ape.strategy import observer as observer_module
 from ape.strategy.momentum_v2 import (
     STATE_V2_ENTRY_SIGNAL,
     STATE_V2_HARD_GATE_BLOCKED,
+    V2_PARAMETERS,
     V2_STRATEGY_ID,
 )
 from ape.strategy.observer import (
@@ -670,6 +672,43 @@ def test_variants_receive_one_shared_context_per_iteration(session, monkeypatch)
         CHALLENGER_STRATEGY_ID,
         V2_STRATEGY_ID,
     ]
+
+
+def test_pinned_candidate_decision_uses_candidate_config_code_version(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    config = load_config(
+        {
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_OBSERVER_ENABLED": "true",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+            "STRATEGY_V2_ENABLED": "true",
+            "TRADING_ENABLED": "false",
+            "EXECUTE": "false",
+        }
+    )
+    _seed_observable_context(session, now=now)
+
+    results = evaluate_strategy_variants(
+        config=config,
+        safety=assess_startup_safety(config),
+        session=session,
+        now=now,
+        pinned_candidate=PinnedCandidate(
+            "btc15_momentum_v2_candidate_fixture",
+            "candidate-config",
+            V2_PARAMETERS,
+            "candidate-commit",
+        ),
+        pin_resolved=True,
+    )
+
+    candidate_decision = next(
+        decision
+        for variant, decision in results
+        if variant.strategy_id == "btc15_momentum_v2_candidate_fixture"
+    )
+    assert candidate_decision.strategy_config_version_id == "candidate-config"
+    assert candidate_decision.code_commit_sha == "candidate-commit"
 
 
 def test_shared_context_trims_orderbook_history_to_variant_lookback(session, monkeypatch) -> None:

@@ -235,6 +235,60 @@ def test_research_cycle_does_not_reuse_a_frozen_holdout(tmp_path, monkeypatch) -
         engine.dispose()
 
 
+def test_research_cycle_replays_again_when_resolved_outcome_changes(tmp_path) -> None:
+    config = load_config(
+        {
+            "DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'outcome-identity.sqlite'}",
+            "APP_MODE": "DRY_RUN",
+            "CALIBRATION_ENABLED": "true",
+            "TRADING_ENABLED": "false",
+            "EXECUTE": "false",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    factory = create_session_factory(engine)
+    at = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
+    try:
+        with factory() as session:
+            outcome = ResearchMarketOutcome(
+                outcome_id="outcome-identity",
+                market_ticker="KXBTC15M-IDENTITY",
+                market_open_at=at,
+                market_close_at=at + timedelta(minutes=15),
+                outcome_status="RESOLVED",
+                result_side="YES",
+                resolved_at=at + timedelta(minutes=15),
+                quality_flags={"counterfactual_labels": {"feature": {"label": "YES"}}},
+            )
+            session.add(outcome)
+            first = run_research_cycle(config, session, checked_at=at + timedelta(minutes=16))
+            session.commit()
+
+        with factory() as session:
+            outcome = session.scalar(
+                select(ResearchMarketOutcome).where(
+                    ResearchMarketOutcome.outcome_id == "outcome-identity"
+                )
+            )
+            assert outcome is not None
+            outcome.result_side = "NO"
+            outcome.quality_flags = {
+                "counterfactual_labels": {"feature": {"label": "NO"}}
+            }
+            second = run_research_cycle(config, session, checked_at=at + timedelta(minutes=17))
+            session.commit()
+            assert second["replay_run_id"] != first["replay_run_id"]
+            assert second["calibration_run_id"] != first["calibration_run_id"]
+
+        with factory() as session:
+            runs = list(session.scalars(select(ResearchReplayRun)))
+            assert len(runs) == 2
+            assert len({run.raw_metrics["outcome_input_hash"] for run in runs}) == 2
+    finally:
+        engine.dispose()
+
+
 def test_research_cycle_persists_calibration_candidate_replay_trades(
     tmp_path, monkeypatch
 ) -> None:

@@ -82,6 +82,7 @@ def test_candidate_pin_requires_immutable_approved_checksum_valid_candidate(tmp_
             assert blocker is None
             assert pinned is not None
             assert pinned.strategy_id.endswith("123456789012")
+            assert pinned.code_commit_sha == "fixture"
     finally:
         engine.dispose()
 
@@ -121,8 +122,8 @@ def test_strategy_observer_candidate_pin_is_resolved_once_until_restart(
     engine = create_engine_from_config(config)
     run_migrations(engine)
     factory = create_session_factory(engine)
-    first = PinnedCandidate("candidate-first", "config-pin", V2_PARAMETERS)
-    second = PinnedCandidate("candidate-second", "config-pin", V2_PARAMETERS)
+    first = PinnedCandidate("candidate-first", "config-pin", V2_PARAMETERS, "first")
+    second = PinnedCandidate("candidate-second", "config-pin", V2_PARAMETERS, "second")
     resolved: list[tuple[PinnedCandidate | None, str | None]] = [(first, None)]
     resolver_calls: list[PinnedCandidate | None] = []
     observed: list[tuple[PinnedCandidate | None, str | None]] = []

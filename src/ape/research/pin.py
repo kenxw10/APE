@@ -23,6 +23,7 @@ class PinnedCandidate:
     strategy_id: str
     strategy_config_version_id: str
     parameters: dict[str, Any]
+    code_commit_sha: str
 
 
 def resolve_pinned_candidate(
@@ -61,6 +62,7 @@ def resolve_pinned_candidate(
         strategy_id=candidate.generated_strategy_id,
         strategy_config_version_id=config_version_id,
         parameters=dict(candidate.parameter_snapshot),
+        code_commit_sha=version.code_commit_sha,
     ), None
 
 

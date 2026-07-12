@@ -1776,7 +1776,7 @@ def evaluate_strategy_variants(
                         seconds_left=feature_snapshot.seconds_left,
                         feature_snapshot_id=feature_snapshot.feature_snapshot_id,
                         strategy_config_version_id=pinned_candidate.strategy_config_version_id,
-                        code_commit_sha=config_version.code_commit_sha,
+                        code_commit_sha=pinned_candidate.code_commit_sha,
                         measurements=candidate_measurements,
                         blockers=candidate_evaluation.blockers,
                         warnings=candidate_evaluation.warnings,
