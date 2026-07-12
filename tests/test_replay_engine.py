@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from tests.test_research_helpers import at_base, feature_event, orderbook_event, valid_vector
 
+from ape.db.models import ResearchMarketOutcome
 from ape.research.replay import (
     DeterministicReplayEngine,
     _lifecycle_inputs,
@@ -99,6 +100,55 @@ def test_persisted_vector_and_live_vector_evaluator_parity() -> None:
         first.score,
         first.edge_lower_bound_cents,
     ) == (second.state, second.reason, second.blockers, second.score, second.edge_lower_bound_cents)
+
+
+def test_calibrated_impulse_keeps_a_flat_five_second_return() -> None:
+    vector = valid_vector()
+    vector.update(
+        {
+            "return_5s": Decimal("0"),
+            "return_15s": Decimal("2"),
+            "return_30s": Decimal("0"),
+        }
+    )
+    parameters = copy.deepcopy(V2_PARAMETERS)
+    parameters["calibration_overrides"] = {
+        "fast_15": "1.25",
+        "fast_30": "2",
+        "adverse_5": "-0.5",
+    }
+
+    result = evaluate_momentum_v2_feature_vector(vector, parameters)
+
+    assert result.candidate_mode == "CONTINUATION"
+    assert "v2_fast_impulse_not_active" not in result.blockers
+
+
+def test_replay_seeds_excursions_with_a_zero_bid() -> None:
+    at = at_base()
+    outcome = ResearchMarketOutcome(
+        outcome_id="zero-bid-outcome",
+        market_ticker="M1",
+        outcome_status="RESOLVED",
+        result_side="YES",
+        resolved_at=at + timedelta(minutes=15),
+    )
+
+    result = DeterministicReplayEngine().replay(
+        [
+            feature_event(at=at),
+            orderbook_event(
+                at=at + timedelta(milliseconds=600),
+                event_id="zero-bid-entry",
+                yes_bid="0",
+                yes_ask="0.60",
+            ),
+        ],
+        outcomes=[outcome],
+    )
+
+    trade = next(trade for trade in result.trades if trade.status == "CLOSED")
+    assert trade.mae_cents == Decimal("-60")
 
 
 def test_replay_lifecycle_inputs_use_candidate_tier_hold_windows() -> None:

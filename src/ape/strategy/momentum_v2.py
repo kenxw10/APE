@@ -384,12 +384,15 @@ def evaluate_momentum_v2_feature_vector(
     overrides = _calibration_overrides(parameters)
     fast_impulse_active = bool(features["fast_impulse_active"])
     if overrides and mode != "BOUNDARY_CROSS_HOLD":
+        return_15s = features["return_15s"]
+        return_30s = features["return_30s"]
+        return_5s = features["return_5s"]
         fast_impulse_active = (
-            (features["return_15s"] or Decimal("-999"))
+            (return_15s if return_15s is not None else Decimal("-999"))
             >= _override_decimal(overrides, "fast_15", Decimal("1.25"))
-            or (features["return_30s"] or Decimal("-999"))
+            or (return_30s if return_30s is not None else Decimal("-999"))
             >= _override_decimal(overrides, "fast_30", Decimal("2"))
-        ) and (features["return_5s"] or Decimal("-999")) > _override_decimal(
+        ) and (return_5s if return_5s is not None else Decimal("-999")) > _override_decimal(
             overrides, "adverse_5", Decimal("-0.5")
         )
         mode = "CONTINUATION" if fast_impulse_active else "UNSTABLE"

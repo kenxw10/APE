@@ -19,6 +19,7 @@ from ape.db.models import (
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.research.archive import (
     _counterfactual_label,
+    _coverage,
     _labels_for_market,
     archive_research_events,
     reconcile_market_outcomes,
@@ -114,6 +115,60 @@ def test_archive_refreshes_mutable_market_payload_when_source_version_advances(t
                 )
                 == 1
             )
+    finally:
+        engine.dispose()
+
+
+def test_archive_coverage_counts_readiness_only_for_feature_snapshots(tmp_path) -> None:
+    engine = create_engine_from_config(
+        load_config(
+            {
+                "DATABASE_URL": (
+                    f"sqlite+pysqlite:///{tmp_path / 'coverage-readiness.sqlite'}"
+                )
+            }
+        )
+    )
+    run_migrations(engine)
+    factory = create_session_factory(engine)
+    at = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
+
+    def event(event_id: str, event_type: str, readiness: str) -> ResearchReplayEvent:
+        return ResearchReplayEvent(
+            event_id=event_id,
+            market_ticker="KXBTC15M-COVERAGE",
+            event_type=event_type,
+            event_time=at,
+            received_at=at,
+            source_table=f"fixture-{event_type.lower()}",
+            source_row_id=event_id,
+            source_hash=event_id,
+            replay_schema_version="momentum_v2_replay_v1",
+            payload={},
+            event_hash=f"hash-{event_id}",
+            replay_readiness=readiness,
+            blockers=[],
+        )
+
+    try:
+        with factory() as session:
+            session.add_all(
+                (
+                    event("market", "MARKET", "FULL"),
+                    event("reference", "REFERENCE", "FULL"),
+                    event("orderbook", "ORDERBOOK", "FULL"),
+                    event("feature-full", "FEATURE_SNAPSHOT", "FULL"),
+                    event("feature-partial", "FEATURE_SNAPSHOT", "PARTIAL"),
+                    event("feature-unusable", "FEATURE_SNAPSHOT", "UNUSABLE"),
+                )
+            )
+            session.flush()
+
+            coverage = _coverage(session, data_cutoff=at)
+
+            assert coverage["complete_frame_count"] == 1
+            assert coverage["partial_frame_count"] == 1
+            assert coverage["unusable_frame_count"] == 1
     finally:
         engine.dispose()
 

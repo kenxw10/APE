@@ -514,7 +514,7 @@ def _coverage(session: Session, *, data_cutoff: datetime) -> dict[str, Any]:
     readiness = dict(
         session.execute(
             select(ResearchReplayEvent.replay_readiness, func.count())
-            .where(ResearchReplayEvent.event_type != "COVERAGE_REPORT")
+            .where(ResearchReplayEvent.event_type == "FEATURE_SNAPSHOT")
             .group_by(ResearchReplayEvent.replay_readiness)
         ).all()
     )

@@ -251,8 +251,8 @@ class DeterministicReplayEngine:
                             entry_at=at,
                             entry_price=ask,
                             entry_event_id=event.event_id,
-                            best_bid=bid or ask,
-                            worst_bid=bid or ask,
+                            best_bid=bid if bid is not None else ask,
+                            worst_bid=bid if bid is not None else ask,
                             best_at=at,
                             worst_at=at,
                         )
