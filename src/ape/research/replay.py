@@ -30,6 +30,8 @@ class ReplayTrade:
     entry_fill_price: Decimal | None
     entry_fill_event_id: str | None
     exit_trigger_at: datetime | None
+    exit_intent_at: datetime | None
+    exit_limit: Decimal | None
     exit_fill_at: datetime | None
     exit_fill_price: Decimal | None
     exit_fill_event_id: str | None
@@ -88,6 +90,7 @@ class _PendingExit:
     market_ticker: str
     trigger: str
     classification: str
+    triggered_at: datetime
     effective_after: datetime
     expires_at: datetime
     intended_limit: Decimal
@@ -203,6 +206,7 @@ class DeterministicReplayEngine:
                                 market_ticker=open_position.pending.market_ticker,
                                 trigger=lifecycle.trigger,
                                 classification=lifecycle.classification or "SIGNAL",
+                                triggered_at=at,
                                 effective_after=at
                                 + timedelta(
                                     milliseconds=int(
@@ -279,6 +283,7 @@ class DeterministicReplayEngine:
                                 bid,
                                 self.fee_model,
                                 pending_exit.trigger,
+                                pending_exit=pending_exit,
                             )
                         )
                         funnel["exit"] += 1
@@ -646,6 +651,8 @@ def _no_fill_trade(pending: _PendingEntry, market: str, reason: str) -> ReplayTr
         entry_fill_price=None,
         entry_fill_event_id=None,
         exit_trigger_at=None,
+        exit_intent_at=None,
+        exit_limit=None,
         exit_fill_at=None,
         exit_fill_price=None,
         exit_fill_event_id=None,
@@ -673,6 +680,8 @@ def _closed_trade(
     exit_price: Decimal,
     fee_model: FeeModel,
     reason: str,
+    *,
+    pending_exit: _PendingExit | None = None,
 ) -> ReplayTrade:
     entry_features = position.pending.evaluation.measurements.get("features") or {}
     gross = (exit_price - position.entry_price) * Decimal("100")
@@ -688,7 +697,9 @@ def _closed_trade(
         entry_limit=position.pending.evaluation.intended_entry_price or Decimal("0"),
         entry_fill_price=position.entry_price,
         entry_fill_event_id=position.entry_event_id,
-        exit_trigger_at=exit_at,
+        exit_trigger_at=pending_exit.triggered_at if pending_exit is not None else exit_at,
+        exit_intent_at=pending_exit.effective_after if pending_exit is not None else exit_at,
+        exit_limit=pending_exit.intended_limit if pending_exit is not None else exit_price,
         exit_fill_at=exit_at,
         exit_fill_price=exit_price,
         exit_fill_event_id=exit_event_id,

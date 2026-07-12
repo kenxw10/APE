@@ -57,6 +57,29 @@ def test_first_in_window_exit_book_cannot_be_rescued_by_a_later_book() -> None:
     assert not [trade for trade in result.trades if trade.status == "CLOSED"]
 
 
+def test_replay_preserves_exit_trigger_intent_and_fill_values() -> None:
+    at = at_base()
+    result = DeterministicReplayEngine().replay(
+        [
+            feature_event(at=at),
+            orderbook_event(at=at + timedelta(milliseconds=600), event_id="entry"),
+            feature_event(at=at + timedelta(seconds=61), event_id="exit-trigger"),
+            orderbook_event(
+                at=at + timedelta(seconds=62),
+                event_id="exit-fill",
+                yes_bid="0.65",
+            ),
+        ]
+    )
+
+    trade = next(trade for trade in result.trades if trade.status == "CLOSED")
+    assert trade.exit_trigger_at == at + timedelta(seconds=61)
+    assert trade.exit_intent_at == at + timedelta(seconds=61, milliseconds=500)
+    assert trade.exit_limit == Decimal("0.57")
+    assert trade.exit_fill_at == at + timedelta(seconds=62)
+    assert trade.exit_fill_price == Decimal("0.65")
+
+
 def test_zero_entry_audit_is_not_reported_as_healthy_selectivity() -> None:
     vector = valid_vector()
     vector["candidate_mode"] = "BOUNDARY_CROSS_HOLD"

@@ -690,7 +690,7 @@ def _int_or_none(value: Any) -> int | None:
 
 
 _REQUIRED_ELIGIBILITY_EVENT_TYPES = frozenset(
-    {"MARKET", "REFERENCE", "ORDERBOOK", "FEATURE_SNAPSHOT", "MARKET_LIFECYCLE"}
+    {"MARKET", "REFERENCE", "ORDERBOOK", "FEATURE_SNAPSHOT"}
 )
 _GOVERNANCE_PARTITIONS = ("development_test", "frozen_holdout")
 

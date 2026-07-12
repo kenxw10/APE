@@ -267,6 +267,8 @@ def test_research_cycle_persists_calibration_candidate_replay_trades(
         entry_fill_price=Decimal("0.60"),
         entry_fill_event_id="entry-book",
         exit_trigger_at=at + timedelta(seconds=5),
+        exit_intent_at=at + timedelta(seconds=5, milliseconds=500),
+        exit_limit=Decimal("0.64"),
         exit_fill_at=at + timedelta(seconds=6),
         exit_fill_price=Decimal("0.65"),
         exit_fill_event_id="exit-book",
@@ -316,6 +318,14 @@ def test_research_cycle_persists_calibration_candidate_replay_trades(
             assert stored.strategy_config_version_id == "research-candidate-fixture"
             assert stored.market_ticker == trade.market_ticker
             assert stored.net_pnl_cents == Decimal("4")
+            assert stored.exit_trigger_at is not None
+            assert stored.exit_trigger_at.replace(tzinfo=UTC) == trade.exit_trigger_at
+            assert stored.exit_intent_at is not None
+            assert stored.exit_intent_at.replace(tzinfo=UTC) == trade.exit_intent_at
+            assert stored.exit_limit == trade.exit_limit
+            assert stored.exit_fill_at is not None
+            assert stored.exit_fill_at.replace(tzinfo=UTC) == trade.exit_fill_at
+            assert stored.exit_fill_price == trade.exit_fill_price
     finally:
         engine.dispose()
 

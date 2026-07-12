@@ -149,12 +149,6 @@ def test_feature_coverage_counts_only_eligible_feature_snapshots_and_real_gaps()
             at + timedelta(milliseconds=100),
             "reference_ticks",
         ),
-        _event(
-            "lifecycle",
-            "MARKET_LIFECYCLE",
-            at + timedelta(milliseconds=200),
-            "market_lifecycle",
-        ),
         feature,
         _event(
             "book",
