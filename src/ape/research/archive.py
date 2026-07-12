@@ -29,6 +29,24 @@ from ape.research.fees import verified_kalshi_taker_fee_model
 from ape.research.repository import ResearchRepository
 
 ARCHIVE_BATCH_SIZE = 5_000
+_REPLAY_EVENT_HASH_FIELDS = (
+    "event_id",
+    "market_ticker",
+    "event_type",
+    "event_time",
+    "received_at",
+    "source_table",
+    "source_row_id",
+    "source_hash",
+    "sequence_number",
+    "feature_snapshot_id",
+    "feature_schema_version",
+    "architecture_version",
+    "replay_schema_version",
+    "payload",
+    "replay_readiness",
+    "blockers",
+)
 
 
 @dataclass(frozen=True)
@@ -250,6 +268,7 @@ def _archive(repository: ResearchRepository, event: dict[str, Any], counts: dict
         # Mutable sources use event_time as the incremental archive cursor.
         existing.event_time = event["event_time"]
         existing.received_at = event["received_at"]
+        existing.event_hash = _normalized_event_hash(existing)
         repository.session.flush()
         return
     repository.archive_event(event)
@@ -339,6 +358,7 @@ def _associate_unassigned_reference_events(session: Session) -> None:
     )
     for event in rows:
         event.market_ticker = _active_btc15_market_ticker(session, _utc(event.event_time))
+        event.event_hash = _normalized_event_hash(event)
 
 
 def _orderbook_event(row: OrderbookSnapshot) -> dict[str, Any]:
@@ -512,7 +532,7 @@ def _event(
     source_row_id = str(row.id)
     source_hash = _hash(payload)
     event_id = _identifier("replay-event", source_table, source_row_id, source_hash)
-    return {
+    event = {
         "event_id": event_id,
         "market_ticker": market_ticker,
         "event_type": event_type,
@@ -527,10 +547,11 @@ def _event(
         "architecture_version": architecture_version,
         "replay_schema_version": REPLAY_SCHEMA_VERSION,
         "payload": _json_safe(payload),
-        "event_hash": _hash({"event": event_id, "payload": payload}),
         "replay_readiness": replay_readiness,
         "blockers": list(dict.fromkeys(blockers or [])),
     }
+    event["event_hash"] = _normalized_event_hash(event)
+    return event
 
 
 def _coverage(session: Session, *, data_cutoff: datetime) -> dict[str, Any]:
@@ -943,6 +964,14 @@ def _hash(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(_json_safe(value), sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _normalized_event_hash(event: dict[str, Any] | ResearchReplayEvent) -> str:
+    if isinstance(event, dict):
+        envelope = {field: event[field] for field in _REPLAY_EVENT_HASH_FIELDS}
+    else:
+        envelope = {field: getattr(event, field) for field in _REPLAY_EVENT_HASH_FIELDS}
+    return _hash(envelope)
 
 
 def _json_safe(value: Any) -> Any:

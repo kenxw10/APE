@@ -26,6 +26,7 @@ from ape.research.archive import (
     reconcile_market_outcomes,
 )
 from ape.research.fixtures import replayable_feature_vector
+from ape.research.replay import _dataset_hash
 
 
 def test_archive_is_idempotent_and_keeps_only_normalized_market_values(tmp_path) -> None:
@@ -311,6 +312,14 @@ def test_archive_backfills_legacy_global_reference_events(tmp_path) -> None:
             )
             session.commit()
 
+            event = session.scalar(
+                select(ResearchReplayEvent).where(
+                    ResearchReplayEvent.event_id == "legacy-global-reference"
+                )
+            )
+            assert event is not None
+            original_dataset_hash = _dataset_hash((event,))
+
             archive_research_events(session, now=at + timedelta(minutes=15))
             session.commit()
 
@@ -321,6 +330,8 @@ def test_archive_backfills_legacy_global_reference_events(tmp_path) -> None:
             )
             assert event is not None
             assert event.market_ticker == "KXBTC15M-LEGACY-REFERENCE"
+            assert event.event_hash != "legacy-global-reference"
+            assert _dataset_hash((event,)) != original_dataset_hash
     finally:
         engine.dispose()
 
