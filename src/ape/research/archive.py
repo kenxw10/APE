@@ -808,7 +808,14 @@ def _counterfactual_label(
     }
     for seconds in (5, 15, 30, 60):
         label_at = at + timedelta(seconds=seconds)
-        tick = next((row for row in ticks if _utc(row.received_at) >= label_at), None)
+        tick = next(
+            (
+                row
+                for row in ticks
+                if label_at <= _utc(row.received_at) <= label_at + timedelta(seconds=5)
+            ),
+            None,
+        )
         mark_book = next(
             (
                 book

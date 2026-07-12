@@ -789,14 +789,23 @@ def _decimal(value: Any) -> Decimal | None:
     return Decimal(str(value))
 
 
-def _event_key(event: ResearchReplayEvent) -> tuple[datetime, datetime, int, str, str]:
+def _event_key(
+    event: ResearchReplayEvent,
+) -> tuple[datetime, datetime, int, tuple[int, int, str], str]:
     return (
         _utc(event.event_time),
         _utc(event.received_at or event.event_time),
         event.sequence_number if event.sequence_number is not None else 0,
-        str(event.source_row_id),
+        _source_row_key(event.source_row_id),
         event.event_id,
     )
+
+
+def _source_row_key(source_row_id: str) -> tuple[int, int, str]:
+    try:
+        return (0, int(source_row_id), source_row_id)
+    except (TypeError, ValueError):
+        return (1, 0, str(source_row_id))
 
 
 def _dataset_hash(events: tuple[ResearchReplayEvent, ...]) -> str:

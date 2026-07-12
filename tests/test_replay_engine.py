@@ -76,6 +76,35 @@ def test_replay_orders_same_timestamp_books_by_sequence_before_source_id() -> No
     assert result.trades[0].status == "CLOSED"
 
 
+def test_replay_orders_numeric_source_ids_numerically_without_sequences() -> None:
+    at = at_base()
+    source_id_ten = orderbook_event(
+        at=at + timedelta(milliseconds=600),
+        event_id="10",
+        yes_ask="0.79",
+    )
+    source_id_two = orderbook_event(
+        at=at + timedelta(milliseconds=600),
+        event_id="2",
+        yes_ask="0.60",
+    )
+    outcome = ResearchMarketOutcome(
+        outcome_id="numeric-source-order",
+        market_ticker="M1",
+        outcome_status="RESOLVED",
+        result_side="YES",
+        resolved_at=at + timedelta(minutes=15),
+    )
+
+    result = DeterministicReplayEngine().replay(
+        [feature_event(at=at), source_id_ten, source_id_two], outcomes=[outcome]
+    )
+
+    assert len(result.trades) == 1
+    assert result.trades[0].entry_fill_event_id == "2"
+    assert result.trades[0].status == "CLOSED"
+
+
 def test_first_in_window_exit_book_cannot_be_rescued_by_a_later_book() -> None:
     at = at_base()
     result = DeterministicReplayEngine().replay(

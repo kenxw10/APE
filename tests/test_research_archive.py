@@ -429,6 +429,50 @@ def test_counterfactual_label_uses_the_first_in_window_executable_book() -> None
     assert label["net_markout_5s_cents"] is not None
 
 
+def test_counterfactual_label_excludes_brti_ticks_after_the_target_window() -> None:
+    at = datetime(2026, 7, 11, 12, 5, tzinfo=UTC)
+    market = Market(
+        market_ticker="KXBTC15M-BRTI-LABEL-WINDOW",
+        open_time=at - timedelta(minutes=5),
+        close_time=at + timedelta(minutes=10),
+        functional_strike=Decimal("62000"),
+    )
+    feature = StrategyFeatureSnapshot(
+        feature_snapshot_id="feature-brti-label-window",
+        market_ticker=market.market_ticker,
+        evaluated_at=at,
+        feature_schema_version="momentum_v2_features_v3",
+        context_hash="context",
+        candidate_side="YES",
+        boundary=Decimal("62000"),
+        complete_feature_vector=replayable_feature_vector(),
+    )
+    books = [
+        OrderbookSnapshot(
+            market_ticker=market.market_ticker,
+            received_at=at + timedelta(milliseconds=600),
+            yes_ask=Decimal("0.60"),
+            yes_ask_count=Decimal("1"),
+        ),
+        OrderbookSnapshot(
+            market_ticker=market.market_ticker,
+            received_at=at + timedelta(seconds=5),
+            yes_bid=Decimal("0.65"),
+            yes_bid_count=Decimal("2"),
+        ),
+    ]
+    late_tick = ReferenceTick(
+        source="kalshi_cfbenchmarks_brti",
+        received_at=at + timedelta(seconds=10, milliseconds=1),
+        parsed_value=Decimal("62010"),
+        parse_status="valid",
+    )
+
+    label = _counterfactual_label(feature, books, [late_tick], market)
+
+    assert label["brti_5s"] is None
+
+
 def test_counterfactual_label_preserves_zero_fixed_point_book_depth() -> None:
     at = datetime(2026, 7, 11, 12, 5, tzinfo=UTC)
     market = Market(
