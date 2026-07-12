@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import String, cast, desc, exists, func, select
+from sqlalchemy import String, cast, desc, exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from ape.db.models import (
@@ -91,8 +91,23 @@ def reconcile_market_outcomes(session: Session, *, client, now: datetime | None 
     changed = 0
     for market in session.scalars(
         select(Market)
-        .where(Market.close_time.is_not(None), Market.close_time <= checked_at)
-        .order_by(Market.close_time.desc(), Market.id.desc())
+        .outerjoin(
+            ResearchMarketOutcome,
+            ResearchMarketOutcome.market_ticker == Market.market_ticker,
+        )
+        .where(
+            Market.close_time.is_not(None),
+            Market.close_time <= checked_at,
+            or_(
+                Market.series_ticker == "KXBTC15M",
+                Market.market_ticker.ilike("KXBTC15M%"),
+            ),
+            or_(
+                ResearchMarketOutcome.id.is_(None),
+                ResearchMarketOutcome.outcome_status != "RESOLVED",
+            ),
+        )
+        .order_by(Market.close_time.asc(), Market.id.asc())
         .limit(500)
     ):
         if not _is_btc15_market(market):

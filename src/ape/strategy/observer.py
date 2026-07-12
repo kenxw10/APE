@@ -4625,7 +4625,9 @@ def _is_v2_strategy_id(strategy_id: str) -> bool:
     return strategy_id == V2_STRATEGY_ID or strategy_id.startswith("btc15_momentum_v2_candidate_")
 
 
-def _v2_parameters_for_decision(decision: StrategyDecisionInput) -> dict[str, Any]:
+def _v2_parameters_for_decision(
+    decision: StrategyDecisionInput | StrategyDecision,
+) -> dict[str, Any]:
     measurements = decision.measurements if isinstance(decision.measurements, dict) else {}
     configured = measurements.get("v2_parameters")
     return configured if isinstance(configured, dict) else V2_PARAMETERS
@@ -5542,10 +5544,16 @@ def _v2_tier_seconds(
     decision: StrategyDecisionInput | StrategyDecision | None, field: str
 ) -> int | None:
     tier = _measurement_text(decision.measurements, "timing_tier") if decision else None
-    if tier not in V2_PARAMETERS["tiers"]:
+    parameters = _v2_parameters_for_decision(decision) if decision else V2_PARAMETERS
+    tiers = parameters.get("tiers")
+    if not isinstance(tiers, dict) or tier not in tiers:
         return None
-    value = V2_PARAMETERS["tiers"][tier].get(field)
-    return int(value) if value is not None else None
+    values = tiers[tier]
+    value = values.get(field) if isinstance(values, dict) else None
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _realized_pnl_cents(

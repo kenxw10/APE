@@ -11,11 +11,17 @@ from ape.db.models import (
     Market,
     OrderbookSnapshot,
     ReferenceTick,
+    ResearchMarketOutcome,
     ResearchReplayEvent,
     StrategyFeatureSnapshot,
 )
 from ape.db.session import create_engine_from_config, create_session_factory
-from ape.research.archive import _counterfactual_label, _labels_for_market, archive_research_events
+from ape.research.archive import (
+    _counterfactual_label,
+    _labels_for_market,
+    archive_research_events,
+    reconcile_market_outcomes,
+)
 from ape.research.fixtures import replayable_feature_vector
 
 
@@ -153,5 +159,63 @@ def test_legacy_null_replay_readiness_snapshot_remains_labelable(tmp_path) -> No
             label = labels["counterfactual_labels"]["legacy-feature-label"]
             assert label["entry_fillable"] is True
             assert label["entry_label_readiness"] == "FULL"
+    finally:
+        engine.dispose()
+
+
+def test_outcome_reconciliation_pages_past_resolved_newest_markets(tmp_path) -> None:
+    engine = create_engine_from_config(
+        load_config({"DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'outcomes.sqlite'}"})
+    )
+    run_migrations(engine)
+    factory = create_session_factory(engine)
+    at = datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
+
+    class FakePublicClient:
+        def __init__(self) -> None:
+            self.requested_tickers: list[str] = []
+
+        def get_market(self, market_ticker: str) -> dict[str, object]:
+            self.requested_tickers.append(market_ticker)
+            return {
+                "market": {
+                    "result": "yes",
+                    "status": "settled",
+                    "settlement_value": "62000",
+                }
+            }
+
+    client = FakePublicClient()
+    oldest_ticker = "KXBTC15M-BACKLOG-000"
+    try:
+        with factory() as session:
+            markets = [
+                Market(
+                    market_ticker=f"KXBTC15M-BACKLOG-{index:03d}",
+                    series_ticker="KXBTC15M",
+                    open_time=at + timedelta(minutes=15 * index - 15),
+                    close_time=at + timedelta(minutes=15 * index),
+                    functional_strike=Decimal("62000"),
+                )
+                for index in range(501)
+            ]
+            session.add_all(markets)
+            session.add_all(
+                ResearchMarketOutcome(
+                    outcome_id=f"outcome-{market.market_ticker}",
+                    market_ticker=market.market_ticker,
+                    outcome_status="RESOLVED",
+                )
+                for market in markets[1:]
+            )
+            session.flush()
+
+            changed = reconcile_market_outcomes(
+                session, client=client, now=at + timedelta(days=7)
+            )
+
+            assert changed == 1
+            assert client.requested_tickers == [oldest_ticker]
+            assert session.scalar(select(func.count()).select_from(ResearchMarketOutcome)) == 501
     finally:
         engine.dispose()

@@ -523,6 +523,88 @@ def test_v2_pending_intent_resolves_without_current_candidate_side(session) -> N
     assert event.occurred_at == fill_time.replace(tzinfo=None)
 
 
+def test_v2_pending_entry_fill_persists_candidate_tier_hold_windows(session) -> None:
+    now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
+    fill_time = now - timedelta(milliseconds=500)
+    market_ticker = "KXBTC15M-CANDIDATE-HOLDS"
+    strategy_id = "btc15_momentum_v2_candidate_hold_windows"
+    candidate_parameters = {
+        "tiers": {
+            "normal": {"time_stop": 71, "max_hold": 93},
+        }
+    }
+    StrategyDecisionsRepository(session).insert_decision(
+        StrategyDecisionInput(
+            decision_id="v2-candidate-entry-decision",
+            evaluated_at=now - timedelta(seconds=2),
+            decision_state=STATE_V2_ENTRY_SIGNAL,
+            primary_reason="v2_entry_signal",
+            app_mode="DRY_RUN",
+            strategy_id=strategy_id,
+            market_ticker=market_ticker,
+            candidate_side="YES",
+            boundary=Decimal("62000"),
+            brti_value=Decimal("62010"),
+            measurements={
+                "timing_tier": "normal",
+                "v2_parameters": candidate_parameters,
+            },
+        )
+    )
+    intents = StrategyV2Repository(session)
+    intents.insert_intent_if_absent(
+        StrategyTradeIntentInput(
+            intent_id="v2-candidate-hold-entry",
+            strategy_id=strategy_id,
+            decision_id="v2-candidate-entry-decision",
+            market_ticker=market_ticker,
+            side_candidate="YES",
+            action="ENTRY",
+            created_at=now - timedelta(seconds=2),
+            effective_after=now - timedelta(seconds=1),
+            expires_at=now + timedelta(seconds=1),
+            intended_limit_price=Decimal("0.62"),
+            quantity=Decimal("1"),
+        )
+    )
+    OrderbookRepository(session).insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker=market_ticker,
+            received_at=fill_time,
+            yes_bid=Decimal("0.60"),
+            yes_ask=Decimal("0.61"),
+            yes_ask_count=Decimal("1"),
+            no_bid=Decimal("0.39"),
+            no_ask=Decimal("0.40"),
+            no_ask_count=Decimal("1"),
+            book_status="ok",
+        )
+    )
+
+    observer_module._apply_v2_hypothetical_lifecycle(
+        config=load_config({}),
+        session=session,
+        decision=StrategyDecisionInput(
+            decision_id="v2-current-candidate-decision",
+            evaluated_at=now,
+            decision_state="V2_HARD_GATE_BLOCKED",
+            primary_reason="reference_stale",
+            app_mode="DRY_RUN",
+            strategy_id=strategy_id,
+            market_ticker=market_ticker,
+            candidate_side=None,
+        ),
+    )
+
+    position = StrategyDryRunRepository(session).get_open_position_by_market(
+        strategy_id=strategy_id,
+        market_ticker=market_ticker,
+    )
+    assert position is not None
+    assert position.entry_time_stop_seconds == 71
+    assert position.entry_max_hold_seconds == 93
+
+
 def test_variants_receive_one_shared_context_per_iteration(session, monkeypatch) -> None:
     now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
     config = load_config(
