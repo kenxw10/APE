@@ -7,7 +7,13 @@ from sqlalchemy import select
 
 from ape.config import load_config
 from ape.db.migrations import run_migrations
-from ape.db.models import ResearchReplayRun, ResearchReplayTrade, WorkerHeartbeat
+from ape.db.models import (
+    ResearchMarketOutcome,
+    ResearchReplayEvent,
+    ResearchReplayRun,
+    ResearchReplayTrade,
+    WorkerHeartbeat,
+)
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.repositories.inputs import StrategyConfigVersionInput
 from ape.repositories.strategy_v2 import StrategyV2Repository
@@ -25,6 +31,102 @@ from ape.strategy.momentum_v2 import (
 )
 from ape.worker.main import WORKER_ROLE_RESEARCH, run_worker
 from ape.worker.services import WORKER_SERVICE_RESEARCH
+
+
+def _persist_governance_coverage_fixture(session, at: datetime, count: int) -> None:
+    events: list[ResearchReplayEvent] = []
+    outcomes: list[ResearchMarketOutcome] = []
+    for index in range(count):
+        market = f"M{index}"
+        opened_at = at + timedelta(minutes=15 * index)
+        feature_id = f"governance-feature-{index}"
+        events.extend(
+            (
+                ResearchReplayEvent(
+                    event_id=f"governance-market-{index}",
+                    market_ticker=market,
+                    event_type="MARKET",
+                    event_time=opened_at,
+                    received_at=opened_at,
+                    source_table="markets",
+                    source_row_id=f"governance-market-{index}",
+                    replay_schema_version=REPLAY_SCHEMA_VERSION,
+                    payload={},
+                    event_hash=f"governance-market-{index}",
+                    replay_readiness="FULL",
+                ),
+                ResearchReplayEvent(
+                    event_id=f"governance-reference-{index}",
+                    market_ticker=market,
+                    event_type="REFERENCE",
+                    event_time=opened_at + timedelta(milliseconds=100),
+                    received_at=opened_at + timedelta(milliseconds=100),
+                    source_table="reference_ticks",
+                    source_row_id=f"governance-reference-{index}",
+                    replay_schema_version=REPLAY_SCHEMA_VERSION,
+                    payload={},
+                    event_hash=f"governance-reference-{index}",
+                    replay_readiness="FULL",
+                ),
+                ResearchReplayEvent(
+                    event_id=f"governance-lifecycle-{index}",
+                    market_ticker=market,
+                    event_type="MARKET_LIFECYCLE",
+                    event_time=opened_at + timedelta(milliseconds=200),
+                    received_at=opened_at + timedelta(milliseconds=200),
+                    source_table="market_lifecycle",
+                    source_row_id=f"governance-lifecycle-{index}",
+                    replay_schema_version=REPLAY_SCHEMA_VERSION,
+                    payload={},
+                    event_hash=f"governance-lifecycle-{index}",
+                    replay_readiness="FULL",
+                ),
+                ResearchReplayEvent(
+                    event_id=feature_id,
+                    market_ticker=market,
+                    event_type="FEATURE_SNAPSHOT",
+                    event_time=opened_at + timedelta(milliseconds=300),
+                    received_at=opened_at + timedelta(milliseconds=300),
+                    source_table="strategy_feature_snapshots",
+                    source_row_id=feature_id,
+                    feature_snapshot_id=feature_id,
+                    replay_schema_version=REPLAY_SCHEMA_VERSION,
+                    payload={"feature_vector": {"candidate_side": "YES"}},
+                    event_hash=feature_id,
+                    replay_readiness="FULL",
+                ),
+                ResearchReplayEvent(
+                    event_id=f"governance-book-{index}",
+                    market_ticker=market,
+                    event_type="ORDERBOOK",
+                    event_time=opened_at + timedelta(milliseconds=900),
+                    received_at=opened_at + timedelta(milliseconds=900),
+                    source_table="orderbook_snapshots",
+                    source_row_id=f"governance-book-{index}",
+                    replay_schema_version=REPLAY_SCHEMA_VERSION,
+                    payload={},
+                    event_hash=f"governance-book-{index}",
+                    replay_readiness="FULL",
+                ),
+            )
+        )
+        outcomes.append(
+            ResearchMarketOutcome(
+                outcome_id=f"governance-outcome-{index}",
+                market_ticker=market,
+                market_open_at=opened_at,
+                market_close_at=opened_at + timedelta(minutes=15),
+                outcome_status="RESOLVED",
+                outcome_source="fixture",
+                quality_flags={
+                    "counterfactual_labels": {
+                        feature_id: {"net_markout_30s_cents": "1"}
+                    }
+                },
+            )
+        )
+    session.add_all([*events, *outcomes])
+    session.flush()
 
 
 def test_research_cycle_archives_and_records_isolated_heartbeat(tmp_path) -> None:
@@ -277,7 +379,8 @@ def test_automatic_governance_uses_persisted_candidate_evidence(tmp_path) -> Non
                     "code_commit_sha": "fixture",
                     "random_seed": 1,
                     "partition_manifest": {
-                        "ordered_market_tickers": [f"M{index}" for index in range(500)]
+                        "ordered_market_tickers": [f"M{index}" for index in range(500)],
+                        "governance_trade_partitions": ["frozen_holdout"],
                     },
                     "validation_metrics": {
                         "candidate-baseline-v2": {
@@ -332,6 +435,7 @@ def test_automatic_governance_uses_persisted_candidate_evidence(tmp_path) -> Non
                     "validation_metrics": metrics,
                     "holdout_metrics": {
                         "net_pnl_per_market": "1",
+                        "closed_trade_count": 50,
                         "bootstrap": {"net_pnl_per_market": {"lower": "1"}},
                     },
                     "lifecycle_state": "DRAFT",
@@ -348,8 +452,15 @@ def test_automatic_governance_uses_persisted_candidate_evidence(tmp_path) -> Non
                         "market_ticker": f"M{index}",
                         "side": "YES",
                         "status": "CLOSED",
+                        "entry_fill_event_id": f"governance-entry-{index}",
+                        "measurements": {
+                            "evidence_partition": "frozen_holdout",
+                            "source_decision_id": f"governance-decision-{index}",
+                        },
                     }
                 )
+
+            _persist_governance_coverage_fixture(session, at, 500)
 
             transitions = repository.advance_candidate_governance(
                 candidate_id="candidate-governance", actor="test"

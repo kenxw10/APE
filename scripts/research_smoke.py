@@ -13,10 +13,9 @@ from ape.db.models import (
     OrderbookSnapshot,
     ReferenceTick,
     ResearchMarketOutcome,
-    ResearchReplayEvent,
     StrategyFeatureSnapshot,
 )
-from ape.research.archive import archive_research_events
+from ape.research.archive import archive_research_events, reconcile_market_outcomes
 from ape.research.calibration import (
     LIFECYCLE_DRAFT,
     LIFECYCLE_PAPER_CANDIDATE,
@@ -26,7 +25,11 @@ from ape.research.calibration import (
     market_bootstrap,
     run_bounded_calibration,
 )
-from ape.research.fixtures import fixture_event, fixture_time, replayable_feature_vector
+from ape.research.fixtures import (
+    fixture_time,
+    replayable_feature_vector,
+    synthetic_btc15_fixture_dataset,
+)
 from ape.research.replay import DeterministicReplayEngine
 
 
@@ -39,7 +42,8 @@ def main() -> int:
         session.add_all(
             [
                 Market(
-                    market_ticker="SMOKE-ARCHIVE",
+                    market_ticker="KXBTC15M-SMOKE-ARCHIVE",
+                    series_ticker="KXBTC15M",
                     open_time=at - timedelta(minutes=5),
                     close_time=at + timedelta(minutes=10),
                     expiration_time=at + timedelta(minutes=10),
@@ -47,18 +51,21 @@ def main() -> int:
                 ),
                 StrategyFeatureSnapshot(
                     feature_snapshot_id="smoke-feature",
-                    market_ticker="SMOKE-ARCHIVE",
+                    market_ticker="KXBTC15M-SMOKE-ARCHIVE",
                     evaluated_at=at,
                     feature_schema_version="momentum_v2_features_v3",
                     context_hash="smoke",
                     candidate_side="YES",
                     boundary=Decimal("62000"),
-                    complete_feature_vector={"candidate_side": "YES", "boundary": "62000"},
+                    complete_feature_vector={
+                        key: str(value) if isinstance(value, Decimal) else value
+                        for key, value in replayable_feature_vector().items()
+                    },
                     replay_readiness="FULL",
                     replay_blockers=[],
                 ),
                 OrderbookSnapshot(
-                    market_ticker="SMOKE-ARCHIVE",
+                    market_ticker="KXBTC15M-SMOKE-ARCHIVE",
                     received_at=at + timedelta(milliseconds=600),
                     yes_ask=Decimal("0.60"),
                     yes_bid=Decimal("0.58"),
@@ -66,7 +73,7 @@ def main() -> int:
                     yes_bid_count=Decimal("1"),
                 ),
                 OrderbookSnapshot(
-                    market_ticker="SMOKE-ARCHIVE",
+                    market_ticker="KXBTC15M-SMOKE-ARCHIVE",
                     received_at=at + timedelta(seconds=5),
                     yes_bid=Decimal("0.65"),
                     yes_bid_count=Decimal("1"),
@@ -81,51 +88,54 @@ def main() -> int:
             ]
         )
         session.flush()
+        initial_archive = archive_research_events(session, now=at + timedelta(minutes=11))
+
+        class PublicOutcomeClient:
+            def get_market(self, _market_ticker: str) -> dict[str, object]:
+                return {
+                    "market": {
+                        "result": "yes",
+                        "status": "settled",
+                        "settlement_value": "62010",
+                    }
+                }
+
+        reconciled = reconcile_market_outcomes(
+            session,
+            client=PublicOutcomeClient(),
+            now=at + timedelta(minutes=11),
+        )
         archive = archive_research_events(session, now=at + timedelta(minutes=11))
         archived_outcome = session.scalar(
             select(ResearchMarketOutcome).where(
-                ResearchMarketOutcome.market_ticker == "SMOKE-ARCHIVE"
+                ResearchMarketOutcome.market_ticker == "KXBTC15M-SMOKE-ARCHIVE"
             )
         )
-        baseline_vector = replayable_feature_vector()
-        baseline_vector["candidate_mode"] = "BOUNDARY_CROSS_HOLD"
+        fixture = synthetic_btc15_fixture_dataset(50)
         baseline = DeterministicReplayEngine().replay(
-            [_feature_event(at=fixture_time(), vector=baseline_vector)]
+            list(fixture.events), outcomes=list(fixture.outcomes)
         )
-        candidate = DeterministicReplayEngine().replay(
-            [
-                fixture_event(at=fixture_time()),
-                _orderbook_event(at=fixture_time() + timedelta(milliseconds=600), event_id="entry"),
-                _orderbook_event(at=fixture_time() + timedelta(seconds=61), event_id="exit"),
-            ]
+        all_candidates = bounded_candidate_specs("smoke")
+        smoke_candidates = (
+            all_candidates[0],
+            next(
+                candidate
+                for candidate in all_candidates
+                if candidate.model_type == "WEIGHTED_HEURISTIC"
+            ),
+            next(
+                candidate
+                for candidate in all_candidates
+                if candidate.model_type == "L2_LOGISTIC"
+            ),
         )
-        under_sampled = run_bounded_calibration(calibration_run_id="smoke", events=[], outcomes=[])
-        outcomes = [
-            ResearchMarketOutcome(
-                outcome_id=f"outcome-{index}",
-                market_ticker=f"M{index}",
-                market_open_at=fixture_time() + timedelta(minutes=15 * index),
-                market_close_at=fixture_time() + timedelta(minutes=15 * (index + 1)),
-                expiration_at=fixture_time(),
-                boundary=Decimal("1"),
-                result_side="YES",
-                settlement_value=Decimal("1"),
-                final_reference_value=Decimal("1"),
-                final_minute_reference_average=Decimal("1"),
-                outcome_status="RESOLVED",
-                outcome_source="fixture",
-                source_payload_hash="fixture",
-                resolved_at=fixture_time(),
-                expected_frame_count=1,
-                actual_frame_count=1,
-                coverage_percentage=Decimal("1"),
-                maximum_event_gap_seconds=1,
-                quality_flags={},
-            )
-            for index in range(50)
-        ]
-        manifest = build_partition_manifest(outcomes)
-        candidates = bounded_candidate_specs("smoke")
+        calibration = run_bounded_calibration(
+            calibration_run_id="smoke",
+            events=list(fixture.events),
+            outcomes=list(fixture.outcomes),
+            candidate_specs=smoke_candidates,
+        )
+        manifest = build_partition_manifest(fixture.outcomes)
         bootstrap = market_bootstrap({"M1": Decimal("1"), "M2": Decimal("-1")}, "smoke")
         paper_live_failed = []
         for target in (LIFECYCLE_PAPER_CANDIDATE, "LIVE_CANDIDATE"):
@@ -136,21 +146,37 @@ def main() -> int:
             except GovernanceError:
                 paper_live_failed.append(target)
         payload = {
-            "archive": archive.coverage,
-            "labels": (
-                archived_outcome.quality_flags.get("counterfactual_labels", {})
-                if archived_outcome is not None
-                else {}
-            ),
-            "baseline_replay": baseline.zero_entry_report,
-            "candidate_closed_trades": len(
-                [trade for trade in candidate.trades if trade.status == "CLOSED"]
-            ),
-            "under_sampled_calibration": under_sampled.status,
-            "bounded_candidate_count": len(candidates),
+            "archive": {
+                "archived_events": initial_archive.archived_events + archive.archived_events,
+                "event_counts_by_type": archive.coverage["event_counts_by_type"],
+                "complete_markets": archive.coverage["complete_markets"],
+            },
+            "labels": _label_summary(archived_outcome),
+            "baseline_replay": {
+                "decision_states": baseline.zero_entry_report["decision_states"],
+                "pipeline": baseline.zero_entry_report["pipeline"],
+                "frequency_classification": baseline.zero_entry_report[
+                    "frequency_classification"
+                ],
+            },
+            "official_outcomes_reconciled": reconciled,
+            "fixture_market_count": len(fixture.outcomes),
+            "fixture_event_count": len(fixture.events),
+            "candidate_partitions": {
+                candidate_id: sorted(partitions)
+                for candidate_id, partitions in (
+                    calibration.candidate_partition_replay_trades.items()
+                )
+            },
+            "calibration_status": calibration.status,
+            "smoke_candidate_count": len(smoke_candidates),
             "partition_manifest_hash": manifest["manifest_hash"],
             "bootstrap": bootstrap,
-            "governance_transition": "not_fabricated_by_smoke_test",
+            "governance_transition": transition_candidate(
+                from_state=LIFECYCLE_DRAFT,
+                to_state="BACKTESTED",
+                evidence={"source": "fixture-driven-smoke"},
+            )[0],
             "paper_live_transitions_failed": paper_live_failed,
         }
         print(json.dumps(payload, sort_keys=True, default=str, indent=2))
@@ -158,37 +184,17 @@ def main() -> int:
     return 0
 
 
-def _feature_event(*, at, vector) -> ResearchReplayEvent:
-    event = fixture_event(at=at)
-    event.payload = {
-        "feature_vector": {
-            key: str(value) if isinstance(value, Decimal) else value
-            for key, value in vector.items()
-        }
+def _label_summary(outcome: ResearchMarketOutcome | None) -> dict[str, object]:
+    flags = outcome.quality_flags if outcome is not None else {}
+    labels = flags.get("counterfactual_labels", {}) if isinstance(flags, dict) else {}
+    values = list(labels.values()) if isinstance(labels, dict) else []
+    return {
+        "label_count": len(values),
+        "entry_label_ready": all(value.get("entry_label_readiness") == "FULL" for value in values),
+        "official_settlement_ready": all(
+            value.get("settlement_label_readiness") == "FULL" for value in values
+        ),
     }
-    return event
-
-
-def _orderbook_event(*, at, event_id: str) -> ResearchReplayEvent:
-    return ResearchReplayEvent(
-        event_id=event_id,
-        market_ticker="M1",
-        event_type="ORDERBOOK",
-        event_time=at,
-        received_at=at,
-        source_table="orderbook_snapshots",
-        source_row_id=event_id,
-        source_hash=event_id,
-        sequence_number=None,
-        feature_snapshot_id=None,
-        feature_schema_version=None,
-        architecture_version=None,
-        replay_schema_version="momentum_v2_replay_v1",
-        payload={"yes_ask": "0.60", "yes_bid": "0.58", "yes_ask_size": "3", "yes_bid_size": "3"},
-        event_hash=event_id,
-        replay_readiness="FULL",
-        blockers=[],
-    )
 
 
 if __name__ == "__main__":

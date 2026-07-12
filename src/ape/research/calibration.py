@@ -15,7 +15,12 @@ import numpy as np
 from ape.db.models import ResearchMarketOutcome, ResearchReplayEvent
 from ape.research import REPLAY_SCHEMA_VERSION
 from ape.research.replay import DeterministicReplayEngine, ReplayTrade
-from ape.strategy.momentum_v2 import V2_FEATURE_SCHEMA_VERSION, V2_PARAMETERS
+from ape.research.repository import _CANDIDATE_TUNABLE_PATHS, _PROTECTED_GATE_PATHS
+from ape.strategy.momentum_v2 import (
+    CALIBRATION_SCHEMA_VERSION,
+    V2_FEATURE_SCHEMA_VERSION,
+    V2_PARAMETERS,
+)
 
 LIFECYCLE_DRAFT = "DRAFT"
 LIFECYCLE_BACKTESTED = "BACKTESTED"
@@ -83,6 +88,7 @@ FREQUENCY_GOVERNANCE = {
     "hard_fill_min_for_challenger_per_100": "3",
     "hard_fill_max_for_challenger_per_100": "15",
 }
+CANDIDATE_GENERATION_ALGORITHM_VERSION = "bounded_v2_search_v1"
 
 
 class GovernanceError(ValueError):
@@ -111,6 +117,9 @@ class CalibrationResult:
     candidate_replay_trades: dict[str, tuple[ReplayTrade, ...]] = field(
         default_factory=dict
     )
+    candidate_partition_replay_trades: dict[
+        str, dict[str, tuple[ReplayTrade, ...]]
+    ] = field(default_factory=dict)
 
 
 def build_partition_manifest(outcomes: Iterable[ResearchMarketOutcome]) -> dict[str, Any]:
@@ -184,6 +193,7 @@ def build_partition_manifest(outcomes: Iterable[ResearchMarketOutcome]) -> dict[
         "data_cutoff": max(cutoff_times).isoformat() if cutoff_times else None,
         "replay_schema_version": REPLAY_SCHEMA_VERSION,
         "feature_schema_version": V2_FEATURE_SCHEMA_VERSION,
+        "governance_trade_partitions": ["frozen_holdout"],
     }
     payload["manifest_hash"] = _hash(payload)
     payload["holdout_hash"] = _hash(holdout)
@@ -194,26 +204,7 @@ def bounded_candidate_specs(calibration_run_id: str) -> tuple[CandidateSpec, ...
     """Candidate zero plus a deterministic, bounded 256-candidate search."""
     seed = int(hashlib.sha256(calibration_run_id.encode()).hexdigest()[:16], 16)
     rng = np.random.default_rng(seed)
-    grids = {
-        "fast_15": ["0.75", "1.00", "1.25", "1.50", "1.75"],
-        "fast_30": ["1.25", "1.50", "2.00", "2.50", "3.00"],
-        "adverse_5": ["-1.00", "-0.50", "0.00"],
-        "retrace": ["0.60", "0.70", "0.80"],
-        "crosses": [1, 2, 3],
-        "edge": ["0.50", "1.00", "1.50", "2.00", "2.50", "3.00"],
-        "early": [70, 75, 80, 85, 90],
-        "normal": [60, 65, 70, 75, 80, 85],
-        "late": [65, 70, 75, 80, 85, 90],
-        "early_max_ask": ["0.68", "0.70", "0.72"],
-        "normal_max_ask": ["0.70", "0.72", "0.74", "0.76", "0.78"],
-        "late_max_ask": ["0.68", "0.70", "0.72", "0.74"],
-        "time_stop": [15, 30, 45, 60],
-        "max_hold": [30, 60, 90, 120],
-        "profit_target": [8, 10, 12],
-        "soft_stop": [6, 8],
-        "hard_stop": [8, 10, 12],
-        "weight_multiplier": ["0.75", "1.00", "1.25"],
-    }
+    grids = candidate_parameter_grids()
     baseline = CandidateSpec(
         "candidate-baseline-v2",
         "btc15_momentum_v2_candidate_baseline000",
@@ -278,6 +269,76 @@ def bounded_candidate_specs(calibration_run_id: str) -> tuple[CandidateSpec, ...
         )
     assert len(specs) == 256
     return tuple(specs)
+
+
+def candidate_parameter_grids() -> dict[str, list[Any]]:
+    """The complete bounded parameter space used for heuristic candidates."""
+    return {
+        "fast_15": ["0.75", "1.00", "1.25", "1.50", "1.75"],
+        "fast_30": ["1.25", "1.50", "2.00", "2.50", "3.00"],
+        "adverse_5": ["-1.00", "-0.50", "0.00"],
+        "retrace": ["0.60", "0.70", "0.80"],
+        "crosses": [1, 2, 3],
+        "edge": ["0.50", "1.00", "1.50", "2.00", "2.50", "3.00"],
+        "early": [70, 75, 80, 85, 90],
+        "normal": [60, 65, 70, 75, 80, 85],
+        "late": [65, 70, 75, 80, 85, 90],
+        "early_max_ask": ["0.68", "0.70", "0.72"],
+        "normal_max_ask": ["0.70", "0.72", "0.74", "0.76", "0.78"],
+        "late_max_ask": ["0.68", "0.70", "0.72", "0.74"],
+        "time_stop": [15, 30, 45, 60],
+        "max_hold": [30, 60, 90, 120],
+        "profit_target": [8, 10, 12],
+        "soft_stop": [6, 8],
+        "hard_stop": [8, 10, 12],
+        "weight_multiplier": ["0.75", "1.00", "1.25"],
+    }
+
+
+def complete_search_space_snapshot(
+    calibration_run_id: str, candidates: Iterable[CandidateSpec]
+) -> dict[str, Any]:
+    """Persist enough immutable information to reproduce a candidate search."""
+    candidate_rows = [
+        {
+            "candidate_id": candidate.candidate_id,
+            "parameter_hash": _hash(candidate.parameters),
+            "model_type": candidate.model_type,
+        }
+        for candidate in candidates
+    ]
+    seed = int(hashlib.sha256(calibration_run_id.encode()).hexdigest()[:16], 16)
+    snapshot = {
+        "calibration_schema_version": CALIBRATION_SCHEMA_VERSION,
+        "deterministic_seed": seed,
+        "candidate_generation_algorithm_version": CANDIDATE_GENERATION_ALGORITHM_VERSION,
+        "baseline_definition": {
+            "candidate_id": "candidate-baseline-v2",
+            "parameters": V2_PARAMETERS,
+        },
+        "heuristic_grids": candidate_parameter_grids(),
+        "tier_specific_ask_grids": {
+            key: values
+            for key, values in candidate_parameter_grids().items()
+            if key.endswith("max_ask")
+        },
+        "weight_multiplier_grid": candidate_parameter_grids()["weight_multiplier"],
+        "exit_grids": {
+            key: candidate_parameter_grids()[key]
+            for key in ("time_stop", "max_hold", "profit_target", "soft_stop", "hard_stop")
+        },
+        "logistic_l2_values": ["0.1", "1.0", "10.0"],
+        "logistic_feature_order": list(LOGISTIC_FEATURE_COLUMNS),
+        "logistic_maximum_iterations": 500,
+        "logistic_convergence_tolerance": "1e-8",
+        "maximum_candidate_count": 256,
+        "generated_candidates": candidate_rows,
+        "allowed_parameter_paths": sorted(_CANDIDATE_TUNABLE_PATHS),
+        "protected_gate_paths": list(_PROTECTED_GATE_PATHS),
+        "frequency_governance": FREQUENCY_GOVERNANCE,
+    }
+    snapshot["snapshot_sha256"] = _hash(snapshot)
+    return snapshot
 
 
 def fit_l2_logistic(
@@ -485,6 +546,7 @@ def run_bounded_calibration(
     calibration_run_id: str,
     events: list[ResearchReplayEvent],
     outcomes: list[ResearchMarketOutcome],
+    candidate_specs: Iterable[CandidateSpec] | None = None,
 ) -> CalibrationResult:
     manifest = build_partition_manifest(outcomes)
     if len(manifest["ordered_market_tickers"]) < 50:
@@ -497,11 +559,12 @@ def run_bounded_calibration(
             ("calibration_requires_at_least_50_complete_unique_markets",),
             ("insufficient_complete_markets",),
         )
-    candidates, metrics, selected, best_lower, candidate_replay_trades = (
-        list(bounded_candidate_specs(calibration_run_id)),
+    candidates, metrics, selected, best_lower, candidate_replay_trades, partition_trades = (
+        list(candidate_specs or bounded_candidate_specs(calibration_run_id)),
         {},
         None,
         Decimal("-Infinity"),
+        {},
         {},
     )
     search_development = list(manifest["search_development"])
@@ -562,6 +625,9 @@ def run_bounded_calibration(
             market_tickers=search_development,
         )
         candidate_replay_trades[candidate.candidate_id] = result.trades
+        partition_trades[candidate.candidate_id] = {
+            "search_development": result.trades,
+        }
         lower = Decimal(values["bootstrap"]["net_pnl_per_market"]["lower"])
         penalties = adjusted_lower_confidence_expectancy(
             bootstrap_lower=lower,
@@ -575,8 +641,14 @@ def run_bounded_calibration(
         metrics[candidate.candidate_id] = {
             "status": "EVALUATED",
             **values,
+            "training": values,
+            "walk_forward_validation": _aggregate_fold_metrics(fold_metrics),
+            "development_test": None,
+            "holdout": None,
+            "partition_metrics": {"search_development": values},
             "fold_metrics": fold_metrics,
             "penalties": {key: str(value) for key, value in penalties.items()},
+            "bootstrap": values["bootstrap"],
             "model_artifact": candidate.model_artifact,
             "training_row_count": len(labeled_rows)
             if candidate.model_type == "L2_LOGISTIC"
@@ -612,12 +684,15 @@ def run_bounded_calibration(
                 outcome for outcome in outcomes if outcome.market_ticker in development_test_members
             ],
         )
-        metrics[selected]["development_test"] = replay_metrics(
+        development_test_metrics = replay_metrics(
             test_result.trades,
             market_count=len(development_test),
             calibration_run_id=f"{calibration_run_id}-development-test",
             market_tickers=development_test,
         )
+        metrics[selected]["development_test"] = development_test_metrics
+        metrics[selected]["partition_metrics"]["development_test"] = development_test_metrics
+        partition_trades[selected]["development_test"] = test_result.trades
         holdout = list(manifest["holdout"])
         holdout_members = set(holdout)
         holdout_events = [event for event in events if event.market_ticker in holdout_members]
@@ -627,12 +702,15 @@ def run_bounded_calibration(
         holdout_result = DeterministicReplayEngine(parameters=chosen.parameters).replay(
             holdout_events, outcomes=holdout_outcomes
         )
-        metrics[selected]["holdout"] = replay_metrics(
+        holdout_metrics = replay_metrics(
             holdout_result.trades,
             market_count=len(holdout),
             calibration_run_id=calibration_run_id,
             market_tickers=holdout,
         )
+        metrics[selected]["holdout"] = holdout_metrics
+        metrics[selected]["partition_metrics"]["frozen_holdout"] = holdout_metrics
+        partition_trades[selected]["frozen_holdout"] = holdout_result.trades
     return CalibrationResult(
         "COMPLETED",
         manifest,
@@ -642,6 +720,7 @@ def run_bounded_calibration(
         (),
         (),
         candidate_replay_trades,
+        partition_trades,
     )
 
 
@@ -746,6 +825,8 @@ def _aggregate_fold_metrics(fold_metrics: list[dict[str, Any]]) -> dict[str, Any
         "signal_to_fill_rate",
         "dominant_regime_entry_share",
     )
+    if any(any(key not in item for key in numeric_keys) for item in fold_metrics):
+        return {"fold_count": len(fold_metrics)}
     values = dict(exemplar)
     for key in numeric_keys:
         values[key] = str(

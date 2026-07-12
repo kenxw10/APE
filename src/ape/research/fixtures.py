@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 from ape.db.models import ResearchMarketOutcome, ResearchReplayEvent
+
+
+@dataclass(frozen=True)
+class ResearchFixtureDataset:
+    """A deterministic archive/replay dataset, not descriptive outcome-only flags."""
+
+    events: tuple[ResearchReplayEvent, ...]
+    outcomes: tuple[ResearchMarketOutcome, ...]
 
 
 def fixture_time() -> datetime:
@@ -136,6 +145,176 @@ def synthetic_btc15_fixture_markets(count: int = 18) -> list[ResearchMarketOutco
             )
         )
     return rows
+
+
+def synthetic_btc15_fixture_dataset(count: int = 18) -> ResearchFixtureDataset:
+    """Build complete event-time fixtures for archive, replay, and calibration tests."""
+    scenarios = (
+        "continuation_entry",
+        "boundary_cross_research_only",
+        "stale_prerequisites",
+        "entry_fill",
+        "entry_no_fill",
+        "entry_expiry",
+        "later_book_non_rescue",
+        "profitable_exit",
+        "losing_exit",
+        "hard_stop",
+        "soft_stop_weakening",
+        "profit_target",
+        "time_stop",
+        "maximum_hold",
+        "final_twenty_second_force_exit",
+        "adverse_boundary_cross",
+        "exit_retry_exhaustion",
+        "partial_coverage_frozen_holdout",
+    )
+    outcomes = synthetic_btc15_fixture_markets(count)
+    events: list[ResearchReplayEvent] = []
+    for index, outcome in enumerate(outcomes):
+        market = outcome.market_ticker
+        opened_at = outcome.market_open_at or fixture_time()
+        scenario = scenarios[index % len(scenarios)]
+        vector = replayable_feature_vector()
+        vector.update(
+            {
+                "timing_tier": ("early", "normal", "late")[index % 3],
+                "volatility_regime": ("low", "medium", "high")[index % 3],
+                "liquidity_regime": ("thin", "medium", "deep")[index % 3],
+                "candidate_mode": (
+                    "BOUNDARY_CROSS_HOLD"
+                    if scenario == "boundary_cross_research_only"
+                    else "CONTINUATION"
+                ),
+            }
+        )
+        readiness = "PARTIAL" if scenario == "partial_coverage_frozen_holdout" else "FULL"
+        feature_at = opened_at + timedelta(minutes=6)
+        feature_id = f"fixture-feature-{index}"
+        base = f"fixture-{index}"
+        events.extend(
+            (
+                _source_event(
+                    event_id=f"{base}-market",
+                    market_ticker=market,
+                    event_type="MARKET",
+                    event_time=opened_at,
+                    source_table="markets",
+                    payload={"scenario": scenario},
+                ),
+                _source_event(
+                    event_id=f"{base}-reference",
+                    market_ticker=market,
+                    event_type="REFERENCE",
+                    event_time=feature_at - timedelta(milliseconds=100),
+                    source_table="reference_ticks",
+                    payload={"value": str(Decimal("62000") + index), "scenario": scenario},
+                ),
+                _source_event(
+                    event_id=f"{base}-trade",
+                    market_ticker=market,
+                    event_type="PUBLIC_TRADE",
+                    event_time=feature_at + timedelta(milliseconds=100),
+                    source_table="public_trades",
+                    payload={"taker_side": "YES", "scenario": scenario},
+                ),
+                ResearchReplayEvent(
+                    event_id=feature_id,
+                    market_ticker=market,
+                    event_type="FEATURE_SNAPSHOT",
+                    event_time=feature_at,
+                    received_at=feature_at,
+                    source_table="strategy_feature_snapshots",
+                    source_row_id=feature_id,
+                    source_hash=feature_id,
+                    feature_snapshot_id=feature_id,
+                    feature_schema_version="momentum_v2_features_v3",
+                    architecture_version="momentum_v2_heuristic_v3",
+                    replay_schema_version="momentum_v2_replay_v1",
+                    payload={"feature_vector": _json_vector(vector), "scenario": scenario},
+                    event_hash=feature_id,
+                    replay_readiness=readiness,
+                    blockers=[] if readiness == "FULL" else ["fixture_partial_coverage"],
+                ),
+                _source_event(
+                    event_id=f"{base}-book-first",
+                    market_ticker=market,
+                    event_type="ORDERBOOK",
+                    event_time=feature_at + timedelta(milliseconds=600),
+                    source_table="orderbook_snapshots",
+                    payload={
+                        "yes_ask": (
+                            "0.90"
+                            if scenario in {"entry_no_fill", "later_book_non_rescue"}
+                            else "0.60"
+                        ),
+                        "yes_bid": "0.58",
+                        "yes_ask_size": "3",
+                        "yes_bid_size": "3",
+                        "scenario": scenario,
+                    },
+                ),
+                _source_event(
+                    event_id=f"{base}-book-later",
+                    market_ticker=market,
+                    event_type="ORDERBOOK",
+                    event_time=feature_at + timedelta(milliseconds=900),
+                    source_table="orderbook_snapshots",
+                    payload={
+                        "yes_ask": "0.60",
+                        "yes_bid": "0.58",
+                        "yes_ask_size": "3",
+                        "yes_bid_size": "3",
+                        "scenario": scenario,
+                    },
+                ),
+                _source_event(
+                    event_id=f"{base}-lifecycle",
+                    market_ticker=market,
+                    event_type="MARKET_LIFECYCLE",
+                    event_time=opened_at + timedelta(minutes=15),
+                    source_table="market_lifecycle",
+                    payload={"status": "settled", "scenario": scenario},
+                ),
+            )
+        )
+        flags = dict(outcome.quality_flags or {})
+        flags.update(
+            {
+                "scenario": scenario,
+                "counterfactual_labels": {
+                    feature_id: {"net_markout_30s_cents": "1"}
+                },
+            }
+        )
+        outcome.quality_flags = flags
+    return ResearchFixtureDataset(tuple(events), tuple(outcomes))
+
+
+def _source_event(
+    *,
+    event_id: str,
+    market_ticker: str,
+    event_type: str,
+    event_time: datetime,
+    source_table: str,
+    payload: dict[str, Any],
+) -> ResearchReplayEvent:
+    return ResearchReplayEvent(
+        event_id=event_id,
+        market_ticker=market_ticker,
+        event_type=event_type,
+        event_time=event_time,
+        received_at=event_time,
+        source_table=source_table,
+        source_row_id=event_id,
+        source_hash=event_id,
+        replay_schema_version="momentum_v2_replay_v1",
+        payload=payload,
+        event_hash=event_id,
+        replay_readiness="FULL",
+        blockers=[],
+    )
 
 
 def _json_vector(vector: dict[str, Any]) -> dict[str, Any]:

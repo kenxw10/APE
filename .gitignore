@@ -33,6 +33,12 @@ dashboard/.test-build/
 *.sqlite
 *.sqlite3
 
+# Regenerated PR 11 validation artifacts; keep compact manifests/reports only.
+docs/validation/pr11/logs/
+docs/validation/pr11/junit/
+docs/validation/pr11/results/
+docs/validation/pr11/research-smoke-output.txt
+
 # OS/editor noise
 .DS_Store
 Thumbs.db

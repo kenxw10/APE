@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -311,15 +311,23 @@ class ResearchRepository:
             candidate_id=candidate.candidate_id,
             replay_run_id=calibration.replay_run_id if calibration else None,
         )
-        closed = [trade for trade in trades if trade.status == "CLOSED"]
         manifest = calibration.partition_manifest if calibration else {}
-        market_count = (
-            len(manifest.get("ordered_market_tickers", []))
-            if isinstance(manifest, dict)
-            else 0
+        manifest = manifest if isinstance(manifest, dict) else {}
+        manifest_markets = [
+            str(market) for market in manifest.get("ordered_market_tickers", [])
+        ]
+        coverage_evidence = _eligible_feature_coverage(
+            self.list_events_for_markets(manifest_markets),
+            self.list_complete_outcomes(),
         )
-        reported_closed = _int_or_none(metrics.get("closed_trade_count"))
-        replay_integrity = reported_closed is not None and reported_closed == len(closed)
+        partition_evidence = _governance_trade_evidence(
+            trades,
+            {**metrics, "holdout": heldout},
+            manifest,
+        )
+        market_count = coverage_evidence["complete_eligible_unique_markets"]
+        reported_closed = partition_evidence["reported_closed_governance_trades"]
+        replay_integrity = partition_evidence["reported_partition_trade_integrity"]
         frequency = _decimal_or_zero(metrics.get("entry_frequency_per_100_markets"))
         zero_entry = metrics.get("zero_entry_report") if isinstance(metrics, dict) else {}
         unique_rates = (
@@ -345,19 +353,6 @@ class ResearchRepository:
             baseline_version.parameter_snapshot if baseline_version is not None else {},
             candidate.parameter_snapshot,
         )
-        coverage = (
-            (replay_run.raw_metrics or {}).get("archive_coverage", {})
-            if replay_run is not None and isinstance(replay_run.raw_metrics, dict)
-            else {}
-        )
-        coverage = coverage if isinstance(coverage, dict) else {}
-        per_market = coverage.get("per_market_coverage", {})
-        frame_count = int(coverage.get("event_count", 0))
-        partial_frames = int(coverage.get("partial_frame_count", 0))
-        unusable_frames = int(coverage.get("unusable_frame_count", 0))
-        complete_markets = int(coverage.get("complete_markets", 0))
-        total_markets = len(per_market) if isinstance(per_market, dict) else 0
-        coverage_ratio = _decimal_or_zero(coverage.get("minimum_coverage"))
         expected_fee = verified_kalshi_taker_fee_model().metadata()
         actual_fee = (
             replay_run.cost_model
@@ -382,8 +377,12 @@ class ResearchRepository:
             "candidate_id": candidate.candidate_id,
             "calibration_run_id": candidate.calibration_run_id,
             "replay_run_id": calibration.replay_run_id if calibration else None,
+            "manifest_unique_markets": len(set(manifest_markets)),
             "complete_unique_markets": market_count,
-            "closed_simulated_trades": len(closed),
+            "complete_eligible_unique_markets": market_count,
+            "closed_simulated_trades": partition_evidence[
+                "unique_closed_governance_trades"
+            ],
             "reported_closed_trade_count": reported_closed,
             "candidate_replay_integrity": replay_integrity,
             "entry_frequency_per_100_markets": str(frequency),
@@ -393,17 +392,9 @@ class ResearchRepository:
                 Decimal("5") <= qualified_setups <= Decimal("15")
             ),
             "signal_to_fill_rate": metrics.get("signal_to_fill_rate", "0"),
-            "eligible_feature_frames": frame_count,
-            "full_feature_frames": max(frame_count - partial_frames - unusable_frames, 0),
-            "partial_feature_frames": partial_frames,
-            "unusable_feature_frames": unusable_frames,
-            "complete_eligible_markets": complete_markets,
-            "total_eligible_markets": total_markets,
-            "market_coverage": str(Decimal(complete_markets) / Decimal(max(total_markets, 1))),
-            "frame_coverage": str(coverage_ratio),
-            "maximum_source_gaps": coverage.get("missing_source_counts", {}),
-            "coverage_blockers": coverage.get("replay_eligibility_blockers", []),
-            "complete_replay_coverage": str(coverage_ratio),
+            **coverage_evidence,
+            **partition_evidence,
+            "complete_replay_coverage": coverage_evidence["frame_coverage_ratio"],
             "volatility_regimes": metrics.get("volatility_regime_coverage", 0),
             "liquidity_regimes": metrics.get("liquidity_regime_coverage", 0),
             "timing_tiers": metrics.get("timing_tier_coverage", 0),
@@ -451,16 +442,19 @@ class ResearchRepository:
         if metrics.get("status") != "EVALUATED":
             blockers.append("candidate_metrics_not_evaluated")
         if not replay_integrity:
-            blockers.append("candidate_replay_trade_count_mismatch")
-        if reported_closed and not trades:
+            blockers.append("candidate_partition_trade_count_mismatch")
+        if reported_closed and not partition_evidence["unique_closed_governance_trades"]:
             blockers.append("candidate_metrics_with_fills_missing_replay_evidence")
         if config_diff["forbidden_parameter_changed"]:
             blockers.append("candidate_forbidden_parameter_change")
-        if coverage_ratio < Decimal("0.95"):
+        if config_diff["safety_or_data_quality_gate_changed"]:
+            blockers.append("candidate_protected_gate_change")
+        if _decimal_or_zero(coverage_evidence["frame_coverage_ratio"]) < Decimal("0.95"):
             blockers.append("candidate_replay_coverage_below_threshold")
+        blockers.extend(coverage_evidence["gap_related_blockers"])
         if fee_mismatches:
             blockers.append("candidate_fee_metadata_mismatch")
-        return evidence, blockers
+        return evidence, list(dict.fromkeys(blockers))
 
     def get_replay_run(self, replay_run_id: str) -> ResearchReplayRun | None:
         return self.session.scalar(
@@ -694,9 +688,254 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
+_REQUIRED_ELIGIBILITY_EVENT_TYPES = frozenset(
+    {"MARKET", "REFERENCE", "ORDERBOOK", "FEATURE_SNAPSHOT", "MARKET_LIFECYCLE"}
+)
+_GOVERNANCE_PARTITIONS = ("development_test", "frozen_holdout")
+
+
+def _eligible_feature_coverage(
+    events: list[ResearchReplayEvent], outcomes: list[ResearchMarketOutcome]
+) -> dict[str, Any]:
+    """Derive promotion coverage from archived source events, never run totals."""
+    outcomes_by_market = {
+        outcome.market_ticker: outcome
+        for outcome in outcomes
+        if outcome.outcome_status == "RESOLVED"
+    }
+    events_by_market: dict[str, list[ResearchReplayEvent]] = {}
+    for event in events:
+        if event.market_ticker is not None:
+            events_by_market.setdefault(event.market_ticker, []).append(event)
+
+    total_feature_snapshots = 0
+    mature_candidate_frames = 0
+    full_frames = 0
+    partial_frames = 0
+    unusable_frames = 0
+    complete_markets: set[str] = set()
+    eligible_markets: set[str] = set()
+    missing_source_counts: dict[str, int] = {}
+    gaps_by_market_and_source: dict[str, dict[str, int]] = {}
+    gap_blockers: list[str] = []
+
+    for market_ticker, market_events in sorted(events_by_market.items()):
+        ordered = sorted(market_events, key=lambda row: (_utc(row.event_time), row.event_id))
+        types = {row.event_type for row in ordered}
+        missing = _REQUIRED_ELIGIBILITY_EVENT_TYPES - types
+        missing_source_counts[market_ticker] = len(missing)
+        if missing:
+            gap_blockers.append(f"missing_required_event_sources:{market_ticker}")
+
+        source_gaps: dict[str, int] = {}
+        by_source: dict[str, list[ResearchReplayEvent]] = {}
+        for event in ordered:
+            by_source.setdefault(event.source_table, []).append(event)
+        for source, source_events in sorted(by_source.items()):
+            source_events.sort(key=lambda row: (_utc(row.event_time), row.event_id))
+            maximum_gap = max(
+                (
+                    max(
+                        0,
+                        int(
+                            (_utc(current.event_time) - _utc(previous.event_time)).total_seconds()
+                        ),
+                    )
+                    for previous, current in zip(source_events, source_events[1:], strict=False)
+                ),
+                default=0,
+            )
+            source_gaps[source] = maximum_gap
+        gaps_by_market_and_source[market_ticker] = source_gaps
+
+        market_frames = [row for row in ordered if row.event_type == "FEATURE_SNAPSHOT"]
+        total_feature_snapshots += len(market_frames)
+        full_for_market = 0
+        candidate_for_market = 0
+        for feature in market_frames:
+            vector = _feature_vector(feature)
+            side = vector.get("candidate_side") if isinstance(vector, dict) else None
+            if side not in {"YES", "NO"}:
+                unusable_frames += 1
+                continue
+            candidate_for_market += 1
+            labels = _outcome_labels(outcomes_by_market.get(market_ticker))
+            label = labels.get(feature.feature_snapshot_id or "")
+            mature = _label_is_mature(label)
+            if mature:
+                mature_candidate_frames += 1
+            first_book = _first_book_in_window(ordered, feature.event_time)
+            full = (
+                feature.replay_readiness == "FULL"
+                and mature
+                and first_book is not None
+                and market_ticker in outcomes_by_market
+            )
+            if full:
+                full_frames += 1
+                full_for_market += 1
+            elif feature.replay_readiness == "UNUSABLE" or not mature:
+                unusable_frames += 1
+            else:
+                partial_frames += 1
+        if candidate_for_market:
+            eligible_markets.add(market_ticker)
+            # A complete market has no candidate-side frame that failed the
+            # full executable-label contract.
+            if full_for_market == candidate_for_market and candidate_for_market > 0:
+                complete_markets.add(market_ticker)
+
+    overall_gap = max(
+        (gap for sources in gaps_by_market_and_source.values() for gap in sources.values()),
+        default=0,
+    )
+    if overall_gap > 30:
+        gap_blockers.append("maximum_event_gap_exceeds_30_seconds")
+    eligible_frame_count = full_frames + partial_frames + unusable_frames
+    frame_coverage = Decimal(full_frames) / Decimal(max(eligible_frame_count, 1))
+    market_coverage = Decimal(len(complete_markets)) / Decimal(max(len(eligible_markets), 1))
+    return {
+        "total_feature_snapshot_events": total_feature_snapshots,
+        "mature_candidate_side_feature_frames": mature_candidate_frames,
+        "eligible_feature_frames": eligible_frame_count,
+        "full_feature_frames": full_frames,
+        "partial_feature_frames": partial_frames,
+        "unusable_feature_frames": unusable_frames,
+        "complete_eligible_markets": len(complete_markets),
+        "total_eligible_markets": len(eligible_markets),
+        "complete_eligible_unique_markets": len(complete_markets),
+        "frame_coverage_ratio": str(frame_coverage),
+        "market_coverage_ratio": str(market_coverage),
+        "frame_coverage": str(frame_coverage),
+        "market_coverage": str(market_coverage),
+        "missing_source_counts": missing_source_counts,
+        "maximum_event_gap_by_market_and_source": gaps_by_market_and_source,
+        "overall_maximum_event_gap": overall_gap,
+        "gap_related_blockers": sorted(set(gap_blockers)),
+        "coverage_blockers": sorted(set(gap_blockers)),
+    }
+
+
+def _feature_vector(event: ResearchReplayEvent) -> dict[str, Any]:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    vector = payload.get("feature_vector") if isinstance(payload, dict) else {}
+    return vector if isinstance(vector, dict) else {}
+
+
+def _outcome_labels(outcome: ResearchMarketOutcome | None) -> dict[str, Any]:
+    flags = (
+        outcome.quality_flags
+        if outcome is not None and isinstance(outcome.quality_flags, dict)
+        else {}
+    )
+    labels = flags.get("counterfactual_labels") if isinstance(flags, dict) else {}
+    return labels if isinstance(labels, dict) else {}
+
+
+def _label_is_mature(label: Any) -> bool:
+    return isinstance(label, dict) and label.get("net_markout_30s_cents") is not None
+
+
+def _first_book_in_window(
+    events: list[ResearchReplayEvent], feature_at: datetime
+) -> ResearchReplayEvent | None:
+    effective_after = _utc(feature_at) + timedelta(milliseconds=500)
+    expires_at = effective_after + timedelta(seconds=2)
+    return next(
+        (
+            event
+            for event in events
+            if event.event_type == "ORDERBOOK"
+            and effective_after <= _utc(event.event_time) <= expires_at
+        ),
+        None,
+    )
+
+
+def _governance_trade_evidence(
+    trades: list[ResearchReplayTrade], metrics: dict[str, Any], manifest: dict[str, Any]
+) -> dict[str, Any]:
+    declared = manifest.get("governance_trade_partitions", _GOVERNANCE_PARTITIONS)
+    partitions = tuple(dict.fromkeys(str(value) for value in declared if isinstance(value, str)))
+    partitions = partitions or _GOVERNANCE_PARTITIONS
+    metrics_by_partition = _partition_metrics(metrics)
+    unique: dict[tuple[str, str, str, str, str], ResearchReplayTrade] = {}
+    excluded_duplicates = 0
+    for trade in trades:
+        if trade.status != "CLOSED":
+            continue
+        measurements = trade.measurements if isinstance(trade.measurements, dict) else {}
+        partition = measurements.get("evidence_partition")
+        if partition not in partitions:
+            continue
+        source_decision = str(
+            measurements.get("source_decision_id")
+            or measurements.get("entry_decision_id")
+            or trade.entry_feature_snapshot_id
+            or trade.trade_id
+        )
+        entry_event = str(trade.entry_fill_event_id or trade.trade_id)
+        key = (
+            str(trade.candidate_id or ""),
+            trade.market_ticker,
+            source_decision,
+            entry_event,
+            str(partition),
+        )
+        if key in unique:
+            excluded_duplicates += 1
+            continue
+        unique[key] = trade
+    closed_by_partition = {
+        partition: sum(1 for key in unique if key[-1] == partition) for partition in partitions
+    }
+    reported_by_partition = {
+        partition: _int_or_none(metrics_by_partition.get(partition, {}).get("closed_trade_count"))
+        for partition in partitions
+    }
+    reported_values = list(reported_by_partition.values())
+    reported_closed = (
+        sum(value for value in reported_values if value is not None)
+        if all(value is not None for value in reported_values)
+        else None
+    )
+    return {
+        "governance_trade_partitions": list(partitions),
+        "unique_closed_governance_trades": len(unique),
+        "unique_governance_markets": len({trade.market_ticker for trade in unique.values()}),
+        "excluded_duplicate_rows": excluded_duplicates,
+        "partition_specific_closed_counts": closed_by_partition,
+        "partition_specific_reported_closed_counts": reported_by_partition,
+        "reported_closed_governance_trades": reported_closed,
+        "reported_partition_trade_integrity": (
+            reported_closed is not None
+            and all(
+                reported_by_partition[partition] == closed_by_partition[partition]
+                for partition in partitions
+            )
+        ),
+    }
+
+
+def _partition_metrics(metrics: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    explicit = metrics.get("partition_metrics")
+    result = explicit if isinstance(explicit, dict) else {}
+    values = {
+        str(partition): value for partition, value in result.items() if isinstance(value, dict)
+    }
+    if "development_test" not in values and isinstance(metrics.get("development_test"), dict):
+        values["development_test"] = metrics["development_test"]
+    if "frozen_holdout" not in values and isinstance(metrics.get("holdout"), dict):
+        values["frozen_holdout"] = metrics["holdout"]
+    return values
+
+
+def _utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
 _CANDIDATE_TUNABLE_PATHS = {
     "edge_threshold_cents",
-    "calibration_overrides",
     "tiers.early.score",
     "tiers.early.max_ask",
     "tiers.early.time_stop",
@@ -711,7 +950,72 @@ _CANDIDATE_TUNABLE_PATHS = {
     "tiers.late.max_hold",
     "logistic_model",
     "logistic_probability_threshold",
+    "calibration_overrides.fast_15",
+    "calibration_overrides.fast_30",
+    "calibration_overrides.adverse_5",
+    "calibration_overrides.retrace",
+    "calibration_overrides.crosses",
+    "calibration_overrides.edge",
+    "calibration_overrides.early",
+    "calibration_overrides.normal",
+    "calibration_overrides.late",
+    "calibration_overrides.early_max_ask",
+    "calibration_overrides.normal_max_ask",
+    "calibration_overrides.late_max_ask",
+    "calibration_overrides.time_stop",
+    "calibration_overrides.max_hold",
+    "calibration_overrides.profit_target",
+    "calibration_overrides.soft_stop",
+    "calibration_overrides.hard_stop",
+    "calibration_overrides.component_weight_multipliers.fast_impulse",
+    "calibration_overrides.component_weight_multipliers.path_quality",
+    "calibration_overrides.component_weight_multipliers.underreaction",
+    "calibration_overrides.component_weight_multipliers.boundary_regime",
+    "calibration_overrides.component_weight_multipliers.microstructure",
+    "calibration_overrides.component_weight_multipliers.timing_economics",
 }
+
+# These are the persisted V2 safeguards.  Runtime AppConfig safeguards are not
+# part of a candidate parameter snapshot, but are reported here as immutable
+# protected paths so the governance record makes that boundary explicit.
+_PROTECTED_GATE_PATHS = (
+    "app_mode",
+    "trading_enabled",
+    "execute",
+    "market_identity_readiness",
+    "reference_freshness",
+    "reference_source_freshness",
+    "book_freshness",
+    "sequence_integrity",
+    "canonical_market_readiness",
+    "canonical_reference_readiness",
+    "maximum_spread",
+    "minimum_executable_depth",
+    "decision_to_book_latency_ms",
+    "intent_expiry_seconds",
+    "one_entry_per_market",
+    "one_global_position",
+    "entry_attempts_per_market",
+    "boundary_cross_research_only",
+    "global_maximum_ask",
+    "maximum_hard_loss",
+    "feature_windows_seconds[0]",
+    "feature_windows_seconds[1]",
+    "feature_windows_seconds[2]",
+    "feature_windows_seconds[3]",
+    "feature_windows_seconds[4]",
+    "feature_windows_seconds[5]",
+    "feature_windows_seconds[6]",
+    "tiers.early.start",
+    "tiers.early.end",
+    "tiers.early.time_multiplier",
+    "tiers.normal.start",
+    "tiers.normal.end",
+    "tiers.normal.time_multiplier",
+    "tiers.late.start",
+    "tiers.late.end",
+    "tiers.late.time_multiplier",
+)
 
 
 def _config_diff_evidence(baseline: Any, candidate: Any) -> dict[str, Any]:
@@ -722,29 +1026,72 @@ def _config_diff_evidence(baseline: Any, candidate: Any) -> dict[str, Any]:
     )
     allowed = [path for path in changed if _allowed_candidate_path(path)]
     forbidden = [path for path in changed if path not in allowed]
+    protected = list(_PROTECTED_GATE_PATHS)
+    changed_protected = [path for path in changed if _protected_candidate_path(path)]
+    unchanged_protected = [path for path in protected if path not in changed_protected]
     return {
         "changed_parameter_paths": changed,
         "allowed_changed_parameter_paths": allowed,
         "forbidden_changed_parameter_paths": forbidden,
+        "protected_gate_paths": protected,
+        "changed_protected_gate_paths": changed_protected,
+        "unchanged_protected_gate_paths": unchanged_protected,
         "forbidden_parameter_changed": bool(forbidden),
-        "safety_or_data_quality_gate_changed": bool(forbidden),
+        "safety_or_data_quality_gate_changed": bool(changed_protected),
     }
 
 
 def _allowed_candidate_path(path: str) -> bool:
-    return path in _CANDIDATE_TUNABLE_PATHS or path.startswith("calibration_overrides.")
+    return path in _CANDIDATE_TUNABLE_PATHS
+
+
+def _protected_candidate_path(path: str) -> bool:
+    if path in _PROTECTED_GATE_PATHS:
+        return True
+    # A candidate must not smuggle a production safety/data-quality control
+    # into otherwise tunable calibration metadata.
+    return path.rsplit(".", 1)[-1] in {
+        "app_mode",
+        "trading_enabled",
+        "execute",
+        "market_identity_readiness",
+        "reference_freshness",
+        "reference_source_freshness",
+        "book_freshness",
+        "sequence_integrity",
+        "canonical_market_readiness",
+        "canonical_reference_readiness",
+        "maximum_spread",
+        "minimum_executable_depth",
+        "decision_to_book_latency_ms",
+        "intent_expiry_seconds",
+        "one_entry_per_market",
+        "one_global_position",
+        "entry_attempts_per_market",
+        "boundary_cross_research_only",
+        "global_maximum_ask",
+        "maximum_hard_loss",
+    }
 
 
 def _flatten_payload(value: Any, prefix: str = "") -> dict[str, Any]:
+    # The fitted logistic artifact is an immutable model payload.  It is an
+    # approved single candidate parameter, not a free-form calibration branch.
+    if prefix == "logistic_model":
+        return {prefix: (type(value).__name__, value)}
     if isinstance(value, dict):
+        if not value:
+            return {prefix: ("dict", "<empty>")}
         flattened: dict[str, Any] = {}
         for key, item in value.items():
             path = f"{prefix}.{key}" if prefix else str(key)
             flattened.update(_flatten_payload(item, path))
         return flattened
     if isinstance(value, list):
-        return {
-            f"{prefix}[{index}]": item
-            for index, item in enumerate(value)
-        }
+        if not value:
+            return {prefix: ("list", "<empty>")}
+        flattened: dict[str, Any] = {}
+        for index, item in enumerate(value):
+            flattened.update(_flatten_payload(item, f"{prefix}[{index}]"))
+        return flattened
     return {prefix: (type(value).__name__, value)}

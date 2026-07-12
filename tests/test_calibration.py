@@ -17,6 +17,7 @@ from ape.research.calibration import (
     GovernanceError,
     bounded_candidate_specs,
     build_partition_manifest,
+    complete_search_space_snapshot,
     fit_l2_logistic,
     market_bootstrap,
     run_bounded_calibration,
@@ -67,6 +68,21 @@ def test_search_is_bounded_and_deterministic() -> None:
         candidate.candidate_id for candidate in second
     ]
     assert first[0].model_type == "BASELINE"
+
+
+def test_search_space_snapshot_is_reproducible_and_complete() -> None:
+    candidates = bounded_candidate_specs("calibration-snapshot")
+
+    first = complete_search_space_snapshot("calibration-snapshot", candidates)
+    second = complete_search_space_snapshot("calibration-snapshot", candidates)
+
+    assert first == second
+    assert first["snapshot_sha256"]
+    assert len(first["generated_candidates"]) == 256
+    assert first["maximum_candidate_count"] == 256
+    assert first["allowed_parameter_paths"]
+    assert first["protected_gate_paths"]
+    assert first["frequency_governance"]["hard_fill_min_for_challenger_per_100"] == "3"
 
 
 def test_logistic_is_reproducible_and_training_only() -> None:
@@ -150,6 +166,31 @@ def test_calibration_retains_replay_trades_for_each_evaluated_candidate(monkeypa
     )
 
     assert result.candidate_replay_trades == {candidate.candidate_id: (trade_marker,)}
+    assert result.candidate_partition_replay_trades[candidate.candidate_id] == {
+        "search_development": (trade_marker,),
+        "development_test": (trade_marker,),
+        "frozen_holdout": (trade_marker,),
+    }
+    assert result.candidate_metrics[candidate.candidate_id]["partition_metrics"] == {
+        "search_development": {
+            "bootstrap": {"net_pnl_per_market": {"lower": "0"}},
+            "dominant_regime_entry_share": "0",
+            "net_pnl_per_market": "0",
+            "entry_frequency_per_100_markets": "0",
+        },
+        "development_test": {
+            "bootstrap": {"net_pnl_per_market": {"lower": "0"}},
+            "dominant_regime_entry_share": "0",
+            "net_pnl_per_market": "0",
+            "entry_frequency_per_100_markets": "0",
+        },
+        "frozen_holdout": {
+            "bootstrap": {"net_pnl_per_market": {"lower": "0"}},
+            "dominant_regime_entry_share": "0",
+            "net_pnl_per_market": "0",
+            "entry_frequency_per_100_markets": "0",
+        },
+    }
 
 
 def test_logistic_candidate_replays_development_events_with_its_fitted_artifact(

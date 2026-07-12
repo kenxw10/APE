@@ -22,7 +22,10 @@ from ape.research.calibration import (
     transition_candidate,
 )
 from ape.research.fees import verified_kalshi_taker_fee_model
-from ape.research.fixtures import synthetic_btc15_fixture_markets
+from ape.research.fixtures import (
+    synthetic_btc15_fixture_dataset,
+    synthetic_btc15_fixture_markets,
+)
 from ape.research.replay import DeterministicReplayEngine, zero_entry_audit
 from ape.storage.retention import RETENTION_POLICIES, STATUS_TABLES
 from ape.strategy.momentum_v2 import (
@@ -182,4 +185,38 @@ def test_r15_documentation_versions_and_safety_contract_are_present() -> None:
         "low",
         "medium",
         "high",
+    }
+
+
+def test_r15_eighteen_market_fixture_has_real_event_time_sources_and_labels() -> None:
+    dataset = synthetic_btc15_fixture_dataset()
+    expected_types = {
+        "MARKET",
+        "REFERENCE",
+        "ORDERBOOK",
+        "PUBLIC_TRADE",
+        "FEATURE_SNAPSHOT",
+        "MARKET_LIFECYCLE",
+    }
+    by_market = {}
+    for event in dataset.events:
+        by_market.setdefault(event.market_ticker, []).append(event)
+
+    assert len(dataset.outcomes) == 18
+    assert set(by_market) == {outcome.market_ticker for outcome in dataset.outcomes}
+    assert all(
+        {event.event_type for event in events} >= expected_types
+        for events in by_market.values()
+    )
+    assert all(
+        outcome.quality_flags["counterfactual_labels"] for outcome in dataset.outcomes
+    )
+    assert {
+        outcome.quality_flags["scenario"] for outcome in dataset.outcomes
+    } >= {
+        "continuation_entry",
+        "boundary_cross_research_only",
+        "later_book_non_rescue",
+        "exit_retry_exhaustion",
+        "partial_coverage_frozen_holdout",
     }

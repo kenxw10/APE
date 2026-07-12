@@ -1,1 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="0" skipped="0" tests="1" time="6.774" timestamp="2026-07-11T23:45:36.434456-04:00" hostname="HannieZhou"><testcase classname="tests.test_research_api" name="test_research_routes_are_bounded_read_only_and_safe_without_data" time="1.666" /></testsuite></testsuites>

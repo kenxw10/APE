@@ -1,1 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="0" skipped="0" tests="1" time="1.418" timestamp="2026-07-11T23:42:49.451536-04:00" hostname="HannieZhou"><testcase classname="tests.test_db_session" name="test_plain_postgresql_url_uses_psycopg_driver_without_connecting" time="0.478" /></testsuite></testsuites>

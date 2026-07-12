@@ -22,6 +22,7 @@ from ape.research import (
 from ape.research.archive import archive_research_events, reconcile_market_outcomes
 from ape.research.calibration import (
     LIFECYCLE_DRAFT,
+    complete_search_space_snapshot,
     run_bounded_calibration,
 )
 from ape.research.replay import DeterministicReplayEngine, ReplayTrade
@@ -197,7 +198,10 @@ def run_research_cycle(
                     "dataset_hash": replay.dataset_hash,
                     "code_commit_sha": resolve_code_version(),
                     "random_seed": int(_hash(calibration_run_id)[:8], 16),
-                    "search_space_snapshot": {"candidate_count": len(calibration.candidates)},
+                    "search_space_snapshot": complete_search_space_snapshot(
+                        calibration_run_id,
+                        calibration.candidates,
+                    ),
                     "partition_manifest": calibration.partition_manifest,
                     "frozen_holdout_hash": calibration.partition_manifest.get("holdout_hash"),
                     "evaluated_candidate_count": len(calibration.candidates),
@@ -217,22 +221,35 @@ def run_research_cycle(
             )
             if calibration.status == "COMPLETED":
                 for candidate in calibration.candidates:
-                    candidate_trades = calibration.candidate_replay_trades.get(
-                        candidate.candidate_id, ()
+                    candidate_metrics = calibration.candidate_metrics.get(
+                        candidate.candidate_id,
+                        {},
+                    )
+                    candidate_partition_trades = (
+                        calibration.candidate_partition_replay_trades.get(
+                            candidate.candidate_id,
+                            {
+                                "search_development": calibration.candidate_replay_trades.get(
+                                    candidate.candidate_id,
+                                    (),
+                                )
+                            },
+                        )
                     )
                     if candidate.model_type == "BASELINE":
-                        for trade in candidate_trades:
-                            repository.insert_replay_trade(
-                                _replay_trade_values(
-                                    replay_run_id=run_id,
-                                    trade=trade,
-                                    candidate_id=candidate.candidate_id,
-                                    strategy_config_version_id=(
-                                        baseline.strategy_config_version_id
-                                    ),
-                                    evidence_partition="search_development",
+                        for partition, partition_trades in candidate_partition_trades.items():
+                            for trade in partition_trades:
+                                repository.insert_replay_trade(
+                                    _replay_trade_values(
+                                        replay_run_id=run_id,
+                                        trade=trade,
+                                        candidate_id=candidate.candidate_id,
+                                        strategy_config_version_id=(
+                                            baseline.strategy_config_version_id
+                                        ),
+                                        evidence_partition=partition,
+                                    )
                                 )
-                            )
                         continue
                     artifact = candidate.model_artifact or {}
                     config_version_id = f"research-{candidate.candidate_id}"
@@ -273,29 +290,26 @@ def run_research_cycle(
                             "feature_columns": list(candidate.feature_columns),
                             "model_artifact": artifact,
                             "model_artifact_checksum": _hash(artifact),
-                            "training_metrics": selected_metrics.get("training"),
-                            "validation_metrics": calibration.candidate_metrics.get(
-                                candidate.candidate_id
-                            ),
-                            "test_metrics": None,
-                            "holdout_metrics": selected_metrics.get("holdout")
-                            if candidate.candidate_id == calibration.selected_candidate_id
-                            else None,
+                            "training_metrics": candidate_metrics.get("training"),
+                            "validation_metrics": candidate_metrics,
+                            "test_metrics": candidate_metrics.get("development_test"),
+                            "holdout_metrics": candidate_metrics.get("holdout"),
                             "governance_report": None,
                             "lifecycle_state": LIFECYCLE_DRAFT,
                             "eligibility_status": "RESEARCH_ONLY",
                         }
                     )
-                    for trade in candidate_trades:
-                        repository.insert_replay_trade(
-                            _replay_trade_values(
-                                replay_run_id=run_id,
-                                trade=trade,
-                                candidate_id=candidate.candidate_id,
-                                strategy_config_version_id=config_version_id,
-                                evidence_partition="search_development",
+                    for partition, partition_trades in candidate_partition_trades.items():
+                        for trade in partition_trades:
+                            repository.insert_replay_trade(
+                                _replay_trade_values(
+                                    replay_run_id=run_id,
+                                    trade=trade,
+                                    candidate_id=candidate.candidate_id,
+                                    strategy_config_version_id=config_version_id,
+                                    evidence_partition=partition,
+                                )
                             )
-                        )
                     repository.advance_candidate_governance(
                         candidate_id=candidate.candidate_id,
                         actor="ape-research-worker",
