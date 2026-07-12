@@ -513,7 +513,7 @@ def run_bounded_calibration(
         outcome for outcome in outcomes if outcome.market_ticker in search_development_members
     ]
     labeled_rows, labeled_targets = _labeled_feature_rows(development_events, development_outcomes)
-    for candidate in candidates:
+    for index, candidate in enumerate(candidates):
         fold_metrics = _walk_forward_metrics(
             candidate,
             manifest,
@@ -529,18 +529,38 @@ def run_bounded_calibration(
                     "training_row_count": len(labeled_rows),
                 }
                 continue
-            values = _aggregate_fold_metrics(fold_metrics)
-            result = DeterministicReplayEngine(parameters=candidate.parameters).replay([])
-        else:
-            result = DeterministicReplayEngine(parameters=candidate.parameters).replay(
-                development_events, outcomes=development_outcomes
+            try:
+                artifact = fit_l2_logistic(
+                    labeled_rows,
+                    labeled_targets,
+                    l2=float((candidate.model_artifact or {}).get("l2", "1")),
+                )
+            except ValueError:
+                metrics[candidate.candidate_id] = {
+                    "status": "BLOCKED",
+                    "reason": "logistic_final_training_unavailable",
+                    "training_row_count": len(labeled_rows),
+                }
+                continue
+            candidate = replace(
+                candidate,
+                parameters={
+                    **candidate.parameters,
+                    "logistic_model": artifact,
+                    "logistic_probability_threshold": "0.50",
+                },
+                model_artifact=artifact,
             )
-            values = replay_metrics(
-                result.trades,
-                market_count=len(search_development),
-                calibration_run_id=calibration_run_id,
-                market_tickers=search_development,
-            )
+            candidates[index] = candidate
+        result = DeterministicReplayEngine(parameters=candidate.parameters).replay(
+            development_events, outcomes=development_outcomes
+        )
+        values = replay_metrics(
+            result.trades,
+            market_count=len(search_development),
+            calibration_run_id=calibration_run_id,
+            market_tickers=search_development,
+        )
         candidate_replay_trades[candidate.candidate_id] = result.trades
         lower = Decimal(values["bootstrap"]["net_pnl_per_market"]["lower"])
         penalties = adjusted_lower_confidence_expectancy(
@@ -566,30 +586,24 @@ def run_bounded_calibration(
         adjusted_lower = penalties["adjusted_lower_confidence_expectancy"]
         if adjusted_lower > best_lower:
             best_lower, selected = adjusted_lower, candidate.candidate_id
+    baseline_metrics = metrics.get("candidate-baseline-v2", {})
+    baseline_net = Decimal(str(baseline_metrics.get("net_pnl_per_market", "0")))
+    for candidate_id, candidate_metrics in metrics.items():
+        if candidate_metrics.get("status") != "EVALUATED":
+            continue
+        candidate_metrics["beats_baseline"] = Decimal(
+            str(candidate_metrics.get("net_pnl_per_market", "0"))
+        ) > baseline_net
+        candidate_metrics["verified_fee_model"] = True
+        candidate_metrics["candidate_replay_trade_count"] = len(
+            candidate_replay_trades.get(candidate_id, ())
+        )
+        candidate_metrics["candidate_closed_trade_count"] = sum(
+            getattr(trade, "status", None) == "CLOSED"
+            for trade in candidate_replay_trades.get(candidate_id, ())
+        )
     if selected is not None:
         chosen = next(candidate for candidate in candidates if candidate.candidate_id == selected)
-        if chosen.model_type == "L2_LOGISTIC":
-            artifact = fit_l2_logistic(
-                labeled_rows,
-                labeled_targets,
-                l2=float((chosen.model_artifact or {}).get("l2", "1")),
-            )
-            chosen = replace(
-                chosen,
-                parameters={
-                    **chosen.parameters,
-                    "logistic_model": artifact,
-                    "logistic_probability_threshold": "0.50",
-                },
-                model_artifact=artifact,
-            )
-            selected_index = next(
-                index
-                for index, item in enumerate(candidates)
-                if item.candidate_id == selected
-            )
-            candidates[selected_index] = chosen
-            metrics[selected]["model_artifact"] = artifact
         development_test = list(manifest["development_test"])
         development_test_members = set(development_test)
         test_result = DeterministicReplayEngine(parameters=chosen.parameters).replay(

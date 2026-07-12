@@ -42,6 +42,14 @@ def test_research_routes_are_bounded_read_only_and_safe_without_data(tmp_path) -
                 response = client.get(route)
                 assert response.status_code == 200
             assert client.get("/research/replay/runs/recent?limit=501").status_code == 422
+            assert (
+                client.get("/research/replay/trades/recent?candidate_id=bad%20value").status_code
+                == 422
+            )
+            assert (
+                client.get("/research/candidates/recent?lifecycle_state=LIVE_ACTIVE").status_code
+                == 422
+            )
             research_routes = [
                 route for route in app.routes if getattr(route, "path", "").startswith("/research/")
             ]
@@ -100,5 +108,46 @@ def test_research_status_normalizes_naive_sqlite_timestamps(tmp_path) -> None:
 
         assert status["heartbeat_fresh"] is True
         assert status["event_lag_seconds"] == 10
+    finally:
+        engine.dispose()
+
+
+def test_research_status_uses_worker_observed_enabled_state(tmp_path) -> None:
+    config = load_config(
+        {
+            "DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'research-worker-state.sqlite'}",
+            "RESEARCH_ENABLED": "false",
+            "TRADING_ENABLED": "false",
+            "EXECUTE": "false",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    factory = create_session_factory(engine)
+    at = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
+    try:
+        with factory() as session:
+            WorkerHeartbeatRepository(session).record_heartbeat(
+                WorkerHeartbeatInput(
+                    service_name=WORKER_SERVICE_RESEARCH,
+                    heartbeat_at=at,
+                    app_mode="DRY_RUN",
+                    is_safe=True,
+                    metadata={
+                        "research": {
+                            "enabled": True,
+                            "calibration_enabled": True,
+                            "worker_role": "research",
+                        }
+                    },
+                )
+            )
+            session.commit()
+
+        status = build_research_status(config, now=at + timedelta(seconds=10))
+
+        assert status["api_local_configuration"]["research_enabled"] is False
+        assert status["worker_observed_enabled"] is True
+        assert status["effective_enabled"] is True
     finally:
         engine.dispose()

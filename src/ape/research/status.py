@@ -23,6 +23,7 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
         },
         "worker_observed_configuration": None,
         "worker_observed_safety": None,
+        "worker_observed_enabled": None,
         "heartbeat_fresh": False,
         "effective_enabled": False,
         "worker_role": "research",
@@ -78,6 +79,7 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
                 if heartbeat
                 else None,
                 worker_observed_safety=heartbeat.is_safe if heartbeat is not None else None,
+                worker_observed_enabled=details.get("enabled") if heartbeat else None,
                 heartbeat_fresh=heartbeat_fresh,
                 worker_heartbeat={
                     "at": heartbeat_at.isoformat() if heartbeat_at else None,
@@ -111,7 +113,14 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
     return base
 
 
-def build_research_records(config: AppConfig, *, kind: str, limit: int) -> dict[str, Any]:
+def build_research_records(
+    config: AppConfig,
+    *,
+    kind: str,
+    limit: int,
+    filters: dict[str, str | None] | None = None,
+) -> dict[str, Any]:
+    filters = {key: value for key, value in (filters or {}).items() if value is not None}
     if not config.database_url:
         return {"items": [], "configured": False, "kind": kind}
     engine = create_engine_from_config(config)
@@ -126,11 +135,15 @@ def build_research_records(config: AppConfig, *, kind: str, limit: int) -> dict[
                     "coverage": repository.latest_coverage_report(),
                 }
             loaders = {
-                "replay_runs": lambda: repository.list_recent_replay_runs(limit),
-                "replay_trades": lambda: repository.list_recent_replay_trades(limit),
-                "calibration_runs": lambda: repository.list_recent_calibration_runs(limit),
-                "candidates": lambda: repository.list_recent_candidates(limit),
-                "governance_events": lambda: repository.list_recent_governance_events(limit),
+                "replay_runs": lambda: repository.list_recent_replay_runs(limit, **filters),
+                "replay_trades": lambda: repository.list_recent_replay_trades(limit, **filters),
+                "calibration_runs": lambda: repository.list_recent_calibration_runs(
+                    limit, **filters
+                ),
+                "candidates": lambda: repository.list_recent_candidates(limit, **filters),
+                "governance_events": lambda: repository.list_recent_governance_events(
+                    limit, **filters
+                ),
             }
             return {
                 "kind": kind,

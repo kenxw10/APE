@@ -9,10 +9,19 @@ from ape.config import load_config
 from ape.db.migrations import run_migrations
 from ape.db.models import ResearchReplayRun, ResearchReplayTrade, WorkerHeartbeat
 from ape.db.session import create_engine_from_config, create_session_factory
+from ape.repositories.inputs import StrategyConfigVersionInput
+from ape.repositories.strategy_v2 import StrategyV2Repository
 from ape.research import service as research_service
 from ape.research.calibration import CalibrationResult, CandidateSpec
 from ape.research.replay import ReplayTrade
+from ape.research.repository import ResearchRepository
 from ape.research.service import run_research_cycle
+from ape.strategy.momentum_v2 import (
+    REPLAY_SCHEMA_VERSION,
+    V2_ARCHITECTURE_VERSION,
+    V2_FEATURE_SCHEMA_VERSION,
+    V2_PARAMETERS,
+)
 from ape.worker.main import WORKER_ROLE_RESEARCH, run_worker
 from ape.worker.services import WORKER_SERVICE_RESEARCH
 
@@ -201,5 +210,131 @@ def test_research_cycle_persists_calibration_candidate_replay_trades(
             assert stored.strategy_config_version_id == "research-candidate-fixture"
             assert stored.market_ticker == trade.market_ticker
             assert stored.net_pnl_cents == Decimal("4")
+    finally:
+        engine.dispose()
+
+
+def test_automatic_governance_uses_persisted_candidate_evidence(tmp_path) -> None:
+    config = load_config({"DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'governance.sqlite'}"})
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    factory = create_session_factory(engine)
+    at = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
+    metrics = {
+        "status": "EVALUATED",
+        "closed_trade_count": 50,
+        "entry_frequency_per_100_markets": "10",
+        "signal_to_fill_rate": "0.5",
+        "volatility_regime_coverage": 2,
+        "liquidity_regime_coverage": 2,
+        "timing_tier_coverage": 2,
+        "dominant_regime_entry_share": "0.5",
+        "maximum_drawdown_cents": "10",
+        "net_pnl_per_market": "1",
+        "zero_entry_report": {
+            "unique_market_rates_per_100": {"qualified_setups": "5"}
+        },
+        "penalties": {"adjusted_lower_confidence_expectancy": "1"},
+    }
+    try:
+        with factory() as session:
+            repository = ResearchRepository(session)
+            repository.create_replay_run(
+                {
+                    "replay_run_id": "replay-governance",
+                    "status": "COMPLETED",
+                    "replay_engine_version": REPLAY_SCHEMA_VERSION,
+                    "label_schema_version": "labels",
+                    "code_commit_sha": "fixture",
+                    "dataset_hash": "fixture",
+                    "unique_market_count": 500,
+                    "event_count": 500,
+                    "cost_model": {"verified": True},
+                    "started_at": at,
+                }
+            )
+            repository.create_calibration_run(
+                {
+                    "calibration_run_id": "calibration-governance",
+                    "status": "COMPLETED",
+                    "calibration_schema_version": "fixture",
+                    "replay_run_id": "replay-governance",
+                    "dataset_hash": "fixture",
+                    "code_commit_sha": "fixture",
+                    "random_seed": 1,
+                    "partition_manifest": {
+                        "ordered_market_tickers": [f"M{index}" for index in range(500)]
+                    },
+                    "validation_metrics": {
+                        "candidate-baseline-v2": {"net_pnl_per_market": "0"}
+                    },
+                    "started_at": at,
+                }
+            )
+            StrategyV2Repository(session).ensure_config_version(
+                StrategyConfigVersionInput(
+                    strategy_config_version_id="config-governance",
+                    strategy_id="btc15_momentum_v2_candidate_governance",
+                    architecture_version=V2_ARCHITECTURE_VERSION,
+                    feature_schema_version=V2_FEATURE_SCHEMA_VERSION,
+                    parameter_snapshot=V2_PARAMETERS,
+                    parameter_hash="fixture",
+                    code_commit_sha="fixture",
+                    source="RESEARCH",
+                    lifecycle_state="DRAFT",
+                    candidate_id="candidate-governance",
+                )
+            )
+            repository.create_candidate(
+                {
+                    "candidate_id": "candidate-governance",
+                    "strategy_config_version_id": "config-governance",
+                    "calibration_run_id": "calibration-governance",
+                    "generated_strategy_id": "btc15_momentum_v2_candidate_governance",
+                    "architecture_version": V2_ARCHITECTURE_VERSION,
+                    "feature_schema_version": V2_FEATURE_SCHEMA_VERSION,
+                    "replay_schema_version": REPLAY_SCHEMA_VERSION,
+                    "model_type": "WEIGHTED_HEURISTIC",
+                    "parameter_snapshot": V2_PARAMETERS,
+                    "model_artifact_checksum": "fixture",
+                    "validation_metrics": metrics,
+                    "holdout_metrics": {
+                        "net_pnl_per_market": "1",
+                        "bootstrap": {"net_pnl_per_market": {"lower": "1"}},
+                    },
+                    "lifecycle_state": "DRAFT",
+                    "eligibility_status": "RESEARCH_ONLY",
+                }
+            )
+            for index in range(50):
+                repository.insert_replay_trade(
+                    {
+                        "trade_id": f"governance-trade-{index}",
+                        "replay_run_id": "replay-governance",
+                        "candidate_id": "candidate-governance",
+                        "strategy_config_version_id": "config-governance",
+                        "market_ticker": f"M{index}",
+                        "side": "YES",
+                        "status": "CLOSED",
+                    }
+                )
+
+            transitions = repository.advance_candidate_governance(
+                candidate_id="candidate-governance", actor="test"
+            )
+            assert [event.to_state for event in transitions] == [
+                "BACKTESTED",
+                "SHADOW",
+                "DRY_RUN_CHALLENGER",
+            ]
+            assert repository.get_candidate("candidate-governance").lifecycle_state == (
+                "DRY_RUN_CHALLENGER"
+            )
+            assert StrategyV2Repository(session).get_config_version(
+                "config-governance"
+            ).lifecycle_state == "DRY_RUN_CHALLENGER"
+            assert repository.advance_candidate_governance(
+                candidate_id="candidate-governance", actor="test"
+            ) == []
     finally:
         engine.dispose()

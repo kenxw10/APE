@@ -216,7 +216,21 @@ def run_research_cycle(
             )
             if calibration.status == "COMPLETED":
                 for candidate in calibration.candidates:
+                    candidate_trades = calibration.candidate_replay_trades.get(
+                        candidate.candidate_id, ()
+                    )
                     if candidate.model_type == "BASELINE":
+                        for trade in candidate_trades:
+                            repository.insert_replay_trade(
+                                _replay_trade_values(
+                                    replay_run_id=run_id,
+                                    trade=trade,
+                                    candidate_id=candidate.candidate_id,
+                                    strategy_config_version_id=(
+                                        baseline.strategy_config_version_id
+                                    ),
+                                )
+                            )
                         continue
                     artifact = candidate.model_artifact or {}
                     config_version_id = f"research-{candidate.candidate_id}"
@@ -270,9 +284,7 @@ def run_research_cycle(
                             "eligibility_status": "RESEARCH_ONLY",
                         }
                     )
-                    for trade in calibration.candidate_replay_trades.get(
-                        candidate.candidate_id, ()
-                    ):
+                    for trade in candidate_trades:
                         repository.insert_replay_trade(
                             _replay_trade_values(
                                 replay_run_id=run_id,
@@ -281,6 +293,10 @@ def run_research_cycle(
                                 strategy_config_version_id=config_version_id,
                             )
                         )
+                    repository.advance_candidate_governance(
+                        candidate_id=candidate.candidate_id,
+                        actor="ape-research-worker",
+                    )
     repository.finish_replay_run(replay_run, status="COMPLETED", finished_at=checked_at)
     return {
         "status": "completed",
@@ -303,6 +319,7 @@ def _replay_trade_values(
     strategy_config_version_id: str,
 ) -> dict[str, Any]:
     trade_prefix = replay_run_id if candidate_id is None else f"{replay_run_id}-{candidate_id}"
+    measurements = trade.measurements if isinstance(trade.measurements, dict) else {}
     return {
         "trade_id": f"{trade_prefix}-{trade.trade_id}",
         "replay_run_id": replay_run_id,
@@ -333,12 +350,14 @@ def _replay_trade_values(
         "entry_reason": trade.entry_reason,
         "exit_reason": trade.exit_reason,
         "timing_tier": trade.timing_tier,
-        "volatility_regime": None,
-        "liquidity_regime": None,
-        "entry_feature_snapshot_id": None,
-        "exit_feature_snapshot_id": None,
-        "lifecycle_version": "momentum_v2_lifecycle_v2",
-        "measurements": trade.measurements,
+        "volatility_regime": measurements.get("volatility_regime"),
+        "liquidity_regime": measurements.get("liquidity_regime"),
+        "entry_feature_snapshot_id": measurements.get("entry_feature_snapshot_id"),
+        "exit_feature_snapshot_id": measurements.get("exit_feature_snapshot_id"),
+        "lifecycle_version": measurements.get(
+            "lifecycle_version", "momentum_v2_lifecycle_v2"
+        ),
+        "measurements": measurements,
     }
 
 

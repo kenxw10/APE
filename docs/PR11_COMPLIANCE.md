@@ -17,9 +17,9 @@ compliant and must not be merged or deployed.
 | R8 chronological partitions and frozen holdout | Development-test and fold corrections are in progress; the required complete leakage-control proof is missing. | IN PROGRESS |
 | R9 bounded search and fold-specific logistic preprocessing | Canonical logistic feature names and fold-specific replay usage are in this batch. Full calibration evidence remains incomplete. | IN PROGRESS |
 | R10 objective, penalties, and bootstrap | Zero-trade market handling and regime aggregation corrections are in this batch. Full metric fixtures remain incomplete. | IN PROGRESS |
-| R11 automatic governance | Database-owned challenger checks are in this batch. Automatic candidate progression and immutable transition proof are not complete. | BLOCKED BY REMAINING IMPLEMENTATION |
-| R12 startup-only candidate pin | Candidate pin validation has been strengthened. Startup-only runtime and compatibility coverage remains incomplete. | IN PROGRESS |
-| R13 bounded read-only research APIs | Worker/API status separation is in progress. Required validated API filters are not implemented. | BLOCKED BY REMAINING IMPLEMENTATION |
+| R11 automatic governance | Candidate-specific persisted replay/calibration evidence now drives DRAFT -> BACKTESTED -> SHADOW -> DRY_RUN_CHALLENGER, with immutable events and database serialization. Final acceptance fixtures remain required. | IN PROGRESS |
+| R12 startup-only candidate pin | A configured candidate is resolved once when the strategy worker starts. It is intentionally not hot-reloaded; database or environment changes require a worker restart. | IN PROGRESS |
+| R13 bounded read-only research APIs | Validated bounded filters and worker-observed status are implemented. The complete R1-R15 behavioral matrix remains required. | IN PROGRESS |
 | R14 retention and durable evidence | Existing retention/status separation is retained. Generated-validation cleanup remains pending. | IN PROGRESS |
 | R15 fixtures, documentation, and deployment | The smoke script no longer fabricates successful governance evidence. The full event-time fixture suite and behavioral R1-R15 matrix are missing. | BLOCKED BY REMAINING IMPLEMENTATION |
 
@@ -42,14 +42,21 @@ PDF URL, so no PDF-byte hash is claimed.
 The following GPT-audit findings remain unresolved and prevent a compliance
 claim:
 
-1. Automatic governance transitions with candidate-specific immutable evidence.
-2. Candidate-attributed replay-trade persistence for every evaluated candidate.
-3. Validated bounded research API filters.
-4. Full event-time market fixtures.
-5. Complete behavioral R1-R15 acceptance matrix.
-6. Compliance-document cleanup outside this WIP correction.
-7. Generated validation-log, JUnit, and result-file cleanup.
-8. Any further failures discovered by the next prompt-to-diff audit.
+1. Full 18-market event-time fixture suite.
+2. Complete behavioral R1-R15 acceptance matrix.
+3. Generated validation-log, JUnit, and result-file cleanup.
+4. Final compliance and deployment documentation.
+5. Any further failures discovered by the next prompt-to-diff audit.
+
+## Accepted Candidate-Pin Boundary
+
+The active review suggestion to revalidate candidate pins on every observer
+evaluation is incompatible with the accepted PR 11 architecture. Candidate pins
+are immutable for a running strategy-worker process: they resolve at startup,
+never hot reload, and require a worker restart after any database or environment
+change. Invalid startup pins omit only the candidate and surface a
+candidate-specific blocker; they never alter the baseline V2, v1, or v1_fast
+variants.
 
 No paper trading, live execution, credentials, private API calls, deployment, or
 new migration is included in this remediation batch.

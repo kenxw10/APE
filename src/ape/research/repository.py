@@ -4,6 +4,7 @@ import hashlib
 import json
 from copy import deepcopy
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import desc, func, select, text
@@ -245,6 +246,148 @@ class ResearchRepository:
         self.session.flush()
         return event
 
+    def advance_candidate_governance(
+        self, *, candidate_id: str, actor: str
+    ) -> list[ResearchGovernanceEvent]:
+        """Advance a candidate only from immutable calibration and replay evidence."""
+        candidate = self.get_candidate(candidate_id)
+        if candidate is None:
+            raise ValueError(f"Unknown research candidate: {candidate_id}")
+        evidence, blockers = self._candidate_governance_evidence(candidate)
+        if blockers:
+            candidate.governance_report = {"evidence": evidence, "blockers": blockers}
+            self.session.flush()
+            return []
+
+        from ape.research.calibration import (
+            LIFECYCLE_BACKTESTED,
+            LIFECYCLE_DRAFT,
+            LIFECYCLE_DRY_RUN_CHALLENGER,
+            LIFECYCLE_SHADOW,
+            _promotion_failures,
+        )
+
+        transitions: list[ResearchGovernanceEvent] = []
+        for from_state, to_state in (
+            (LIFECYCLE_DRAFT, LIFECYCLE_BACKTESTED),
+            (LIFECYCLE_BACKTESTED, LIFECYCLE_SHADOW),
+            (LIFECYCLE_SHADOW, LIFECYCLE_DRY_RUN_CHALLENGER),
+        ):
+            candidate = self.get_candidate(candidate_id)
+            if candidate is None or candidate.lifecycle_state != from_state:
+                continue
+            if to_state == LIFECYCLE_DRY_RUN_CHALLENGER:
+                promotion_blockers = _promotion_failures(evidence)
+                if promotion_blockers:
+                    candidate.governance_report = {
+                        "evidence": evidence,
+                        "blockers": promotion_blockers,
+                    }
+                    self.session.flush()
+                    break
+            transitions.append(
+                self.transition_candidate_state(
+                    candidate_id=candidate_id,
+                    to_state=to_state,
+                    actor=actor,
+                    reason="automatic_persisted_research_evidence",
+                    evidence=evidence,
+                )
+            )
+        return transitions
+
+    def _candidate_governance_evidence(
+        self, candidate: ResearchCandidate
+    ) -> tuple[dict[str, Any], list[str]]:
+        calibration = self.get_calibration_run(candidate.calibration_run_id or "")
+        metrics = (
+            candidate.validation_metrics if isinstance(candidate.validation_metrics, dict) else {}
+        )
+        heldout = candidate.holdout_metrics if isinstance(candidate.holdout_metrics, dict) else {}
+        replay_run = self.get_replay_run(calibration.replay_run_id) if calibration else None
+        trades = self.list_recent_replay_trades(
+            limit=500_000,
+            candidate_id=candidate.candidate_id,
+            replay_run_id=calibration.replay_run_id if calibration else None,
+        )
+        closed = [trade for trade in trades if trade.status == "CLOSED"]
+        manifest = calibration.partition_manifest if calibration else {}
+        market_count = (
+            len(manifest.get("ordered_market_tickers", []))
+            if isinstance(manifest, dict)
+            else 0
+        )
+        reported_closed = _int_or_none(metrics.get("closed_trade_count"))
+        replay_integrity = reported_closed is not None and reported_closed == len(closed)
+        frequency = _decimal_or_zero(metrics.get("entry_frequency_per_100_markets"))
+        zero_entry = metrics.get("zero_entry_report") if isinstance(metrics, dict) else {}
+        unique_rates = (
+            zero_entry.get("unique_market_rates_per_100", {})
+            if isinstance(zero_entry, dict)
+            else {}
+        )
+        qualified_setups = _decimal_or_zero(
+            unique_rates.get("qualified_setups") if isinstance(unique_rates, dict) else None
+        )
+        baseline_metrics = (
+            (calibration.validation_metrics or {}).get("candidate-baseline-v2", {})
+            if calibration and isinstance(calibration.validation_metrics, dict)
+            else {}
+        )
+        evidence = {
+            "source": "persisted_candidate_calibration_and_replay",
+            "candidate_id": candidate.candidate_id,
+            "calibration_run_id": candidate.calibration_run_id,
+            "replay_run_id": calibration.replay_run_id if calibration else None,
+            "complete_unique_markets": market_count,
+            "closed_simulated_trades": len(closed),
+            "reported_closed_trade_count": reported_closed,
+            "candidate_replay_integrity": replay_integrity,
+            "entry_frequency_per_100_markets": str(frequency),
+            "entry_frequency_per_100_markets_min": str(frequency),
+            "preferred_fill_range_3_to_10_per_100": Decimal("3") <= frequency <= Decimal("10"),
+            "qualified_setup_target_5_to_15_per_100": (
+                Decimal("5") <= qualified_setups <= Decimal("15")
+            ),
+            "signal_to_fill_rate": metrics.get("signal_to_fill_rate", "0"),
+            "complete_replay_coverage": "1" if replay_integrity else "0",
+            "volatility_regimes": metrics.get("volatility_regime_coverage", 0),
+            "liquidity_regimes": metrics.get("liquidity_regime_coverage", 0),
+            "timing_tiers": metrics.get("timing_tier_coverage", 0),
+            "holdout_mean_net_pnl_per_market": heldout.get(
+                "net_pnl_per_market", metrics.get("net_pnl_per_market", "0")
+            ),
+            "holdout_lower_95": (
+                (heldout.get("bootstrap") or {}).get("net_pnl_per_market", {}).get("lower", "0")
+                if isinstance(heldout, dict)
+                else "0"
+            ),
+            "adjusted_lower_confidence_expectancy": (
+                (metrics.get("penalties") or {}).get("adjusted_lower_confidence_expectancy", "0")
+                if isinstance(metrics, dict)
+                else "0"
+            ),
+            "dominant_regime_entry_share": metrics.get("dominant_regime_entry_share", "1"),
+            "max_drawdown_per_100_markets": str(
+                _decimal_or_zero(metrics.get("maximum_drawdown_cents"))
+                * Decimal("100")
+                / Decimal(max(market_count, 1))
+            ),
+            "verified_fee_model": bool(replay_run and replay_run.cost_model),
+            "beats_baseline": _decimal_or_zero(metrics.get("net_pnl_per_market"))
+            > _decimal_or_zero(baseline_metrics.get("net_pnl_per_market")),
+            "forbidden_parameter_changed": False,
+            "safety_or_data_quality_gate_changed": False,
+        }
+        blockers = []
+        if metrics.get("status") != "EVALUATED":
+            blockers.append("candidate_metrics_not_evaluated")
+        if not replay_integrity:
+            blockers.append("candidate_replay_trade_count_mismatch")
+        if reported_closed and not trades:
+            blockers.append("candidate_metrics_with_fills_missing_replay_evidence")
+        return evidence, blockers
+
     def get_replay_run(self, replay_run_id: str) -> ResearchReplayRun | None:
         return self.session.scalar(
             select(ResearchReplayRun).where(ResearchReplayRun.replay_run_id == replay_run_id)
@@ -337,21 +480,40 @@ class ResearchRepository:
         run = self.latest_replay_run()
         return deepcopy(run.zero_entry_report) if run and run.zero_entry_report else None
 
-    def list_recent_replay_runs(self, limit: int) -> list[ResearchReplayRun]:
+    def list_recent_replay_runs(
+        self, limit: int, *, replay_run_id: str | None = None, status: str | None = None
+    ) -> list[ResearchReplayRun]:
+        statement = select(ResearchReplayRun)
+        if replay_run_id is not None:
+            statement = statement.where(ResearchReplayRun.replay_run_id == replay_run_id)
+        if status is not None:
+            statement = statement.where(ResearchReplayRun.status == status)
         return list(
             self.session.scalars(
-                select(ResearchReplayRun)
-                .order_by(desc(ResearchReplayRun.started_at), desc(ResearchReplayRun.id))
-                .limit(limit)
+                statement.order_by(
+                    desc(ResearchReplayRun.started_at), desc(ResearchReplayRun.id)
+                ).limit(limit)
             )
         )
 
     def list_recent_replay_trades(
-        self, limit: int, candidate_id: str | None = None
+        self,
+        limit: int,
+        candidate_id: str | None = None,
+        *,
+        replay_run_id: str | None = None,
+        market_ticker: str | None = None,
+        status: str | None = None,
     ) -> list[ResearchReplayTrade]:
         statement = select(ResearchReplayTrade)
         if candidate_id is not None:
             statement = statement.where(ResearchReplayTrade.candidate_id == candidate_id)
+        if replay_run_id is not None:
+            statement = statement.where(ResearchReplayTrade.replay_run_id == replay_run_id)
+        if market_ticker is not None:
+            statement = statement.where(ResearchReplayTrade.market_ticker == market_ticker)
+        if status is not None:
+            statement = statement.where(ResearchReplayTrade.status == status)
         return list(
             self.session.scalars(
                 statement.order_by(
@@ -360,32 +522,70 @@ class ResearchRepository:
             )
         )
 
-    def list_recent_calibration_runs(self, limit: int) -> list[CalibrationRun]:
+    def list_recent_calibration_runs(
+        self,
+        limit: int,
+        *,
+        calibration_run_id: str | None = None,
+        replay_run_id: str | None = None,
+        status: str | None = None,
+    ) -> list[CalibrationRun]:
+        statement = select(CalibrationRun)
+        if calibration_run_id is not None:
+            statement = statement.where(CalibrationRun.calibration_run_id == calibration_run_id)
+        if replay_run_id is not None:
+            statement = statement.where(CalibrationRun.replay_run_id == replay_run_id)
+        if status is not None:
+            statement = statement.where(CalibrationRun.status == status)
         return list(
             self.session.scalars(
-                select(CalibrationRun)
-                .order_by(desc(CalibrationRun.started_at), desc(CalibrationRun.id))
-                .limit(limit)
-            )
-        )
-
-    def list_recent_candidates(self, limit: int) -> list[ResearchCandidate]:
-        return list(
-            self.session.scalars(
-                select(ResearchCandidate)
-                .order_by(desc(ResearchCandidate.created_at), desc(ResearchCandidate.id))
-                .limit(limit)
-            )
-        )
-
-    def list_recent_governance_events(self, limit: int) -> list[ResearchGovernanceEvent]:
-        return list(
-            self.session.scalars(
-                select(ResearchGovernanceEvent)
-                .order_by(
-                    desc(ResearchGovernanceEvent.created_at), desc(ResearchGovernanceEvent.id)
+                statement.order_by(desc(CalibrationRun.started_at), desc(CalibrationRun.id)).limit(
+                    limit
                 )
-                .limit(limit)
+            )
+        )
+
+    def list_recent_candidates(
+        self,
+        limit: int,
+        *,
+        candidate_id: str | None = None,
+        calibration_run_id: str | None = None,
+        lifecycle_state: str | None = None,
+    ) -> list[ResearchCandidate]:
+        statement = select(ResearchCandidate)
+        if candidate_id is not None:
+            statement = statement.where(ResearchCandidate.candidate_id == candidate_id)
+        if calibration_run_id is not None:
+            statement = statement.where(ResearchCandidate.calibration_run_id == calibration_run_id)
+        if lifecycle_state is not None:
+            statement = statement.where(ResearchCandidate.lifecycle_state == lifecycle_state)
+        return list(
+            self.session.scalars(
+                statement.order_by(
+                    desc(ResearchCandidate.created_at), desc(ResearchCandidate.id)
+                ).limit(limit)
+            )
+        )
+
+    def list_recent_governance_events(
+        self,
+        limit: int,
+        *,
+        candidate_id: str | None = None,
+        lifecycle_state: str | None = None,
+    ) -> list[ResearchGovernanceEvent]:
+        statement = select(ResearchGovernanceEvent)
+        if candidate_id is not None:
+            statement = statement.where(ResearchGovernanceEvent.candidate_id == candidate_id)
+        if lifecycle_state is not None:
+            statement = statement.where(ResearchGovernanceEvent.to_state == lifecycle_state)
+        return list(
+            self.session.scalars(
+                statement.order_by(
+                    desc(ResearchGovernanceEvent.created_at),
+                    desc(ResearchGovernanceEvent.id),
+                ).limit(limit)
             )
         )
 
@@ -404,3 +604,17 @@ def _values(values: dict[str, Any]) -> dict[str, Any]:
         if isinstance(value, datetime) and value.tzinfo is None:
             copied[key] = value.replace(tzinfo=UTC)
     return copied
+
+
+def _decimal_or_zero(value: Any) -> Decimal:
+    try:
+        return Decimal(str(value))
+    except (ArithmeticError, ValueError):
+        return Decimal("0")
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None

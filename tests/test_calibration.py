@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from tests.test_research_helpers import at_base
@@ -149,6 +150,65 @@ def test_calibration_retains_replay_trades_for_each_evaluated_candidate(monkeypa
     )
 
     assert result.candidate_replay_trades == {candidate.candidate_id: (trade_marker,)}
+
+
+def test_logistic_candidate_replays_development_events_with_its_fitted_artifact(
+    monkeypatch,
+) -> None:
+    candidate = CandidateSpec(
+        "candidate-logistic",
+        "fixture-logistic",
+        "L2_LOGISTIC",
+        calibration.V2_PARAMETERS,
+        model_artifact={"l2": "1"},
+    )
+    trade = SimpleNamespace(status="CLOSED")
+    replayed: list[tuple[object, ...]] = []
+
+    class FakeReplayEngine:
+        def __init__(self, *, parameters) -> None:
+            assert parameters["logistic_model"] == {"checksum": "fitted"}
+
+        def replay(self, events, **_kwargs):
+            replayed.append(tuple(events))
+            return SimpleNamespace(trades=(trade,), zero_entry_report={})
+
+    def fake_metrics(*_args, **_kwargs):
+        return {
+            "bootstrap": {"net_pnl_per_market": {"lower": "1"}},
+            "dominant_regime_entry_share": "0",
+            "net_pnl_per_market": "1",
+            "entry_frequency_per_100_markets": "3",
+        }
+
+    event = SimpleNamespace(market_ticker="M0")
+    monkeypatch.setattr(calibration, "bounded_candidate_specs", lambda _run_id: (candidate,))
+    monkeypatch.setattr(calibration, "DeterministicReplayEngine", FakeReplayEngine)
+    monkeypatch.setattr(calibration, "replay_metrics", fake_metrics)
+    monkeypatch.setattr(
+        calibration,
+        "fit_l2_logistic",
+        lambda *_args, **_kwargs: {"checksum": "fitted"},
+    )
+    monkeypatch.setattr(
+        calibration,
+        "_walk_forward_metrics",
+        lambda *_args, **_kwargs: [{"net_pnl_per_market": "1"}],
+    )
+    monkeypatch.setattr(
+        calibration,
+        "_labeled_feature_rows",
+        lambda *_args, **_kwargs: ([{"return_5s": 1}], [1]),
+    )
+
+    result = run_bounded_calibration(
+        calibration_run_id="calibration-logistic",
+        events=[event],
+        outcomes=_outcomes(50),
+    )
+
+    assert result.candidate_replay_trades[candidate.candidate_id] == (trade,)
+    assert any(replayed_events for replayed_events in replayed)
 
 
 def test_governance_rejects_paper_live_transitions() -> None:

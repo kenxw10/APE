@@ -4,7 +4,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 import uvicorn
 from fastapi import FastAPI, Query
@@ -338,10 +338,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return build_research_status(settings)
 
     @app.get("/research/coverage/latest")
-    def research_coverage_latest(
-        limit: int = Query(default=100, ge=1, le=500),
-    ) -> dict[str, Any]:
-        return build_research_records(settings, kind="coverage", limit=limit)
+    def research_coverage_latest() -> dict[str, Any]:
+        return build_research_records(settings, kind="coverage", limit=1)
 
     @app.get("/research/zero-entry/latest")
     def research_zero_entry_latest() -> dict[str, Any]:
@@ -350,30 +348,91 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.get("/research/replay/runs/recent")
     def research_replay_runs_recent(
         limit: int = Query(default=100, ge=1, le=500),
+        replay_run_id: str | None = Query(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,128}$"),
+        status: Literal["RUNNING", "COMPLETED", "FAILED"] | None = None,
     ) -> dict[str, Any]:
-        return build_research_records(settings, kind="replay_runs", limit=limit)
+        return build_research_records(
+            settings,
+            kind="replay_runs",
+            limit=limit,
+            filters={"replay_run_id": replay_run_id, "status": status},
+        )
 
     @app.get("/research/replay/trades/recent")
     def research_replay_trades_recent(
         limit: int = Query(default=100, ge=1, le=500),
+        replay_run_id: str | None = Query(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,128}$"),
+        candidate_id: str | None = Query(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,128}$"),
+        market_ticker: str | None = Query(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,128}$"),
+        status: Literal["CLOSED", "ENTRY_EXPIRED", "ENTRY_NO_FILL"] | None = None,
     ) -> dict[str, Any]:
-        return build_research_records(settings, kind="replay_trades", limit=limit)
+        return build_research_records(
+            settings,
+            kind="replay_trades",
+            limit=limit,
+            filters={
+                "replay_run_id": replay_run_id,
+                "candidate_id": candidate_id,
+                "market_ticker": market_ticker,
+                "status": status,
+            },
+        )
 
     @app.get("/research/calibration/runs/recent")
     def research_calibration_runs_recent(
         limit: int = Query(default=100, ge=1, le=500),
+        calibration_run_id: str | None = Query(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,128}$"),
+        replay_run_id: str | None = Query(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,128}$"),
+        status: (
+            Literal["RUNNING", "COMPLETED", "INSUFFICIENT_DATA", "BLOCKED", "FAILED"]
+            | None
+        ) = None,
     ) -> dict[str, Any]:
-        return build_research_records(settings, kind="calibration_runs", limit=limit)
+        return build_research_records(
+            settings,
+            kind="calibration_runs",
+            limit=limit,
+            filters={
+                "calibration_run_id": calibration_run_id,
+                "replay_run_id": replay_run_id,
+                "status": status,
+            },
+        )
 
     @app.get("/research/candidates/recent")
-    def research_candidates_recent(limit: int = Query(default=100, ge=1, le=500)) -> dict[str, Any]:
-        return build_research_records(settings, kind="candidates", limit=limit)
+    def research_candidates_recent(
+        limit: int = Query(default=100, ge=1, le=500),
+        candidate_id: str | None = Query(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,128}$"),
+        calibration_run_id: str | None = Query(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,128}$"),
+        lifecycle_state: Literal[
+            "DRAFT", "BACKTESTED", "SHADOW", "DRY_RUN_CHALLENGER", "RETIRED"
+        ] | None = None,
+    ) -> dict[str, Any]:
+        return build_research_records(
+            settings,
+            kind="candidates",
+            limit=limit,
+            filters={
+                "candidate_id": candidate_id,
+                "calibration_run_id": calibration_run_id,
+                "lifecycle_state": lifecycle_state,
+            },
+        )
 
     @app.get("/research/governance/events/recent")
     def research_governance_events_recent(
         limit: int = Query(default=100, ge=1, le=500),
+        candidate_id: str | None = Query(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,128}$"),
+        lifecycle_state: Literal[
+            "DRAFT", "BACKTESTED", "SHADOW", "DRY_RUN_CHALLENGER", "RETIRED"
+        ] | None = None,
     ) -> dict[str, Any]:
-        return build_research_records(settings, kind="governance_events", limit=limit)
+        return build_research_records(
+            settings,
+            kind="governance_events",
+            limit=limit,
+            filters={"candidate_id": candidate_id, "lifecycle_state": lifecycle_state},
+        )
 
     @app.get("/ready", response_model=ReadinessResponse)
     def readiness() -> ReadinessResponse:
