@@ -49,6 +49,7 @@ from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.safety import assess_startup_safety
 from ape.storage import retention as retention_module
 from ape.storage.retention import (
+    RETENTION_POLICIES,
     RETENTION_SUCCESS,
     RETENTION_SUCCESS_PARTIAL,
     RETENTION_TABLE_NAMES,
@@ -77,6 +78,13 @@ def test_all_retention_policy_tables_are_repository_allowlisted() -> None:
     assert "strategy_position_outcomes" not in ALLOWED_RETENTION_TABLES
     assert "strategy_position_outcomes" in ALLOWED_STATUS_READ_TABLES
     assert "strategy_position_outcomes" not in ALLOWED_RAW_PAYLOAD_READ_TABLES
+    policies = {policy.table_name: policy for policy in RETENTION_POLICIES}
+    assert policies["research_replay_events"].retention_config_key == (
+        "storage_retention_research_replay_events_seconds"
+    )
+    assert policies["research_replay_trades"].retention_config_key == (
+        "storage_retention_research_replay_trades_seconds"
+    )
 
 
 def test_storage_status_reads_outcomes_without_authorizing_retention_mutation(

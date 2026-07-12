@@ -240,6 +240,12 @@ class StrategyFeatureSnapshotInput:
     contract_features: JsonPayload | None = None
     microstructure_features: JsonPayload | None = None
     execution_features: JsonPayload | None = None
+    complete_feature_vector: JsonPayload | None = None
+    feature_vector_hash: str | None = None
+    architecture_version: str | None = None
+    replay_schema_version: str | None = None
+    replay_readiness: str | None = None
+    replay_blockers: JsonPayload | None = None
 
 
 @dataclass(frozen=True)
@@ -252,6 +258,14 @@ class StrategyConfigVersionInput:
     parameter_hash: str
     code_commit_sha: str
     source: str = "BUILT_IN"
+    parent_config_version_id: str | None = None
+    calibration_run_id: str | None = None
+    lifecycle_state: str | None = None
+    approval_state: str | None = None
+    model_type: str | None = None
+    model_artifact_checksum: str | None = None
+    data_cutoff: datetime | None = None
+    candidate_id: str | None = None
 
 
 @dataclass(frozen=True)

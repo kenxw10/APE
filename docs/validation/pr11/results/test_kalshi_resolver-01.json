@@ -1,0 +1,45 @@
+{
+  "assigned_count": 11,
+  "command": [
+    "C:\\Python314\\python.exe",
+    "-m",
+    "pytest",
+    "-q",
+    "--junitxml",
+    "C:\\Users\\kenxw\\OneDrive\\Documents\\$APE\\docs\\validation\\pr11\\junit\\test_kalshi_resolver-01.xml",
+    "tests/test_kalshi_resolver.py::test_boundary_parser_rejects_structured_text_disagreement",
+    "tests/test_kalshi_resolver.py::test_boundary_parser_uses_text_fallback_when_structured_fields_are_absent",
+    "tests/test_kalshi_resolver.py::test_resolver_allows_open_filtered_market_without_status_field",
+    "tests/test_kalshi_resolver.py::test_resolver_does_not_select_nearest_inactive_market",
+    "tests/test_kalshi_resolver.py::test_resolver_handles_missing_credentials_as_not_configured",
+    "tests/test_kalshi_resolver.py::test_resolver_paginates_before_selecting_active_market",
+    "tests/test_kalshi_resolver.py::test_resolver_rejects_ambiguous_active_markets",
+    "tests/test_kalshi_resolver.py::test_resolver_rejects_explicit_non_tradable_status",
+    "tests/test_kalshi_resolver.py::test_resolver_rejects_explicit_series_mismatch",
+    "tests/test_kalshi_resolver.py::test_resolver_rejects_unparseable_boundary_but_persists_metadata",
+    "tests/test_kalshi_resolver.py::test_resolver_selects_active_btc15_market_and_uses_bounded_query"
+  ],
+  "duration_seconds": 7.413,
+  "exit_code": 0,
+  "id": "test_kalshi_resolver-01",
+  "junit": {
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0,
+    "tests": 11
+  },
+  "log": "docs\\validation\\pr11\\logs\\test_kalshi_resolver-01.log",
+  "nodeids": [
+    "tests/test_kalshi_resolver.py::test_boundary_parser_rejects_structured_text_disagreement",
+    "tests/test_kalshi_resolver.py::test_boundary_parser_uses_text_fallback_when_structured_fields_are_absent",
+    "tests/test_kalshi_resolver.py::test_resolver_allows_open_filtered_market_without_status_field",
+    "tests/test_kalshi_resolver.py::test_resolver_does_not_select_nearest_inactive_market",
+    "tests/test_kalshi_resolver.py::test_resolver_handles_missing_credentials_as_not_configured",
+    "tests/test_kalshi_resolver.py::test_resolver_paginates_before_selecting_active_market",
+    "tests/test_kalshi_resolver.py::test_resolver_rejects_ambiguous_active_markets",
+    "tests/test_kalshi_resolver.py::test_resolver_rejects_explicit_non_tradable_status",
+    "tests/test_kalshi_resolver.py::test_resolver_rejects_explicit_series_mismatch",
+    "tests/test_kalshi_resolver.py::test_resolver_rejects_unparseable_boundary_but_persists_metadata",
+    "tests/test_kalshi_resolver.py::test_resolver_selects_active_btc15_market_and_uses_bounded_query"
+  ]
+}

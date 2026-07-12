@@ -451,3 +451,11 @@ it with `Ctrl+C`. Railway production should use the dedicated role commands in
 - Railway cron
 - GitHub Actions
 - Real secrets
+
+## PR 11 Research Service
+
+PR 11 completes deterministic replay, zero-entry audit, counterfactual labeling,
+bounded calibration, and database-only candidate governance together. It preserves
+the current DRY_RUN baseline and never automatically loosens its thresholds. See
+[docs/RESEARCH_AND_CALIBRATION.md](docs/RESEARCH_AND_CALIBRATION.md) and create the
+single database-only Railway service documented in [docs/RAILWAY.md](docs/RAILWAY.md).

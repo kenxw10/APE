@@ -1,0 +1,39 @@
+{
+  "assigned_count": 8,
+  "command": [
+    "C:\\Python314\\python.exe",
+    "-m",
+    "pytest",
+    "-q",
+    "--junitxml",
+    "C:\\Users\\kenxw\\OneDrive\\Documents\\$APE\\docs\\validation\\pr11\\junit\\test_strategy_observer-02.xml",
+    "tests/test_strategy_observer.py::test_strategy_blocks_old_orderbook_when_invalid_update_warning_active",
+    "tests/test_strategy_observer.py::test_strategy_blocks_old_orderbook_when_sequence_reset_warning_active",
+    "tests/test_strategy_observer.py::test_strategy_blocks_old_orderbook_when_snapshot_resync_failed",
+    "tests/test_strategy_observer.py::test_strategy_blocks_old_orderbook_when_stream_is_stale",
+    "tests/test_strategy_observer.py::test_strategy_blocks_old_orderbook_without_initialized_proof",
+    "tests/test_strategy_observer.py::test_strategy_blocks_on_market_protocol_readiness_failures",
+    "tests/test_strategy_observer.py::test_strategy_blocks_weak_brti_impulse",
+    "tests/test_strategy_observer.py::test_strategy_blocks_when_brti_backend_age_exceeds_limit"
+  ],
+  "duration_seconds": 14.874,
+  "exit_code": 0,
+  "id": "test_strategy_observer-02",
+  "junit": {
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0,
+    "tests": 8
+  },
+  "log": "docs\\validation\\pr11\\logs\\test_strategy_observer-02.log",
+  "nodeids": [
+    "tests/test_strategy_observer.py::test_strategy_blocks_old_orderbook_when_invalid_update_warning_active",
+    "tests/test_strategy_observer.py::test_strategy_blocks_old_orderbook_when_sequence_reset_warning_active",
+    "tests/test_strategy_observer.py::test_strategy_blocks_old_orderbook_when_snapshot_resync_failed",
+    "tests/test_strategy_observer.py::test_strategy_blocks_old_orderbook_when_stream_is_stale",
+    "tests/test_strategy_observer.py::test_strategy_blocks_old_orderbook_without_initialized_proof",
+    "tests/test_strategy_observer.py::test_strategy_blocks_on_market_protocol_readiness_failures",
+    "tests/test_strategy_observer.py::test_strategy_blocks_weak_brti_impulse",
+    "tests/test_strategy_observer.py::test_strategy_blocks_when_brti_backend_age_exceeds_limit"
+  ]
+}

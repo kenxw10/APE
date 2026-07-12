@@ -1,0 +1,33 @@
+{
+  "assigned_count": 5,
+  "command": [
+    "C:\\Python314\\python.exe",
+    "-m",
+    "pytest",
+    "-q",
+    "--junitxml",
+    "C:\\Users\\kenxw\\OneDrive\\Documents\\$APE\\docs\\validation\\pr11\\junit\\test_calibration-01.xml",
+    "tests/test_calibration.py::test_bootstrap_uses_exactly_two_thousand_deterministic_resamples",
+    "tests/test_calibration.py::test_governance_rejects_paper_live_transitions",
+    "tests/test_calibration.py::test_logistic_is_reproducible_and_training_only",
+    "tests/test_calibration.py::test_market_partitions_keep_markets_whole_and_freeze_holdout",
+    "tests/test_calibration.py::test_search_is_bounded_and_deterministic"
+  ],
+  "duration_seconds": 4.508,
+  "exit_code": 0,
+  "id": "test_calibration-01",
+  "junit": {
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0,
+    "tests": 5
+  },
+  "log": "docs\\validation\\pr11\\logs\\test_calibration-01.log",
+  "nodeids": [
+    "tests/test_calibration.py::test_bootstrap_uses_exactly_two_thousand_deterministic_resamples",
+    "tests/test_calibration.py::test_governance_rejects_paper_live_transitions",
+    "tests/test_calibration.py::test_logistic_is_reproducible_and_training_only",
+    "tests/test_calibration.py::test_market_partitions_keep_markets_whole_and_freeze_holdout",
+    "tests/test_calibration.py::test_search_is_bounded_and_deterministic"
+  ]
+}

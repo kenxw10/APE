@@ -1,0 +1,33 @@
+{
+  "assigned_count": 5,
+  "command": [
+    "C:\\Python314\\python.exe",
+    "-m",
+    "pytest",
+    "-q",
+    "--junitxml",
+    "C:\\Users\\kenxw\\OneDrive\\Documents\\$APE\\docs\\validation\\pr11\\junit\\test_replay_engine-01.xml",
+    "tests/test_replay_engine.py::test_first_in_window_book_cannot_be_rescued_by_a_later_book",
+    "tests/test_replay_engine.py::test_first_in_window_exit_book_cannot_be_rescued_by_a_later_book",
+    "tests/test_replay_engine.py::test_persisted_vector_and_live_vector_evaluator_parity",
+    "tests/test_replay_engine.py::test_replay_is_order_deterministic_and_has_no_future_leakage",
+    "tests/test_replay_engine.py::test_zero_entry_audit_is_not_reported_as_healthy_selectivity"
+  ],
+  "duration_seconds": 5.113,
+  "exit_code": 0,
+  "id": "test_replay_engine-01",
+  "junit": {
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0,
+    "tests": 5
+  },
+  "log": "docs\\validation\\pr11\\logs\\test_replay_engine-01.log",
+  "nodeids": [
+    "tests/test_replay_engine.py::test_first_in_window_book_cannot_be_rescued_by_a_later_book",
+    "tests/test_replay_engine.py::test_first_in_window_exit_book_cannot_be_rescued_by_a_later_book",
+    "tests/test_replay_engine.py::test_persisted_vector_and_live_vector_evaluator_parity",
+    "tests/test_replay_engine.py::test_replay_is_order_deterministic_and_has_no_future_leakage",
+    "tests/test_replay_engine.py::test_zero_entry_audit_is_not_reported_as_healthy_selectivity"
+  ]
+}

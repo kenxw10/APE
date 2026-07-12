@@ -1,0 +1,39 @@
+tests/test_api_health.py: 14
+tests/test_calibration.py: 5
+tests/test_candidate_pin.py: 2
+tests/test_config.py: 48
+tests/test_db_schema.py: 5
+tests/test_db_session.py: 1
+tests/test_kalshi_auth.py: 4
+tests/test_kalshi_client.py: 6
+tests/test_kalshi_resolver.py: 11
+tests/test_kalshi_ws_client.py: 3
+tests/test_kalshi_ws_collector.py: 63
+tests/test_kalshi_ws_messages.py: 23
+tests/test_momentum_v2.py: 7
+tests/test_pr10a_scope_contract.py: 3
+tests/test_pr10b_scope_contract.py: 5
+tests/test_pr11_scope_contract.py: 14
+tests/test_railway_scripts.py: 5
+tests/test_reference_brti_messages.py: 7
+tests/test_reference_brti_status.py: 17
+tests/test_replay_engine.py: 5
+tests/test_repositories.py: 12
+tests/test_requirements.py: 1
+tests/test_research_api.py: 1
+tests/test_research_archive.py: 2
+tests/test_research_worker.py: 2
+tests/test_safety.py: 8
+tests/test_storage_api.py: 12
+tests/test_storage_retention.py: 21
+tests/test_strategy_api.py: 6
+tests/test_strategy_observer.py: 70
+tests/test_worker.py: 10
+tests/test_worker_roles.py: 1
+
+============================== warnings summary ===============================
+..\..\..\AppData\Roaming\Python\Python314\site-packages\fastapi\testclient.py:1
+  C:\Users\kenxw\AppData\Roaming\Python\Python314\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html

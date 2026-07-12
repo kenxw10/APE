@@ -1,0 +1,39 @@
+{
+  "assigned_count": 8,
+  "command": [
+    "C:\\Python314\\python.exe",
+    "-m",
+    "pytest",
+    "-q",
+    "--junitxml",
+    "C:\\Users\\kenxw\\OneDrive\\Documents\\$APE\\docs\\validation\\pr11\\junit\\test_strategy_observer-05.xml",
+    "tests/test_strategy_observer.py::test_strategy_entry_ask_at_max_is_eligible_and_intended_price_is_clamped",
+    "tests/test_strategy_observer.py::test_strategy_entry_ask_below_minimum_is_blocked_even_if_offset_reaches_minimum",
+    "tests/test_strategy_observer.py::test_strategy_gate_summary_blocks_contract_ask_pullback",
+    "tests/test_strategy_observer.py::test_strategy_gate_summary_blocks_insufficient_contract_history",
+    "tests/test_strategy_observer.py::test_strategy_gate_summary_blocks_unsafe_startup",
+    "tests/test_strategy_observer.py::test_strategy_gate_summary_marks_boundary_unevaluated_without_market",
+    "tests/test_strategy_observer.py::test_strategy_gate_trace_attributes_emitted_chop_block",
+    "tests/test_strategy_observer.py::test_strategy_keeps_background_snapshot_refresh_warning_only"
+  ],
+  "duration_seconds": 16.484,
+  "exit_code": 0,
+  "id": "test_strategy_observer-05",
+  "junit": {
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0,
+    "tests": 8
+  },
+  "log": "docs\\validation\\pr11\\logs\\test_strategy_observer-05.log",
+  "nodeids": [
+    "tests/test_strategy_observer.py::test_strategy_entry_ask_at_max_is_eligible_and_intended_price_is_clamped",
+    "tests/test_strategy_observer.py::test_strategy_entry_ask_below_minimum_is_blocked_even_if_offset_reaches_minimum",
+    "tests/test_strategy_observer.py::test_strategy_gate_summary_blocks_contract_ask_pullback",
+    "tests/test_strategy_observer.py::test_strategy_gate_summary_blocks_insufficient_contract_history",
+    "tests/test_strategy_observer.py::test_strategy_gate_summary_blocks_unsafe_startup",
+    "tests/test_strategy_observer.py::test_strategy_gate_summary_marks_boundary_unevaluated_without_market",
+    "tests/test_strategy_observer.py::test_strategy_gate_trace_attributes_emitted_chop_block",
+    "tests/test_strategy_observer.py::test_strategy_keeps_background_snapshot_refresh_warning_only"
+  ]
+}

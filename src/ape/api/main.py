@@ -69,6 +69,11 @@ from ape.models.strategy import (
     strategy_status_response,
     strategy_variants_comparison_response,
 )
+from ape.research.status import (
+    build_latest_zero_entry,
+    build_research_records,
+    build_research_status,
+)
 from ape.safety import SafetyAssessment, assert_startup_safe, assess_startup_safety
 from ape.storage.retention import build_storage_status
 from ape.strategy.observer import (
@@ -327,6 +332,48 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.get("/storage/status", response_model=StorageStatusResponse)
     def storage_status() -> StorageStatusResponse:
         return storage_status_response(build_storage_status(settings))
+
+    @app.get("/research/status")
+    def research_status() -> dict[str, Any]:
+        return build_research_status(settings)
+
+    @app.get("/research/coverage/latest")
+    def research_coverage_latest(
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict[str, Any]:
+        return build_research_records(settings, kind="coverage", limit=limit)
+
+    @app.get("/research/zero-entry/latest")
+    def research_zero_entry_latest() -> dict[str, Any]:
+        return build_latest_zero_entry(settings)
+
+    @app.get("/research/replay/runs/recent")
+    def research_replay_runs_recent(
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict[str, Any]:
+        return build_research_records(settings, kind="replay_runs", limit=limit)
+
+    @app.get("/research/replay/trades/recent")
+    def research_replay_trades_recent(
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict[str, Any]:
+        return build_research_records(settings, kind="replay_trades", limit=limit)
+
+    @app.get("/research/calibration/runs/recent")
+    def research_calibration_runs_recent(
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict[str, Any]:
+        return build_research_records(settings, kind="calibration_runs", limit=limit)
+
+    @app.get("/research/candidates/recent")
+    def research_candidates_recent(limit: int = Query(default=100, ge=1, le=500)) -> dict[str, Any]:
+        return build_research_records(settings, kind="candidates", limit=limit)
+
+    @app.get("/research/governance/events/recent")
+    def research_governance_events_recent(
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict[str, Any]:
+        return build_research_records(settings, kind="governance_events", limit=limit)
 
     @app.get("/ready", response_model=ReadinessResponse)
     def readiness() -> ReadinessResponse:

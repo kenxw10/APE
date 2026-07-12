@@ -87,6 +87,16 @@ def test_storage_status_reports_tables_without_retention_run(tmp_path) -> None:
         "markets",
     }
     assert table_names.count("strategy_position_outcomes") == 1
+    for table_name in (
+        "research_replay_events",
+        "research_replay_trades",
+        "research_market_outcomes",
+        "research_replay_runs",
+        "calibration_runs",
+        "research_candidates",
+        "research_governance_events",
+    ):
+        assert table_names.count(table_name) == 1
     outcome_stats = next(
         stat for stat in body["table_stats"] if stat["table_name"] == "strategy_position_outcomes"
     )
@@ -95,6 +105,20 @@ def test_storage_status_reports_tables_without_retention_run(tmp_path) -> None:
     assert outcome_stats["newest_row_at"] == "2026-07-11T12:05:00Z"
     assert outcome_stats["retention_seconds"] is None
     assert outcome_stats["raw_payload_retention_seconds"] is None
+    durable_research = {
+        stat["table_name"]: stat
+        for stat in body["table_stats"]
+        if stat["table_name"]
+        in {
+            "research_market_outcomes",
+            "research_replay_runs",
+            "calibration_runs",
+            "research_candidates",
+            "research_governance_events",
+        }
+    }
+    assert all(stat["retention_seconds"] is None for stat in durable_research.values())
+    assert all(stat["raw_payload_retention_seconds"] is None for stat in durable_research.values())
     assert "large-secret-payload" not in response.text
 
 

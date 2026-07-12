@@ -14,6 +14,7 @@ from ape.db.session import create_engine_from_config, create_session_factory
 from ape.kalshi.ws_collector import KalshiWsCollector, heartbeat_interval_seconds
 from ape.repositories.inputs import WorkerHeartbeatInput
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
+from ape.research.service import MarketOutcomeReconciler, ResearchWorker
 from ape.safety import SafetyError, assert_startup_safe, assess_startup_safety
 from ape.storage.retention import StorageRetentionWorker
 from ape.strategy.observer import StrategyObserver
@@ -21,6 +22,7 @@ from ape.worker.services import (
     WORKER_SERVICE_AGGREGATE,
     WORKER_SERVICE_MARKET_WS,
     WORKER_SERVICE_REFERENCE_BRTI,
+    WORKER_SERVICE_RESEARCH,
     WORKER_SERVICE_STORAGE_RETENTION,
     WORKER_SERVICE_STRATEGY,
 )
@@ -31,12 +33,14 @@ WORKER_ROLE_MARKET_DATA = "market-data"
 WORKER_ROLE_REFERENCE_BRTI = "reference-brti"
 WORKER_ROLE_STRATEGY = "strategy"
 WORKER_ROLE_MAINTENANCE = "maintenance"
+WORKER_ROLE_RESEARCH = "research"
 WORKER_ROLES = {
     WORKER_ROLE_ALL,
     WORKER_ROLE_MARKET_DATA,
     WORKER_ROLE_REFERENCE_BRTI,
     WORKER_ROLE_STRATEGY,
     WORKER_ROLE_MAINTENANCE,
+    WORKER_ROLE_RESEARCH,
 }
 
 
@@ -67,7 +71,7 @@ def run_worker(
         LOGGER.info(
             "Starting ape-worker env=%s app_mode=%s safety=%s db_configured=%s "
             "role=%s ws_enabled=%s brti_enabled=%s strategy_observer_enabled=%s "
-            "strategy_dry_run_enabled=%s storage_retention_enabled=%s",
+            "strategy_dry_run_enabled=%s storage_retention_enabled=%s research_enabled=%s",
             config.env,
             config.app_mode.value,
             "safe" if safety.is_safe else "blocked",
@@ -78,6 +82,7 @@ def run_worker(
             config.strategy_observer_enabled,
             config.strategy_dry_run_enabled,
             config.storage_retention_enabled,
+            config.research_enabled,
         )
 
         event = stop_event or threading.Event()
@@ -98,6 +103,7 @@ def run_worker(
             or _reference_worker_enabled(config)
             or config.strategy_observer_enabled
             or config.storage_retention_enabled
+            or config.research_enabled
         ):
             LOGGER.info("APE worker running enabled observer services.")
             tasks = []
@@ -109,6 +115,14 @@ def run_worker(
                     started_at=started_at,
                 )
                 tasks.append(collector.run(stop_event=event, max_cycles=max_iterations))
+            if config.kalshi_ws_enabled:
+                reconciler = MarketOutcomeReconciler(
+                    config=config,
+                    safety=safety,
+                    session_factory=session_factory,
+                    started_at=started_at,
+                )
+                tasks.append(reconciler.run(stop_event=event, max_iterations=max_iterations))
             if config.strategy_observer_enabled:
                 observer = StrategyObserver(
                     config=config,
@@ -125,6 +139,14 @@ def run_worker(
                     started_at=started_at,
                 )
                 tasks.append(retention.run(stop_event=event, max_iterations=max_iterations))
+            if config.research_enabled:
+                research = ResearchWorker(
+                    config=config,
+                    safety=safety,
+                    session_factory=session_factory,
+                    started_at=started_at,
+                )
+                tasks.append(research.run(stop_event=event, max_iterations=max_iterations))
             asyncio.run(
                 _run_enabled_observer_tasks(
                     *tasks,
@@ -207,7 +229,7 @@ def _record_idle_heartbeat(
                         "latest_position_id": None,
                         "warnings": ["strategy_dry_run_disabled"],
                         "blockers": [],
-                    }
+                    },
                 },
                 "storage": {
                     "retention": {
@@ -227,6 +249,14 @@ def _record_idle_heartbeat(
                         "blockers": [],
                     }
                 },
+                "research": {
+                    "enabled": config.research_enabled,
+                    "calibration_enabled": config.calibration_enabled,
+                    "worker_role": WORKER_ROLE_RESEARCH,
+                    "connection_state": "disabled",
+                    "warnings": ["research_disabled"] if not config.research_enabled else [],
+                    "blockers": [],
+                },
             }
             component_metadata = (
                 (WORKER_SERVICE_MARKET_WS, {"mode": "market_ws", "ws": metadata["ws"]}),
@@ -243,6 +273,13 @@ def _record_idle_heartbeat(
                     {"mode": "storage_retention", "storage": metadata["storage"]},
                 ),
             )
+            if config.research_enabled:
+                component_metadata += (
+                    (
+                        WORKER_SERVICE_RESEARCH,
+                        {"mode": "research", "research": metadata["research"]},
+                    ),
+                )
             for service_name, service_metadata in component_metadata:
                 repository.record_heartbeat(
                     WorkerHeartbeatInput(
@@ -283,10 +320,7 @@ def _idle_heartbeat_due(
 
 
 def _reference_worker_enabled(config: AppConfig) -> bool:
-    return (
-        config.kalshi_cfbenchmarks_enabled
-        and config.kalshi_cfbenchmarks_subscribe_on_worker
-    )
+    return config.kalshi_cfbenchmarks_enabled and config.kalshi_cfbenchmarks_subscribe_on_worker
 
 
 def _run_role_worker(
@@ -307,9 +341,14 @@ def _run_role_worker(
             session_factory=session_factory,
             started_at=started_at,
         )
-        tasks.append(
-            collector.run_market_data(stop_event=event, max_cycles=max_iterations)
+        tasks.append(collector.run_market_data(stop_event=event, max_cycles=max_iterations))
+        reconciler = MarketOutcomeReconciler(
+            config=config,
+            safety=safety,
+            session_factory=session_factory,
+            started_at=started_at,
         )
+        tasks.append(reconciler.run(stop_event=event, max_iterations=max_iterations))
     elif role == WORKER_ROLE_REFERENCE_BRTI:
         collector = KalshiWsCollector(
             config=config,
@@ -317,9 +356,7 @@ def _run_role_worker(
             session_factory=session_factory,
             started_at=started_at,
         )
-        tasks.append(
-            collector.run_reference_brti(stop_event=event, max_cycles=max_iterations)
-        )
+        tasks.append(collector.run_reference_brti(stop_event=event, max_cycles=max_iterations))
     elif role == WORKER_ROLE_STRATEGY:
         if config.strategy_observer_enabled:
             observer = StrategyObserver(
@@ -338,6 +375,15 @@ def _run_role_worker(
                 started_at=started_at,
             )
             tasks.append(retention.run(stop_event=event, max_iterations=max_iterations))
+    elif role == WORKER_ROLE_RESEARCH:
+        if config.research_enabled:
+            research = ResearchWorker(
+                config=config,
+                safety=safety,
+                session_factory=session_factory,
+                started_at=started_at,
+            )
+            tasks.append(research.run(stop_event=event, max_iterations=max_iterations))
 
     if not tasks:
         LOGGER.info("APE worker role=%s has no enabled eligible loop.", role)

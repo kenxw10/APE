@@ -14,7 +14,7 @@ DEFAULT_KALSHI_WS_BASE_URL = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
 DEFAULT_KALSHI_BTC15_SERIES_TICKER = "KXBTC15M"
 DEFAULT_KALSHI_RESOLVER_PARSER_VERSION = "btc15_resolver_v1"
 DEFAULT_KALSHI_CFBENCHMARKS_INDEX_IDS = ("BRTI",)
-WORKER_ROLES = {"all", "market-data", "reference-brti", "strategy", "maintenance"}
+WORKER_ROLES = {"all", "market-data", "reference-brti", "strategy", "maintenance", "research"}
 
 
 class ConfigError(ValueError):
@@ -100,6 +100,7 @@ class AppConfig:
     strategy_dry_run_enabled: bool = False
     strategy_challenger_enabled: bool = False
     strategy_v2_enabled: bool = False
+    strategy_v2_candidate_config_version_id: str | None = None
     strategy_id: str = "btc15_momentum_v1"
     strategy_dry_run_max_open_positions: int = 1
     strategy_dry_run_one_entry_per_market: bool = True
@@ -163,6 +164,11 @@ class AppConfig:
     storage_retention_strategy_trade_intents_seconds: int = 2592000
     storage_retention_strategy_position_marks_seconds: int = 2592000
     storage_retention_markets_seconds: int = 2592000
+    research_enabled: bool = False
+    calibration_enabled: bool = False
+    research_poll_seconds: float = 60.0
+    storage_retention_research_replay_events_seconds: int = 2592000
+    storage_retention_research_replay_trades_seconds: int = 15552000
     storage_retention_raw_payload_orderbook_seconds: int = 900
     storage_retention_raw_payload_public_trades_seconds: int = 3600
     storage_retention_raw_payload_reference_ticks_seconds: int = 3600
@@ -426,6 +432,9 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
             "STRATEGY_V2_ENABLED",
             _get(source, "STRATEGY_V2_ENABLED", "false"),
         ),
+        strategy_v2_candidate_config_version_id=_optional(
+            source.get("STRATEGY_V2_CANDIDATE_CONFIG_VERSION_ID")
+        ),
         strategy_id=_parse_required_text(
             "STRATEGY_ID",
             _get(source, "STRATEGY_ID", "btc15_momentum_v1"),
@@ -685,6 +694,21 @@ def load_config(env: Mapping[str, str] | None = None) -> AppConfig:
         storage_retention_markets_seconds=_parse_int(
             "STORAGE_RETENTION_MARKETS_SECONDS",
             _get(source, "STORAGE_RETENTION_MARKETS_SECONDS", "2592000"),
+        ),
+        research_enabled=_parse_bool("RESEARCH_ENABLED", _get(source, "RESEARCH_ENABLED", "false")),
+        calibration_enabled=_parse_bool(
+            "CALIBRATION_ENABLED", _get(source, "CALIBRATION_ENABLED", "false")
+        ),
+        research_poll_seconds=_parse_float(
+            "RESEARCH_POLL_SECONDS", _get(source, "RESEARCH_POLL_SECONDS", "60")
+        ),
+        storage_retention_research_replay_events_seconds=_parse_int(
+            "STORAGE_RETENTION_RESEARCH_REPLAY_EVENTS_SECONDS",
+            _get(source, "STORAGE_RETENTION_RESEARCH_REPLAY_EVENTS_SECONDS", "2592000"),
+        ),
+        storage_retention_research_replay_trades_seconds=_parse_int(
+            "STORAGE_RETENTION_RESEARCH_REPLAY_TRADES_SECONDS",
+            _get(source, "STORAGE_RETENTION_RESEARCH_REPLAY_TRADES_SECONDS", "15552000"),
         ),
         storage_retention_raw_payload_orderbook_seconds=_parse_int(
             "STORAGE_RETENTION_RAW_PAYLOAD_ORDERBOOK_SECONDS",

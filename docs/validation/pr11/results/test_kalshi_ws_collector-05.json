@@ -1,0 +1,39 @@
+{
+  "assigned_count": 8,
+  "command": [
+    "C:\\Python314\\python.exe",
+    "-m",
+    "pytest",
+    "-q",
+    "--junitxml",
+    "C:\\Users\\kenxw\\OneDrive\\Documents\\$APE\\docs\\validation\\pr11\\junit\\test_kalshi_ws_collector-05.xml",
+    "tests/test_kalshi_ws_collector.py::test_collector_matches_brti_subscribe_error_by_request_id_with_market_channels",
+    "tests/test_kalshi_ws_collector.py::test_collector_persists_control_protocol_events_without_sampling",
+    "tests/test_kalshi_ws_collector.py::test_collector_persists_malformed_brti_tick_without_crashing",
+    "tests/test_kalshi_ws_collector.py::test_collector_persists_market_liveness_heartbeats_before_stream_gate",
+    "tests/test_kalshi_ws_collector.py::test_collector_persists_valid_snapshot_after_invalid_live_like_snapshot",
+    "tests/test_kalshi_ws_collector.py::test_collector_preserves_recovery_metadata_when_orderbook_is_coalesced",
+    "tests/test_kalshi_ws_collector.py::test_collector_protocol_error_count_expires_after_recent_window",
+    "tests/test_kalshi_ws_collector.py::test_collector_re_resolves_when_market_window_closes"
+  ],
+  "duration_seconds": 20.74,
+  "exit_code": 0,
+  "id": "test_kalshi_ws_collector-05",
+  "junit": {
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0,
+    "tests": 8
+  },
+  "log": "docs\\validation\\pr11\\logs\\test_kalshi_ws_collector-05.log",
+  "nodeids": [
+    "tests/test_kalshi_ws_collector.py::test_collector_matches_brti_subscribe_error_by_request_id_with_market_channels",
+    "tests/test_kalshi_ws_collector.py::test_collector_persists_control_protocol_events_without_sampling",
+    "tests/test_kalshi_ws_collector.py::test_collector_persists_malformed_brti_tick_without_crashing",
+    "tests/test_kalshi_ws_collector.py::test_collector_persists_market_liveness_heartbeats_before_stream_gate",
+    "tests/test_kalshi_ws_collector.py::test_collector_persists_valid_snapshot_after_invalid_live_like_snapshot",
+    "tests/test_kalshi_ws_collector.py::test_collector_preserves_recovery_metadata_when_orderbook_is_coalesced",
+    "tests/test_kalshi_ws_collector.py::test_collector_protocol_error_count_expires_after_recent_window",
+    "tests/test_kalshi_ws_collector.py::test_collector_re_resolves_when_market_window_closes"
+  ]
+}

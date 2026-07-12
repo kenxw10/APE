@@ -1,0 +1,39 @@
+{
+  "assigned_count": 8,
+  "command": [
+    "C:\\Python314\\python.exe",
+    "-m",
+    "pytest",
+    "-q",
+    "--junitxml",
+    "C:\\Users\\kenxw\\OneDrive\\Documents\\$APE\\docs\\validation\\pr11\\junit\\test_kalshi_ws_collector-04.xml",
+    "tests/test_kalshi_ws_collector.py::test_collector_heartbeat_drops_stale_strategy_metadata_when_disabled",
+    "tests/test_kalshi_ws_collector.py::test_collector_heartbeat_preserves_strategy_metadata",
+    "tests/test_kalshi_ws_collector.py::test_collector_keeps_initialized_book_usable_during_quiet_snapshot_refresh",
+    "tests/test_kalshi_ws_collector.py::test_collector_keeps_latest_state_metrics_monotonic_after_retry",
+    "tests/test_kalshi_ws_collector.py::test_collector_malformed_brti_ticks_do_not_reset_valid_tick_timer",
+    "tests/test_kalshi_ws_collector.py::test_collector_market_roll_does_not_stop_dedicated_brti",
+    "tests/test_kalshi_ws_collector.py::test_collector_marks_queued_orderbook_pending_until_writer_commit",
+    "tests/test_kalshi_ws_collector.py::test_collector_marks_reconnect_completed_on_first_usable_message"
+  ],
+  "duration_seconds": 19.424,
+  "exit_code": 0,
+  "id": "test_kalshi_ws_collector-04",
+  "junit": {
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0,
+    "tests": 8
+  },
+  "log": "docs\\validation\\pr11\\logs\\test_kalshi_ws_collector-04.log",
+  "nodeids": [
+    "tests/test_kalshi_ws_collector.py::test_collector_heartbeat_drops_stale_strategy_metadata_when_disabled",
+    "tests/test_kalshi_ws_collector.py::test_collector_heartbeat_preserves_strategy_metadata",
+    "tests/test_kalshi_ws_collector.py::test_collector_keeps_initialized_book_usable_during_quiet_snapshot_refresh",
+    "tests/test_kalshi_ws_collector.py::test_collector_keeps_latest_state_metrics_monotonic_after_retry",
+    "tests/test_kalshi_ws_collector.py::test_collector_malformed_brti_ticks_do_not_reset_valid_tick_timer",
+    "tests/test_kalshi_ws_collector.py::test_collector_market_roll_does_not_stop_dedicated_brti",
+    "tests/test_kalshi_ws_collector.py::test_collector_marks_queued_orderbook_pending_until_writer_commit",
+    "tests/test_kalshi_ws_collector.py::test_collector_marks_reconnect_completed_on_first_usable_message"
+  ]
+}

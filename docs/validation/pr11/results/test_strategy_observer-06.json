@@ -1,0 +1,39 @@
+{
+  "assigned_count": 8,
+  "command": [
+    "C:\\Python314\\python.exe",
+    "-m",
+    "pytest",
+    "-q",
+    "--junitxml",
+    "C:\\Users\\kenxw\\OneDrive\\Documents\\$APE\\docs\\validation\\pr11\\junit\\test_strategy_observer-06.xml",
+    "tests/test_strategy_observer.py::test_strategy_keeps_hard_brti_age_block_when_trade_ready_fresh_relaxed",
+    "tests/test_strategy_observer.py::test_strategy_observer_blocks_unusable_desired_book",
+    "tests/test_strategy_observer.py::test_strategy_observer_evaluates_observer_only_market",
+    "tests/test_strategy_observer.py::test_strategy_observer_heartbeat_drops_stale_collector_metadata_when_disabled",
+    "tests/test_strategy_observer.py::test_strategy_observer_persists_one_feature_snapshot_and_config_attribution",
+    "tests/test_strategy_observer.py::test_strategy_observer_prioritizes_reference_before_book",
+    "tests/test_strategy_observer.py::test_strategy_observer_runtime_records_decision_and_heartbeat",
+    "tests/test_strategy_observer.py::test_strategy_prefers_component_liveness_over_stale_aggregate"
+  ],
+  "duration_seconds": 16.923,
+  "exit_code": 0,
+  "id": "test_strategy_observer-06",
+  "junit": {
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0,
+    "tests": 8
+  },
+  "log": "docs\\validation\\pr11\\logs\\test_strategy_observer-06.log",
+  "nodeids": [
+    "tests/test_strategy_observer.py::test_strategy_keeps_hard_brti_age_block_when_trade_ready_fresh_relaxed",
+    "tests/test_strategy_observer.py::test_strategy_observer_blocks_unusable_desired_book",
+    "tests/test_strategy_observer.py::test_strategy_observer_evaluates_observer_only_market",
+    "tests/test_strategy_observer.py::test_strategy_observer_heartbeat_drops_stale_collector_metadata_when_disabled",
+    "tests/test_strategy_observer.py::test_strategy_observer_persists_one_feature_snapshot_and_config_attribution",
+    "tests/test_strategy_observer.py::test_strategy_observer_prioritizes_reference_before_book",
+    "tests/test_strategy_observer.py::test_strategy_observer_runtime_records_decision_and_heartbeat",
+    "tests/test_strategy_observer.py::test_strategy_prefers_component_liveness_over_stale_aggregate"
+  ]
+}

@@ -1,0 +1,7 @@
+{
+    "command":  "python -m pytest --collect-only -q",
+    "displayed_file_rows":  32,
+    "collected":  394,
+    "manifest":  394,
+    "matches_manifest":  true
+}

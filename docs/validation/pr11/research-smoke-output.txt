@@ -1,0 +1,179 @@
+{
+  "archive": {
+    "complete_frame_count": 5,
+    "complete_markets": 1,
+    "earliest_event_time": "2026-07-11T12:00:00+00:00",
+    "event_count": 5,
+    "event_counts_by_type": {
+      "FEATURE_SNAPSHOT": 1,
+      "MARKET": 1,
+      "ORDERBOOK": 2,
+      "REFERENCE": 1
+    },
+    "latest_event_time": "2026-07-12T03:58:09.332553+00:00",
+    "minimum_coverage": 0.00111111,
+    "partial_frame_count": 0,
+    "replay_eligibility_blockers": [
+      "partial_feature_vectors_excluded_from_executable_calibration"
+    ],
+    "source_retention_limitations": [
+      "archive_contains_only_source_rows_available_before_archive_retention"
+    ],
+    "unique_markets": 1,
+    "unusable_frame_count": 0
+  },
+  "baseline_replay": {
+    "all_blocker_combinations": {
+      "v2_candidate_mode_not_enabled": 1
+    },
+    "candidate_mode_distribution": {
+      "BOUNDARY_CROSS_HOLD": 1
+    },
+    "decision_states": {
+      "V2_HARD_GATE_BLOCKED": 1
+    },
+    "depth_distribution": [
+      "3"
+    ],
+    "desired_ask_distribution": [
+      "0.60"
+    ],
+    "edge_margin_distribution": [
+      "0.75"
+    ],
+    "entries_per_100_markets": "0.00",
+    "first_blockers": {
+      "v2_candidate_mode_not_enabled": 1
+    },
+    "frequency_classification": "ZERO_ENTRY_UNVALIDATABLE",
+    "hard_gate_count_distance": {
+      "one": 1,
+      "three_or_more": 0,
+      "two": 0,
+      "zero": 0
+    },
+    "market_count": 1,
+    "markets_with_signal_but_no_fill": [],
+    "markets_without_eligible_continuation": [
+      "M1"
+    ],
+    "one_second_row_statistics": {
+      "sample_count": 1
+    },
+    "per_market_maxima": {
+      "M1": {
+        "maximum_edge": "2.25",
+        "maximum_score": "88.46"
+      }
+    },
+    "pipeline": {
+      "all_samples": 1,
+      "closed": 0,
+      "continuation": 0,
+      "edge": 0,
+      "exit": 0,
+      "exit_fill": 0,
+      "exit_intent": 0,
+      "fill": 0,
+      "hard_gates": 0,
+      "intent": 0,
+      "opened": 0,
+      "prerequisites_ready": 1,
+      "score": 0,
+      "side": 1,
+      "signal": 0,
+      "timing": 1
+    },
+    "pipeline_percentages": {
+      "all_samples": "100.00",
+      "closed": "0.00",
+      "continuation": "0.00",
+      "edge": "0.00",
+      "exit": "0.00",
+      "exit_fill": "0.00",
+      "exit_intent": "0.00",
+      "fill": "0.00",
+      "hard_gates": "0.00",
+      "intent": "0.00",
+      "opened": "0.00",
+      "prerequisites_ready": "100.00",
+      "score": "0.00",
+      "side": "100.00",
+      "signal": "0.00",
+      "timing": "100.00"
+    },
+    "score_margin_distribution": [
+      "18.46"
+    ],
+    "spread_distribution": [
+      "2"
+    ],
+    "timing_tier_distribution": {
+      "normal": 1
+    },
+    "top_near_miss_samples": [
+      {
+        "blockers": [
+          "v2_candidate_mode_not_enabled"
+        ],
+        "edge_margin": "0.75",
+        "market_ticker": "M1",
+        "score_margin": "18.46",
+        "state": "V2_HARD_GATE_BLOCKED"
+      }
+    ],
+    "unique_market_statistics": {
+      "market_count": 1
+    },
+    "validation_status": "UNVALIDATABLE"
+  },
+  "bootstrap": {
+    "lower": "-1.0",
+    "mean": "-0.0245",
+    "resamples": "2000",
+    "upper": "1.0"
+  },
+  "bounded_candidate_count": 256,
+  "candidate_closed_trades": 1,
+  "governance_promoted_to": "DRY_RUN_CHALLENGER",
+  "labels": {
+    "smoke-feature": {
+      "brti_15s": null,
+      "brti_30s": null,
+      "brti_5s": "62010.00000000",
+      "brti_60s": null,
+      "entry_at": "2026-07-11T12:00:00.600000+00:00",
+      "entry_fillable": true,
+      "entry_price": "0.60000000",
+      "fee_model": {
+        "formula": "ceil(0.07 * contracts * price * (1 - price), $0.01)",
+        "name": "kalshi_general_taker_fee",
+        "schedule_version": "2026-02-05",
+        "source": "https://kalshi.com/docs/kalshi-fee-schedule.pdf",
+        "source_checksum": "dc79b58ad32989097fb2dca0ea62adc80d3f1f3c9fa5fa642478a8a7b856f33e"
+      },
+      "final_minute_mark": null,
+      "first_book_ask": "0.60000000",
+      "first_book_ask_depth": "1.00000000",
+      "gross_markout_15s_cents": null,
+      "gross_markout_30s_cents": null,
+      "gross_markout_5s_cents": "5.00000000",
+      "gross_markout_60s_cents": null,
+      "mae_cents": "-2.00000000",
+      "mfe_cents": "5.00000000",
+      "net_markout_15s_cents": null,
+      "net_markout_30s_cents": null,
+      "net_markout_5s_cents": "1.00000000",
+      "net_markout_60s_cents": null,
+      "settlement_payout": "1",
+      "time_to_mae_ms": 0,
+      "time_to_mfe_ms": 4400
+    }
+  },
+  "paper_live_transitions_failed": [
+    "PAPER_CANDIDATE",
+    "LIVE_CANDIDATE"
+  ],
+  "partition_manifest_hash": "bb3628ec1efbf078c0e95f3447de978fcfb313e7c2285e878f289b7e00141316",
+  "under_sampled_calibration": "INSUFFICIENT_DATA"
+}

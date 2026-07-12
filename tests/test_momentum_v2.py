@@ -142,6 +142,81 @@ def test_boundary_cross_hold_is_research_only_and_continuation_can_enter(monkeyp
     assert continuation_result.intended_entry_price is not None
 
 
+def test_live_evaluation_and_persisted_feature_vector_have_exact_parity(monkeypatch) -> None:
+    evaluated_at = datetime(2026, 7, 11, 12, 10, tzinfo=UTC)
+    context = StrategyEvaluationContext(
+        evaluated_at=evaluated_at,
+        market=Market(
+            market_ticker="KXBTC15M-PARITY",
+            open_time=evaluated_at - timedelta(minutes=5),
+            close_time=evaluated_at + timedelta(minutes=10),
+        ),
+        boundary=Decimal("62000"),
+        boundary_source=None,
+        reference_tick=None,
+        orderbook=None,
+        latest_trade=None,
+        reference_ticks=(),
+        orderbook_history=(),
+        recent_trades=(),
+    )
+    features = {
+        "candidate_side": "YES",
+        "candidate_mode": "CONTINUATION",
+        "quality_state": {"market_ready": True, "reference_ready": True, "book_ready": True},
+        "distance_bps": Decimal("2"),
+        "fast_impulse_active": True,
+        "retrace_fraction": Decimal("0.10"),
+        "reversal_beyond_origin": False,
+        "boundary_crosses_90s": 0,
+        "return_5s": Decimal("1"),
+        "return_15s": Decimal("2"),
+        "return_30s": Decimal("3"),
+        "return_60s": Decimal("0"),
+        "return_120s": Decimal("0"),
+        "contract_move_15s_cents": Decimal("0"),
+        "contract_move_30s_cents": Decimal("0"),
+        "persistent_adverse_microstructure": False,
+        "desired_ask": Decimal("0.60"),
+        "desired_spread_cents": Decimal("2"),
+        "desired_ask_depth": Decimal("2"),
+    }
+    monkeypatch.setattr(momentum_v2, "_features", lambda _context, *, config: features)
+    monkeypatch.setattr(momentum_v2, "_score", lambda _features, _tier: (Decimal("90"), {}))
+    monkeypatch.setattr(momentum_v2, "_edge", lambda _features: Decimal("2"))
+    monkeypatch.setattr(momentum_v2, "_timing_tier", lambda _open, _left: "normal")
+
+    live = momentum_v2.evaluate_momentum_v2(context, config=load_config({}))
+    vector = momentum_v2.build_momentum_v2_feature_vector(context, config=load_config({}))
+    persisted = momentum_v2.evaluate_momentum_v2_feature_vector(vector)
+
+    assert (
+        live.state,
+        live.reason,
+        live.blockers,
+        live.warnings,
+        live.candidate_side,
+        live.candidate_mode,
+        live.timing_tier,
+        live.score,
+        live.score_threshold,
+        live.edge_lower_bound_cents,
+        live.intended_entry_price,
+    ) == (
+        persisted.state,
+        persisted.reason,
+        persisted.blockers,
+        persisted.warnings,
+        persisted.candidate_side,
+        persisted.candidate_mode,
+        persisted.timing_tier,
+        persisted.score,
+        persisted.score_threshold,
+        persisted.edge_lower_bound_cents,
+        persisted.intended_entry_price,
+    )
+
+
 def test_v2_blocks_stale_persisted_reference_and_orderbook() -> None:
     evaluated_at = datetime(2026, 7, 11, 12, 10, tzinfo=UTC)
     stale_at = evaluated_at - timedelta(milliseconds=2_001)

@@ -1,0 +1,27 @@
+{
+  "assigned_count": 2,
+  "command": [
+    "C:\\Python314\\python.exe",
+    "-m",
+    "pytest",
+    "-q",
+    "--junitxml",
+    "C:\\Users\\kenxw\\OneDrive\\Documents\\$APE\\docs\\validation\\pr11\\junit\\test_research_archive-01.xml",
+    "tests/test_research_archive.py::test_archive_is_idempotent_and_keeps_only_normalized_market_values",
+    "tests/test_research_archive.py::test_counterfactual_label_uses_the_first_in_window_executable_book"
+  ],
+  "duration_seconds": 5.951,
+  "exit_code": 0,
+  "id": "test_research_archive-01",
+  "junit": {
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0,
+    "tests": 2
+  },
+  "log": "docs\\validation\\pr11\\logs\\test_research_archive-01.log",
+  "nodeids": [
+    "tests/test_research_archive.py::test_archive_is_idempotent_and_keeps_only_normalized_market_values",
+    "tests/test_research_archive.py::test_counterfactual_label_uses_the_first_in_window_executable_book"
+  ]
+}

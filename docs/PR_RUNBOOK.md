@@ -586,3 +586,19 @@ $safety
   market transport, and BRTI `stale_transport` remain hard regressions.
 - Confirm `/safety` still reports `trading_enabled=false`, `execute=false`, and
   no unsafe live/paper behavior.
+
+## PR 11 Research Validation
+
+After the database migration and research worker are running, use only read-only
+checks:
+
+```powershell
+Invoke-RestMethod https://ape-api-production.up.railway.app/research/status
+Invoke-RestMethod https://ape-api-production.up.railway.app/research/coverage/latest
+Invoke-RestMethod https://ape-api-production.up.railway.app/research/zero-entry/latest
+Invoke-RestMethod "https://ape-api-production.up.railway.app/research/replay/runs/recent?limit=100"
+Invoke-RestMethod "https://ape-api-production.up.railway.app/research/calibration/runs/recent?limit=100"
+```
+
+Do not enable paper or live modes, do not give the research worker private Kalshi
+credentials, and do not set a candidate pin until a later explicit operator decision.

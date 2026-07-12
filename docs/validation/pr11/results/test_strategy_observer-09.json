@@ -1,0 +1,35 @@
+{
+  "assigned_count": 6,
+  "command": [
+    "C:\\Python314\\python.exe",
+    "-m",
+    "pytest",
+    "-q",
+    "--junitxml",
+    "C:\\Users\\kenxw\\OneDrive\\Documents\\$APE\\docs\\validation\\pr11\\junit\\test_strategy_observer-09.xml",
+    "tests/test_strategy_observer.py::test_v2_manages_open_positions_without_an_active_market",
+    "tests/test_strategy_observer.py::test_v2_pending_intent_resolves_without_current_candidate_side",
+    "tests/test_strategy_observer.py::test_v2_position_mark_uses_the_held_side_bid",
+    "tests/test_strategy_observer.py::test_v2_resolves_only_the_first_post_delay_orderbook",
+    "tests/test_strategy_observer.py::test_v2_sweeps_expired_intents_without_an_active_market",
+    "tests/test_strategy_observer.py::test_variants_receive_one_shared_context_per_iteration"
+  ],
+  "duration_seconds": 13.588,
+  "exit_code": 0,
+  "id": "test_strategy_observer-09",
+  "junit": {
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0,
+    "tests": 6
+  },
+  "log": "docs\\validation\\pr11\\logs\\test_strategy_observer-09.log",
+  "nodeids": [
+    "tests/test_strategy_observer.py::test_v2_manages_open_positions_without_an_active_market",
+    "tests/test_strategy_observer.py::test_v2_pending_intent_resolves_without_current_candidate_side",
+    "tests/test_strategy_observer.py::test_v2_position_mark_uses_the_held_side_bid",
+    "tests/test_strategy_observer.py::test_v2_resolves_only_the_first_post_delay_orderbook",
+    "tests/test_strategy_observer.py::test_v2_sweeps_expired_intents_without_an_active_market",
+    "tests/test_strategy_observer.py::test_variants_receive_one_shared_context_per_iteration"
+  ]
+}

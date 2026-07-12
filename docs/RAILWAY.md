@@ -713,3 +713,42 @@ Expected behavior:
 - Railway cron
 
 Railway production validation should happen after merge using GPT-provided commands.
+
+## PR 11 Research Worker
+
+Create exactly one additional Railway service named `ape-research-worker`.
+
+```text
+PYTHONPATH=/app/src python -m ape.db.migrations && PYTHONPATH=/app/src python -m ape.worker --role research
+```
+
+Required variables:
+
+```text
+DATABASE_URL=<Railway Postgres reference>
+APE_WORKER_ROLE=research
+RESEARCH_ENABLED=true
+CALIBRATION_ENABLED=true
+APP_MODE=DRY_RUN
+TRADING_ENABLED=false
+EXECUTE=false
+```
+
+Do not give this service a Kalshi private key, Kalshi API trading credentials,
+market WebSocket ownership, BRTI WebSocket ownership, strategy-loop ownership, or
+storage-retention ownership. `STRATEGY_V2_CANDIDATE_CONFIG_VERSION_ID` stays unset
+on the existing strategy service unless an operator later approves one immutable
+`DRY_RUN_CHALLENGER` candidate.
+
+Initial deployment:
+
+1. Keep existing V2 enabled in DRY_RUN.
+2. Keep TRADING_ENABLED=false and EXECUTE=false everywhere.
+3. Deploy the merged code to existing services.
+4. Confirm migration 0010 completed.
+5. Create ape-research-worker with the documented start command and variables.
+6. Do not give the research worker Kalshi private credentials.
+7. Leave STRATEGY_V2_CANDIDATE_CONFIG_VERSION_ID unset.
+8. Validate research status, event coverage, zero-entry audit, and replay.
+9. Do not activate a candidate until a later explicit operator decision.
+10. Do not move to paper or live.

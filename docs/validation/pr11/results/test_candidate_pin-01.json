@@ -1,0 +1,27 @@
+{
+  "assigned_count": 2,
+  "command": [
+    "C:\\Python314\\python.exe",
+    "-m",
+    "pytest",
+    "-q",
+    "--junitxml",
+    "C:\\Users\\kenxw\\OneDrive\\Documents\\$APE\\docs\\validation\\pr11\\junit\\test_candidate_pin-01.xml",
+    "tests/test_candidate_pin.py::test_candidate_pin_requires_immutable_approved_checksum_valid_candidate",
+    "tests/test_candidate_pin.py::test_invalid_candidate_pin_fails_closed_without_a_baseline_substitute"
+  ],
+  "duration_seconds": 6.648,
+  "exit_code": 0,
+  "id": "test_candidate_pin-01",
+  "junit": {
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0,
+    "tests": 2
+  },
+  "log": "docs\\validation\\pr11\\logs\\test_candidate_pin-01.log",
+  "nodeids": [
+    "tests/test_candidate_pin.py::test_candidate_pin_requires_immutable_approved_checksum_valid_candidate",
+    "tests/test_candidate_pin.py::test_invalid_candidate_pin_fails_closed_without_a_baseline_substitute"
+  ]
+}

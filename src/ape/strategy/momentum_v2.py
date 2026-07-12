@@ -20,8 +20,12 @@ from ape.strategy.context import StrategyEvaluationContext
 
 V2_STRATEGY_ID = "btc15_momentum_v2"
 V2_ARCHITECTURE_VERSION = "momentum_v2_heuristic_v3"
-V2_FEATURE_SCHEMA_VERSION = "momentum_v2_features_v2"
+V2_FEATURE_SCHEMA_VERSION = "momentum_v2_features_v3"
 V2_LIFECYCLE_SCHEMA_VERSION = "momentum_v2_lifecycle_v2"
+REPLAY_SCHEMA_VERSION = "momentum_v2_replay_v1"
+RESEARCH_LABEL_SCHEMA_VERSION = "momentum_research_labels_v1"
+CALIBRATION_SCHEMA_VERSION = "momentum_calibration_v1"
+GOVERNANCE_SCHEMA_VERSION = "momentum_governance_v1"
 V2_EDGE_MODEL_VERSION = "heuristic_edge_v1"
 
 STATE_V2_FEATURES_NOT_READY = "V2_FEATURES_NOT_READY"
@@ -84,6 +88,24 @@ class V2Evaluation:
     measurements: dict[str, JsonPayload]
 
 
+@dataclass(frozen=True)
+class V2FeatureEvaluation:
+    """Pure V2 result shared by live evaluation and deterministic replay."""
+
+    state: str
+    reason: str
+    blockers: list[str]
+    warnings: list[str]
+    candidate_side: str | None
+    candidate_mode: str | None
+    timing_tier: str | None
+    intended_entry_price: Decimal | None
+    score: Decimal | None
+    score_threshold: Decimal | None
+    edge_lower_bound_cents: Decimal | None
+    measurements: dict[str, JsonPayload]
+
+
 def built_in_config_version(
     strategy_id: str, parameters: dict[str, Any]
 ) -> StrategyConfigVersionInput:
@@ -91,14 +113,10 @@ def built_in_config_version(
     parameter_hash = _hash(payload)
     code_version = resolve_code_version()
     architecture_version = (
-        V2_ARCHITECTURE_VERSION
-        if strategy_id == V2_STRATEGY_ID
-        else "momentum_v1_legacy"
+        V2_ARCHITECTURE_VERSION if strategy_id == V2_STRATEGY_ID else "momentum_v1_legacy"
     )
     feature_schema_version = (
-        V2_FEATURE_SCHEMA_VERSION
-        if strategy_id == V2_STRATEGY_ID
-        else "momentum_v1_legacy"
+        V2_FEATURE_SCHEMA_VERSION if strategy_id == V2_STRATEGY_ID else "momentum_v1_legacy"
     )
     version_hash = _hash(
         {
@@ -106,9 +124,7 @@ def built_in_config_version(
             "code": code_version,
             "architecture": architecture_version,
             "feature_schema": feature_schema_version,
-            "lifecycle": (
-                V2_LIFECYCLE_SCHEMA_VERSION if strategy_id == V2_STRATEGY_ID else None
-            ),
+            "lifecycle": (V2_LIFECYCLE_SCHEMA_VERSION if strategy_id == V2_STRATEGY_ID else None),
         }
     )
     version_id = f"config-{strategy_id}-{version_hash[:20]}"
@@ -136,39 +152,117 @@ def evaluate_momentum_v2(
     *,
     config: AppConfig,
 ) -> V2Evaluation:
-    features = _features(context, config=config)
-    snapshot = _feature_snapshot(context, features)
-    candidate_side = features["candidate_side"]
-    mode = features["candidate_mode"]
-    tier = _timing_tier(context.seconds_since_open, context.seconds_left)
-    quality = features["quality_state"]
+    feature_vector = build_momentum_v2_feature_vector(context, config)
+    evaluation = evaluate_momentum_v2_feature_vector(feature_vector, V2_PARAMETERS)
+    snapshot = _feature_snapshot(
+        context,
+        feature_vector,
+        execution=evaluation.measurements.get("edge"),
+    )
+    return V2Evaluation(
+        evaluation.state,
+        evaluation.reason,
+        evaluation.blockers,
+        evaluation.warnings,
+        evaluation.candidate_side,
+        evaluation.candidate_mode,
+        evaluation.timing_tier,
+        evaluation.intended_entry_price,
+        evaluation.score,
+        evaluation.score_threshold,
+        evaluation.edge_lower_bound_cents,
+        snapshot,
+        evaluation.measurements,
+    )
+
+
+def build_momentum_v2_feature_vector(
+    context: StrategyEvaluationContext,
+    config: AppConfig,
+) -> dict[str, Any]:
+    """Build the complete immutable V2 input vector from one database view."""
+    vector = _features(context, config=config)
+    vector.setdefault("boundary", context.boundary)
+    vector["seconds_since_open"] = context.seconds_since_open
+    vector["seconds_left"] = context.seconds_left
+    vector["timing_tier"] = _timing_tier(context.seconds_since_open, context.seconds_left)
+    vector["architecture_version"] = V2_ARCHITECTURE_VERSION
+    vector["feature_schema_version"] = V2_FEATURE_SCHEMA_VERSION
+    vector["replay_schema_version"] = REPLAY_SCHEMA_VERSION
+    vector["exit_state_inputs"] = {
+        "desired_bid": vector.get("desired_bid"),
+        "desired_ask": vector.get("desired_ask"),
+        "desired_bid_depth": vector.get("desired_bid_depth"),
+        "desired_ask_depth": vector.get("desired_ask_depth"),
+        "seconds_left": context.seconds_left,
+        "timing_tier": vector["timing_tier"],
+    }
+    blockers = [
+        "v2_feature_vector_missing_market"
+        for value in (getattr(context.market, "market_ticker", None),)
+        if value is None
+    ]
+    vector["replay_readiness"] = "FULL" if not blockers else "PARTIAL"
+    vector["replay_blockers"] = blockers
+    vector["feature_vector_hash"] = feature_vector_hash(vector)
+    return vector
+
+
+def feature_vector_hash(feature_vector: dict[str, Any]) -> str:
+    payload = {key: value for key, value in feature_vector.items() if key != "feature_vector_hash"}
+    return _hash(payload)
+
+
+def evaluate_momentum_v2_feature_vector(
+    feature_vector: dict[str, Any],
+    parameters: dict[str, Any] | None = None,
+) -> V2FeatureEvaluation:
+    """Evaluate a persisted vector without reading any later market information."""
+    features = feature_vector
+    parameters = parameters or V2_PARAMETERS
+    candidate_side = features.get("candidate_side")
+    mode = features.get("candidate_mode")
+    tier = features.get("timing_tier")
+    quality = features.get("quality_state") or {}
+    overrides = _calibration_overrides(parameters)
+    fast_impulse_active = bool(features["fast_impulse_active"])
+    if overrides and mode != "BOUNDARY_CROSS_HOLD":
+        fast_impulse_active = (
+            (features["return_15s"] or Decimal("-999"))
+            >= _override_decimal(overrides, "fast_15", Decimal("1.25"))
+            or (features["return_30s"] or Decimal("-999"))
+            >= _override_decimal(overrides, "fast_30", Decimal("2"))
+        ) and (features["return_5s"] or Decimal("-999")) > _override_decimal(
+            overrides, "adverse_5", Decimal("-0.5")
+        )
+        mode = "CONTINUATION" if fast_impulse_active else "UNSTABLE"
     hard_gates: list[str] = []
     warnings: list[str] = []
 
     if (
-        not quality["reference_ready"]
-        or not quality["book_ready"]
-        or not quality["market_ready"]
+        not quality.get("reference_ready", False)
+        or not quality.get("book_ready", False)
+        or not quality.get("market_ready", False)
         or not quality.get("canonical_market_ready", True)
         or not quality.get("canonical_reference_ready", True)
     ):
         hard_gates.append("v2_prerequisite_data_missing_or_stale")
-    if context.seconds_since_open is None or context.seconds_since_open < 120:
+    if features.get("seconds_since_open") is None or features["seconds_since_open"] < 120:
         hard_gates.append("v2_first_120_seconds")
-    if context.seconds_left is None or context.seconds_left <= 60:
+    if features.get("seconds_left") is None or features["seconds_left"] <= 60:
         hard_gates.append("v2_final_60_seconds")
-    if candidate_side is None or context.boundary is None:
+    if candidate_side is None or features.get("boundary") is None:
         hard_gates.append("v2_candidate_or_boundary_missing")
     if tier is None:
         hard_gates.append("v2_timing_tier_unavailable")
     if features["distance_bps"] is None or features["distance_bps"] < Decimal("1.5"):
         hard_gates.append("v2_boundary_distance_below_1_5_bps")
-    if mode == "CONTINUATION" and not features["fast_impulse_active"]:
+    if mode == "CONTINUATION" and not fast_impulse_active:
         hard_gates.append("v2_fast_impulse_not_active")
     if (
         features["reversal_beyond_origin"]
-        or features["retrace_fraction"] > Decimal("0.70")
-        or features["boundary_crosses_90s"] > 2
+        or features["retrace_fraction"] > _override_decimal(overrides, "retrace", Decimal("0.70"))
+        or features["boundary_crosses_90s"] > int(overrides.get("crosses", 2))
     ):
         hard_gates.append("v2_severe_path_reversal")
     if (
@@ -187,6 +281,11 @@ def evaluate_momentum_v2(
         hard_gates.append("v2_material_contract_divergence")
     if features["persistent_adverse_microstructure"]:
         hard_gates.append("v2_persistent_adverse_microstructure")
+    logistic_probability = _logistic_probability(features, parameters.get("logistic_model"))
+    if logistic_probability is not None and logistic_probability < Decimal(
+        str(parameters.get("logistic_probability_threshold", "0.50"))
+    ):
+        hard_gates.append("v2_logistic_probability_below_threshold")
 
     desired_ask = features["desired_ask"]
     desired_spread_cents = features["desired_spread_cents"]
@@ -194,20 +293,27 @@ def evaluate_momentum_v2(
         hard_gates.append("v2_desired_ask_missing")
     elif desired_ask < Decimal("0.56"):
         hard_gates.append("v2_desired_ask_below_hard_range")
-    elif tier is not None and desired_ask > _tier_value(tier, "max_ask"):
+    elif tier is not None and desired_ask > _tier_value(tier, "max_ask", parameters):
         hard_gates.append("v2_desired_ask_above_tier_cap")
     if desired_spread_cents is None or desired_spread_cents > Decimal("4"):
         hard_gates.append("v2_spread_above_4_cents")
     if features["desired_ask_depth"] is None or features["desired_ask_depth"] < Decimal("2"):
         hard_gates.append("v2_executable_depth_below_two_contracts")
 
-    score, components = _score(features, tier)
+    # Keep the legacy two-argument helper seam stable for existing integrations/tests.
+    score, components = (
+        _score(features, tier)
+        if parameters is V2_PARAMETERS
+        else _score(features, tier, parameters)
+    )
     edge = _edge(features)
-    threshold = _tier_value(tier, "score") if tier is not None else None
-    edge_threshold = Decimal("1.5")
+    threshold = _tier_value(tier, "score", parameters) if tier is not None else None
+    edge_threshold = Decimal(str(parameters.get("edge_threshold_cents", "1.5")))
     measurements: dict[str, JsonPayload] = {
-        "architecture_version": V2_ARCHITECTURE_VERSION,
-        "feature_schema_version": V2_FEATURE_SCHEMA_VERSION,
+        "architecture_version": features.get("architecture_version", V2_ARCHITECTURE_VERSION),
+        "feature_schema_version": features.get("feature_schema_version", V2_FEATURE_SCHEMA_VERSION),
+        "replay_schema_version": features.get("replay_schema_version", REPLAY_SCHEMA_VERSION),
+        "feature_vector_hash": features.get("feature_vector_hash") or feature_vector_hash(features),
         "edge_model_version": V2_EDGE_MODEL_VERSION,
         "candidate_mode": mode,
         "timing_tier": tier,
@@ -220,15 +326,17 @@ def evaluate_momentum_v2(
             "margin": str(score - threshold) if threshold is not None else None,
         },
         "edge": {"lower_bound_cents": str(edge), "threshold_cents": str(edge_threshold)},
+        "logistic_probability": str(logistic_probability)
+        if logistic_probability is not None
+        else None,
     }
-    snapshot = _feature_snapshot(context, features, execution=measurements["edge"])
     if hard_gates:
         state = (
             STATE_V2_FEATURES_NOT_READY
             if hard_gates[0].startswith("v2_prerequisite")
             else STATE_V2_HARD_GATE_BLOCKED
         )
-        return V2Evaluation(
+        return V2FeatureEvaluation(
             state,
             hard_gates[0],
             hard_gates,
@@ -240,11 +348,10 @@ def evaluate_momentum_v2(
             score,
             threshold,
             edge,
-            snapshot,
             measurements,
         )
     if mode == "BOUNDARY_CROSS_HOLD":
-        return V2Evaluation(
+        return V2FeatureEvaluation(
             STATE_V2_HARD_GATE_BLOCKED,
             "v2_candidate_mode_not_enabled",
             ["v2_candidate_mode_not_enabled"],
@@ -256,11 +363,10 @@ def evaluate_momentum_v2(
             score,
             threshold,
             edge,
-            snapshot,
             measurements,
         )
     if mode != "CONTINUATION":
-        return V2Evaluation(
+        return V2FeatureEvaluation(
             STATE_V2_HARD_GATE_BLOCKED,
             "v2_candidate_mode_not_enabled",
             ["v2_candidate_mode_not_enabled"],
@@ -272,11 +378,10 @@ def evaluate_momentum_v2(
             score,
             threshold,
             edge,
-            snapshot,
             measurements,
         )
     if threshold is None or score < threshold:
-        return V2Evaluation(
+        return V2FeatureEvaluation(
             STATE_V2_SCORE_BELOW_THRESHOLD,
             "v2_score_below_threshold",
             [],
@@ -288,11 +393,10 @@ def evaluate_momentum_v2(
             score,
             threshold,
             edge,
-            snapshot,
             measurements,
         )
     if edge < edge_threshold:
-        return V2Evaluation(
+        return V2FeatureEvaluation(
             STATE_V2_EDGE_BELOW_THRESHOLD,
             "v2_edge_below_threshold",
             [],
@@ -304,12 +408,14 @@ def evaluate_momentum_v2(
             score,
             threshold,
             edge,
-            snapshot,
             measurements,
         )
-    intended = min((desired_ask or Decimal("0")) + Decimal("0.01"), _tier_value(tier, "max_ask"))
+    intended = min(
+        (desired_ask or Decimal("0")) + Decimal("0.01"),
+        _tier_value(tier, "max_ask", parameters),
+    )
     measurements["intended_entry_price"] = str(intended)
-    return V2Evaluation(
+    return V2FeatureEvaluation(
         STATE_V2_ENTRY_SIGNAL,
         "v2_entry_signal",
         [],
@@ -321,7 +427,6 @@ def evaluate_momentum_v2(
         score,
         threshold,
         edge,
-        snapshot,
         measurements,
     )
 
@@ -577,10 +682,90 @@ def _feature_snapshot(
             }
         ),
         execution_features=execution,
+        complete_feature_vector=_json_safe(features),
+        feature_vector_hash=features.get("feature_vector_hash") or feature_vector_hash(features),
+        architecture_version=features.get("architecture_version", V2_ARCHITECTURE_VERSION),
+        replay_schema_version=features.get("replay_schema_version", REPLAY_SCHEMA_VERSION),
+        replay_readiness=features.get("replay_readiness", "PARTIAL"),
+        replay_blockers=_json_safe(features.get("replay_blockers", [])),
     )
 
 
-def _score(features: dict[str, Any], tier: str | None) -> tuple[Decimal, dict[str, Decimal]]:
+def _calibration_overrides(parameters: dict[str, Any]) -> dict[str, Any]:
+    overrides = parameters.get("calibration_overrides")
+    return overrides if isinstance(overrides, dict) else {}
+
+
+def _override_decimal(overrides: dict[str, Any], key: str, default: Decimal) -> Decimal:
+    value = overrides.get(key)
+    try:
+        return Decimal(str(value)) if value is not None else default
+    except (ArithmeticError, ValueError):
+        return default
+
+
+def _component_weight_multipliers(parameters: dict[str, Any] | None) -> dict[str, Decimal]:
+    if parameters is None or parameters is V2_PARAMETERS:
+        return {}
+    configured = _calibration_overrides(parameters).get("component_weight_multipliers")
+    if not isinstance(configured, dict):
+        return {}
+    return {str(key): _override_decimal(configured, str(key), Decimal("1")) for key in configured}
+
+
+def _logistic_probability(features: dict[str, Any], artifact: Any) -> Decimal | None:
+    """Apply a persisted NumPy-trained challenger without importing a model framework."""
+    if not isinstance(artifact, dict):
+        return None
+    columns = artifact.get("feature_columns")
+    coefficients = artifact.get("coefficients")
+    medians = artifact.get("medians")
+    means = artifact.get("means")
+    scales = artifact.get("scales")
+    if not all(
+        isinstance(value, list) for value in (columns, coefficients, medians, means, scales)
+    ):
+        return None
+    if len(columns) == 0 or len(coefficients) != len(columns) * 2:
+        return None
+    try:
+        normalized: list[float] = []
+        missing: list[float] = []
+        for index, column in enumerate(columns):
+            value = _logistic_feature_number(features.get(str(column)), str(column))
+            absent = value is None
+            filled = float(medians[index]) if absent else value
+            scale = float(scales[index]) or 1.0
+            normalized.append((filled - float(means[index])) / scale)
+            missing.append(1.0 if absent else 0.0)
+        score = float(artifact.get("intercept", 0.0)) + sum(
+            float(weight) * value
+            for weight, value in zip(coefficients, [*normalized, *missing], strict=True)
+        )
+    except (ArithmeticError, IndexError, TypeError, ValueError):
+        return None
+    probability = 1.0 / (1.0 + math.exp(-max(min(score, 40.0), -40.0)))
+    return Decimal(str(probability))
+
+
+def _logistic_feature_number(value: Any, column: str) -> float | None:
+    if value is None:
+        return None
+    if column == "timing_tier":
+        return {"early": 0.0, "normal": 1.0, "late": 2.0}.get(str(value))
+    if column in {"volatility_regime", "liquidity_regime"}:
+        return float(int(_hash(str(value))[:6], 16) % 10_000)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _score(
+    features: dict[str, Any],
+    tier: str | None,
+    parameters: dict[str, Any] | None = None,
+) -> tuple[Decimal, dict[str, Decimal]]:
     confirmation = _confirmation_score(features["contract_move_15s_cents"])
     components = {
         "fast_impulse": Decimal("5")
@@ -611,9 +796,13 @@ def _score(features: dict[str, Any], tier: str | None) -> tuple[Decimal, dict[st
             else Decimal("3")
             * clip01((features["trade_ratio"] - Decimal("0.35")) / Decimal("0.45"))
         ),
-        "timing_economics": _price_quality(features["desired_ask"], tier)
+        "timing_economics": _price_quality(features["desired_ask"], tier, parameters)
         + (Decimal("2") if tier == "normal" else Decimal("1"))
         + Decimal("6") * clip01(_edge(features) / Decimal("6")),
+    }
+    multipliers = _component_weight_multipliers(parameters)
+    components = {
+        key: value * multipliers.get(key, Decimal("1")) for key, value in components.items()
     }
     total = sum(components.values(), Decimal("0"))
     return total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP), {
@@ -1058,8 +1247,13 @@ def _timing_tier(since_open: int | None, seconds_left: int | None) -> str | None
     return None
 
 
-def _tier_value(tier: str, field: str) -> Decimal:
-    return Decimal(str(V2_PARAMETERS["tiers"][tier][field]))
+def _tier_value(
+    tier: str,
+    field: str,
+    parameters: dict[str, Any] | None = None,
+) -> Decimal:
+    active = parameters or V2_PARAMETERS
+    return Decimal(str(active["tiers"][tier][field]))
 
 
 def _confirmation_score(move: Decimal | None) -> Decimal:
@@ -1079,12 +1273,16 @@ def _context_alignment(features: dict[str, Any]) -> Decimal:
     return Decimal("3") if aligned == 2 else Decimal("1.5") if aligned == 1 else Decimal("0")
 
 
-def _price_quality(ask: Decimal | None, tier: str | None) -> Decimal:
+def _price_quality(
+    ask: Decimal | None,
+    tier: str | None,
+    parameters: dict[str, Any] | None = None,
+) -> Decimal:
     if ask is None or tier is None:
         return Decimal("0")
     if Decimal("0.58") <= ask <= Decimal("0.72"):
         return Decimal("2")
-    limit = _tier_value(tier, "max_ask")
+    limit = _tier_value(tier, "max_ask", parameters)
     if ask < Decimal("0.58"):
         return Decimal("2") * clip01((ask - Decimal("0.56")) / Decimal("0.02"))
     return Decimal("2") * clip01((limit - ask) / max(limit - Decimal("0.72"), Decimal("0.01")))

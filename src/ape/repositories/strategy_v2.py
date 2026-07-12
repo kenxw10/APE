@@ -63,6 +63,13 @@ class StrategyV2Repository:
             .limit(1)
         )
 
+    def get_config_version(self, strategy_config_version_id: str) -> StrategyConfigVersion | None:
+        return self.session.scalar(
+            select(StrategyConfigVersion)
+            .where(StrategyConfigVersion.strategy_config_version_id == strategy_config_version_id)
+            .limit(1)
+        )
+
     def get_latest_feature_snapshot(self) -> StrategyFeatureSnapshot | None:
         return self.session.scalar(
             select(StrategyFeatureSnapshot)
@@ -390,6 +397,9 @@ def _values(value: object) -> dict[str, object]:
         "contract_features",
         "microstructure_features",
         "execution_features",
+        "complete_feature_vector",
+        "replay_blockers",
+        "model_artifact",
         "measurements",
         "boundary_state",
     ):
