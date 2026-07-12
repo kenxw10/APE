@@ -4,7 +4,7 @@ import copy
 import hashlib
 import json
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from statistics import pstdev
@@ -108,6 +108,9 @@ class CalibrationResult:
     selected_candidate_id: str | None
     warnings: tuple[str, ...]
     blockers: tuple[str, ...]
+    candidate_replay_trades: dict[str, tuple[ReplayTrade, ...]] = field(
+        default_factory=dict
+    )
 
 
 def build_partition_manifest(outcomes: Iterable[ResearchMarketOutcome]) -> dict[str, Any]:
@@ -494,11 +497,12 @@ def run_bounded_calibration(
             ("calibration_requires_at_least_50_complete_unique_markets",),
             ("insufficient_complete_markets",),
         )
-    candidates, metrics, selected, best_lower = (
+    candidates, metrics, selected, best_lower, candidate_replay_trades = (
         list(bounded_candidate_specs(calibration_run_id)),
         {},
         None,
         Decimal("-Infinity"),
+        {},
     )
     search_development = list(manifest["search_development"])
     search_development_members = set(search_development)
@@ -537,6 +541,7 @@ def run_bounded_calibration(
                 calibration_run_id=calibration_run_id,
                 market_tickers=search_development,
             )
+        candidate_replay_trades[candidate.candidate_id] = result.trades
         lower = Decimal(values["bootstrap"]["net_pnl_per_market"]["lower"])
         penalties = adjusted_lower_confidence_expectancy(
             bootstrap_lower=lower,
@@ -614,7 +619,16 @@ def run_bounded_calibration(
             calibration_run_id=calibration_run_id,
             market_tickers=holdout,
         )
-    return CalibrationResult("COMPLETED", manifest, tuple(candidates), metrics, selected, (), ())
+    return CalibrationResult(
+        "COMPLETED",
+        manifest,
+        tuple(candidates),
+        metrics,
+        selected,
+        (),
+        (),
+        candidate_replay_trades,
+    )
 
 
 def _labeled_feature_rows(

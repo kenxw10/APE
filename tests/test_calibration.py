@@ -18,6 +18,7 @@ from ape.research.calibration import (
     build_partition_manifest,
     fit_l2_logistic,
     market_bootstrap,
+    run_bounded_calibration,
     transition_candidate,
 )
 
@@ -107,6 +108,47 @@ def test_walk_forward_metrics_preserves_manifest_validation_order(monkeypatch) -
     )
 
     assert captured == [("M4", "M3")]
+
+
+def test_calibration_retains_replay_trades_for_each_evaluated_candidate(monkeypatch) -> None:
+    candidate = CandidateSpec(
+        "candidate-fixture", "fixture-strategy", "WEIGHTED_HEURISTIC", calibration.V2_PARAMETERS
+    )
+    trade_marker = object()
+
+    class FakeReplayEngine:
+        def __init__(self, *, parameters) -> None:
+            del parameters
+
+        def replay(self, *_args, **_kwargs):
+            return type(
+                "Replay",
+                (),
+                {"trades": (trade_marker,), "zero_entry_report": {}},
+            )()
+
+    def fake_metrics(*_args, **_kwargs):
+        return {
+            "bootstrap": {"net_pnl_per_market": {"lower": "0"}},
+            "dominant_regime_entry_share": "0",
+            "net_pnl_per_market": "0",
+            "entry_frequency_per_100_markets": "0",
+        }
+
+    monkeypatch.setattr(calibration, "bounded_candidate_specs", lambda _run_id: (candidate,))
+    monkeypatch.setattr(calibration, "DeterministicReplayEngine", FakeReplayEngine)
+    monkeypatch.setattr(calibration, "replay_metrics", fake_metrics)
+    monkeypatch.setattr(
+        calibration,
+        "_walk_forward_metrics",
+        lambda *_args, **_kwargs: [{"net_pnl_per_market": "0"}],
+    )
+
+    result = run_bounded_calibration(
+        calibration_run_id="calibration-fixture", events=[], outcomes=_outcomes(50)
+    )
+
+    assert result.candidate_replay_trades == {candidate.candidate_id: (trade_marker,)}
 
 
 def test_governance_rejects_paper_live_transitions() -> None:

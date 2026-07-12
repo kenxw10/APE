@@ -132,11 +132,26 @@ def test_legacy_null_replay_readiness_snapshot_remains_labelable(tmp_path) -> No
                 },
                 replay_readiness=None,
             )
-            session.add_all((market, snapshot))
+            session.add_all(
+                (
+                    market,
+                    snapshot,
+                    OrderbookSnapshot(
+                        market_ticker=market.market_ticker,
+                        received_at=at + timedelta(milliseconds=600),
+                        yes_ask=Decimal("0.60"),
+                        yes_ask_count=Decimal("1"),
+                        yes_bid=Decimal("0.58"),
+                        yes_bid_count=Decimal("1"),
+                    ),
+                )
+            )
             session.flush()
 
             labels = _labels_for_market(session, market, [], None)
 
-            assert "legacy-feature-label" in labels["counterfactual_labels"]
+            label = labels["counterfactual_labels"]["legacy-feature-label"]
+            assert label["entry_fillable"] is True
+            assert label["entry_label_readiness"] == "FULL"
     finally:
         engine.dispose()

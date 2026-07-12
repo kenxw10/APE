@@ -24,7 +24,7 @@ from ape.research.calibration import (
     LIFECYCLE_DRAFT,
     run_bounded_calibration,
 )
-from ape.research.replay import DeterministicReplayEngine
+from ape.research.replay import DeterministicReplayEngine, ReplayTrade
 from ape.research.repository import ResearchRepository
 from ape.strategy.momentum_v2 import (
     V2_ARCHITECTURE_VERSION,
@@ -163,43 +163,12 @@ def run_research_cycle(
     )
     for trade in replay.trades:
         repository.insert_replay_trade(
-            {
-                "trade_id": f"{run_id}-{trade.trade_id}",
-                "replay_run_id": run_id,
-                "candidate_id": None,
-                "strategy_config_version_id": baseline.strategy_config_version_id,
-                "market_ticker": trade.market_ticker,
-                "side": trade.side,
-                "entry_decision_at": trade.entry_decision_at,
-                "entry_fill_at": trade.entry_fill_at,
-                "entry_limit": trade.entry_limit,
-                "entry_fill_price": trade.entry_fill_price,
-                "entry_fill_event_id": trade.entry_fill_event_id,
-                "exit_trigger_at": trade.exit_trigger_at,
-                "exit_intent_at": trade.exit_trigger_at,
-                "exit_fill_at": trade.exit_fill_at,
-                "exit_limit": trade.exit_fill_price,
-                "exit_fill_price": trade.exit_fill_price,
-                "exit_fill_event_id": trade.exit_fill_event_id,
-                "status": trade.status,
-                "gross_pnl_cents": trade.gross_pnl_cents,
-                "fee_cents": trade.fee_cents,
-                "net_pnl_cents": trade.net_pnl_cents,
-                "holding_duration_ms": trade.holding_duration_ms,
-                "mfe_cents": trade.mfe_cents,
-                "mae_cents": trade.mae_cents,
-                "time_to_mfe_ms": trade.time_to_mfe_ms,
-                "time_to_mae_ms": trade.time_to_mae_ms,
-                "entry_reason": trade.entry_reason,
-                "exit_reason": trade.exit_reason,
-                "timing_tier": trade.timing_tier,
-                "volatility_regime": None,
-                "liquidity_regime": None,
-                "entry_feature_snapshot_id": None,
-                "exit_feature_snapshot_id": None,
-                "lifecycle_version": "momentum_v2_lifecycle_v2",
-                "measurements": trade.measurements,
-            }
+            _replay_trade_values(
+                replay_run_id=run_id,
+                trade=trade,
+                candidate_id=None,
+                strategy_config_version_id=baseline.strategy_config_version_id,
+            )
         )
     calibration_status = "DISABLED"
     calibration_run_id = None
@@ -301,6 +270,17 @@ def run_research_cycle(
                             "eligibility_status": "RESEARCH_ONLY",
                         }
                     )
+                    for trade in calibration.candidate_replay_trades.get(
+                        candidate.candidate_id, ()
+                    ):
+                        repository.insert_replay_trade(
+                            _replay_trade_values(
+                                replay_run_id=run_id,
+                                trade=trade,
+                                candidate_id=candidate.candidate_id,
+                                strategy_config_version_id=config_version_id,
+                            )
+                        )
     repository.finish_replay_run(replay_run, status="COMPLETED", finished_at=checked_at)
     return {
         "status": "completed",
@@ -312,6 +292,53 @@ def run_research_cycle(
         "calibration_run_id": calibration_run_id,
         "warnings": [],
         "blockers": [],
+    }
+
+
+def _replay_trade_values(
+    *,
+    replay_run_id: str,
+    trade: ReplayTrade,
+    candidate_id: str | None,
+    strategy_config_version_id: str,
+) -> dict[str, Any]:
+    trade_prefix = replay_run_id if candidate_id is None else f"{replay_run_id}-{candidate_id}"
+    return {
+        "trade_id": f"{trade_prefix}-{trade.trade_id}",
+        "replay_run_id": replay_run_id,
+        "candidate_id": candidate_id,
+        "strategy_config_version_id": strategy_config_version_id,
+        "market_ticker": trade.market_ticker,
+        "side": trade.side,
+        "entry_decision_at": trade.entry_decision_at,
+        "entry_fill_at": trade.entry_fill_at,
+        "entry_limit": trade.entry_limit,
+        "entry_fill_price": trade.entry_fill_price,
+        "entry_fill_event_id": trade.entry_fill_event_id,
+        "exit_trigger_at": trade.exit_trigger_at,
+        "exit_intent_at": trade.exit_trigger_at,
+        "exit_fill_at": trade.exit_fill_at,
+        "exit_limit": trade.exit_fill_price,
+        "exit_fill_price": trade.exit_fill_price,
+        "exit_fill_event_id": trade.exit_fill_event_id,
+        "status": trade.status,
+        "gross_pnl_cents": trade.gross_pnl_cents,
+        "fee_cents": trade.fee_cents,
+        "net_pnl_cents": trade.net_pnl_cents,
+        "holding_duration_ms": trade.holding_duration_ms,
+        "mfe_cents": trade.mfe_cents,
+        "mae_cents": trade.mae_cents,
+        "time_to_mfe_ms": trade.time_to_mfe_ms,
+        "time_to_mae_ms": trade.time_to_mae_ms,
+        "entry_reason": trade.entry_reason,
+        "exit_reason": trade.exit_reason,
+        "timing_tier": trade.timing_tier,
+        "volatility_regime": None,
+        "liquidity_regime": None,
+        "entry_feature_snapshot_id": None,
+        "exit_feature_snapshot_id": None,
+        "lifecycle_version": "momentum_v2_lifecycle_v2",
+        "measurements": trade.measurements,
     }
 
 

@@ -591,7 +591,7 @@ def _counterfactual_label(
     outcome: ResearchMarketOutcome | None = None,
 ) -> dict[str, Any]:
     at = _utc(feature.evaluated_at)
-    vector = feature.complete_feature_vector or {}
+    vector = _hydrate_persisted_feature_vector(feature.complete_feature_vector)
     side = vector.get("candidate_side") or feature.candidate_side
     effective_after = at + timedelta(milliseconds=500)
     expires_at = at + timedelta(milliseconds=2500)
@@ -727,6 +727,26 @@ def _counterfactual_label(
         [] if outcome is not None else ["official_outcome_missing"]
     )
     return _json_safe(values)
+
+
+def _hydrate_persisted_feature_vector(value: Any) -> dict[str, Any]:
+    """Restore JSON-encoded Decimal values before replaying archived features."""
+    if not isinstance(value, dict):
+        return {}
+    return _hydrate_json_value(value)
+
+
+def _hydrate_json_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _hydrate_json_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_hydrate_json_value(item) for item in value]
+    if isinstance(value, str):
+        try:
+            return Decimal(value)
+        except (ArithmeticError, ValueError):
+            return value
+    return value
 
 
 def _ask(book: OrderbookSnapshot | None, side: str | None) -> Decimal | None:
