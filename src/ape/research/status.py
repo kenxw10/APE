@@ -13,7 +13,7 @@ from ape.worker.services import WORKER_SERVICE_RESEARCH
 
 
 def build_research_status(config: AppConfig, *, now: datetime | None = None) -> dict[str, Any]:
-    checked_at = now or datetime.now(UTC)
+    checked_at = _as_utc(now or datetime.now(UTC))
     base = {
         "configured_enabled": config.research_enabled,
         "configured_calibration_enabled": config.calibration_enabled,
@@ -56,7 +56,7 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
                 heartbeat.metadata_ if heartbeat and isinstance(heartbeat.metadata_, dict) else {}
             )
             details = metadata.get("research") if isinstance(metadata.get("research"), dict) else {}
-            heartbeat_at = heartbeat.heartbeat_at if heartbeat is not None else None
+            heartbeat_at = _as_utc(heartbeat.heartbeat_at) if heartbeat is not None else None
             heartbeat_fresh = bool(
                 heartbeat_at is not None
                 and (checked_at - heartbeat_at).total_seconds()
@@ -80,7 +80,7 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
                 worker_observed_safety=heartbeat.is_safe if heartbeat is not None else None,
                 heartbeat_fresh=heartbeat_fresh,
                 worker_heartbeat={
-                    "at": heartbeat.heartbeat_at.isoformat() if heartbeat else None,
+                    "at": heartbeat_at.isoformat() if heartbeat_at else None,
                     "metadata": details,
                 }
                 if heartbeat
@@ -96,7 +96,7 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
                 )
                 if latest_replay
                 else {"complete_markets": len(outcomes)},
-                event_lag_seconds=(checked_at - latest_event.event_time).total_seconds()
+                event_lag_seconds=(checked_at - _as_utc(latest_event.event_time)).total_seconds()
                 if latest_event
                 else None,
             )
@@ -165,3 +165,9 @@ def _row(value: Any) -> dict[str, Any] | None:
         item = getattr(value, column.key)
         result[column.key] = item.isoformat() if isinstance(item, datetime) else item
     return result
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
