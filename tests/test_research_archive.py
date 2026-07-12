@@ -13,6 +13,7 @@ from ape.db.models import (
     ReferenceTick,
     ResearchMarketOutcome,
     ResearchReplayEvent,
+    StrategyDecision,
     StrategyFeatureSnapshot,
 )
 from ape.db.session import create_engine_from_config, create_session_factory
@@ -53,6 +54,66 @@ def test_archive_is_idempotent_and_keeps_only_normalized_market_values(tmp_path)
             assert {event.event_type for event in events} == {"MARKET", "COVERAGE_REPORT"}
             market_event = next(event for event in events if event.event_type == "MARKET")
             assert "raw_payload" not in market_event.payload
+    finally:
+        engine.dispose()
+
+
+def test_archive_refreshes_mutable_market_payload_when_source_version_advances(tmp_path) -> None:
+    engine = create_engine_from_config(
+        load_config({"DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'market-refresh.sqlite'}"})
+    )
+    run_migrations(engine)
+    factory = create_session_factory(engine)
+    at = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
+    try:
+        with factory() as session:
+            market = Market(
+                market_ticker="KXBTC15M-MARKET-REFRESH",
+                open_time=at,
+                series_ticker="KXBTC15M",
+            )
+            session.add(market)
+            session.flush()
+            first = archive_research_events(session, now=at)
+            event = session.scalar(
+                select(ResearchReplayEvent).where(
+                    ResearchReplayEvent.source_table == "markets",
+                    ResearchReplayEvent.source_row_id == str(market.id),
+                )
+            )
+            assert event is not None
+            original_hash = event.source_hash
+
+            market.close_time = at + timedelta(minutes=15)
+            market.functional_strike = Decimal("62000")
+            market.updated_at = event.event_time + timedelta(seconds=1)
+            session.flush()
+            second = archive_research_events(session, now=at + timedelta(seconds=1))
+            third = archive_research_events(session, now=at + timedelta(seconds=2))
+            session.commit()
+
+            refreshed = session.scalar(
+                select(ResearchReplayEvent).where(
+                    ResearchReplayEvent.source_table == "markets",
+                    ResearchReplayEvent.source_row_id == str(market.id),
+                )
+            )
+            assert first.archived_by_type == {"MARKET": 1}
+            assert second.archived_by_type == {"MARKET": 1}
+            assert third.archived_events == 0
+            assert refreshed is not None
+            assert refreshed.source_hash != original_hash
+            assert refreshed.payload["close_time"] == (at + timedelta(minutes=15)).isoformat()
+            assert refreshed.payload["boundary"] == "62000"
+            assert (
+                session.scalar(
+                    select(func.count()).select_from(ResearchReplayEvent).where(
+                        ResearchReplayEvent.source_table == "markets",
+                        ResearchReplayEvent.source_row_id == str(market.id),
+                    )
+                )
+                == 1
+            )
     finally:
         engine.dispose()
 
@@ -260,6 +321,67 @@ def test_legacy_null_replay_readiness_snapshot_remains_labelable(tmp_path) -> No
             labels = _labels_for_market(session, market, [], None)
 
             label = labels["counterfactual_labels"]["legacy-feature-label"]
+            assert label["entry_fillable"] is True
+            assert label["entry_label_readiness"] == "FULL"
+    finally:
+        engine.dispose()
+
+
+def test_legacy_v2_snapshot_recovers_decision_vector_for_labels(tmp_path) -> None:
+    engine = create_engine_from_config(
+        load_config({"DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'legacy-vector.sqlite'}"})
+    )
+    run_migrations(engine)
+    factory = create_session_factory(engine)
+    at = datetime(2026, 7, 11, 12, 5, tzinfo=UTC)
+    vector = {
+        key: str(value) if isinstance(value, Decimal) else value
+        for key, value in replayable_feature_vector().items()
+    }
+    try:
+        with factory() as session:
+            market = Market(
+                market_ticker="KXBTC15M-LEGACY-VECTOR",
+                open_time=at - timedelta(minutes=5),
+                close_time=at + timedelta(minutes=10),
+                functional_strike=Decimal("62000"),
+            )
+            snapshot = StrategyFeatureSnapshot(
+                feature_snapshot_id="legacy-vector-label",
+                market_ticker=market.market_ticker,
+                evaluated_at=at,
+                feature_schema_version="momentum_v2_features_v2",
+                context_hash="legacy-vector-context",
+                candidate_side="YES",
+                boundary=Decimal("62000"),
+                complete_feature_vector=None,
+                replay_readiness=None,
+            )
+            decision = StrategyDecision(
+                decision_id="legacy-vector-decision",
+                strategy_id="btc15_momentum_v2",
+                market_ticker=market.market_ticker,
+                evaluated_at=at,
+                decision_state="DRY_RUN_ENTRY_SIGNAL",
+                primary_reason="fixture",
+                app_mode="DRY_RUN",
+                feature_snapshot_id=snapshot.feature_snapshot_id,
+                measurements={"features": vector},
+            )
+            book = OrderbookSnapshot(
+                market_ticker=market.market_ticker,
+                received_at=at + timedelta(milliseconds=600),
+                yes_ask=Decimal("0.60"),
+                yes_ask_count=Decimal("1"),
+                yes_bid=Decimal("0.58"),
+                yes_bid_count=Decimal("1"),
+            )
+            session.add_all((market, snapshot, decision, book))
+            session.flush()
+
+            labels = _labels_for_market(session, market, [], None)
+
+            label = labels["counterfactual_labels"][snapshot.feature_snapshot_id]
             assert label["entry_fillable"] is True
             assert label["entry_label_readiness"] == "FULL"
     finally:

@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import String, cast, desc, exists, func, or_, select
+from sqlalchemy import String, and_, cast, desc, exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from ape.db.models import (
@@ -46,6 +46,8 @@ def archive_research_events(session: Session, *, now: datetime | None = None) ->
     counts: dict[str, int] = {}
     for row in _unarchived_rows(session, repository, Market, "markets"):
         _archive(repository, _market_event(row), counts)
+    for row in _updated_archived_rows(session, Market, "markets"):
+        _archive(repository, _market_event(row), counts)
     for row in _unarchived_rows(session, repository, ReferenceTick, "reference_ticks"):
         _archive(repository, _reference_event(session, row), counts)
     for row in _unarchived_rows(session, repository, OrderbookSnapshot, "orderbook_snapshots"):
@@ -82,6 +84,24 @@ def _unarchived_rows(session: Session, repository: ResearchRepository, model, so
         )
     )
     statement = select(model).where(~archived).order_by(model.id.asc()).limit(ARCHIVE_BATCH_SIZE)
+    return session.scalars(statement)
+
+
+def _updated_archived_rows(session: Session, model, source_table: str):
+    """Return mutable source rows whose normalized archive needs a refresh."""
+    statement = (
+        select(model)
+        .join(
+            ResearchReplayEvent,
+            and_(
+                ResearchReplayEvent.source_table == source_table,
+                ResearchReplayEvent.source_row_id == cast(model.id, String),
+            ),
+        )
+        .where(model.updated_at > ResearchReplayEvent.event_time)
+        .order_by(model.updated_at.asc(), model.id.asc())
+        .limit(ARCHIVE_BATCH_SIZE)
+    )
     return session.scalars(statement)
 
 
@@ -226,9 +246,10 @@ def _archive(repository: ResearchRepository, event: dict[str, Any], counts: dict
     existing = repository.get_event_by_source(
         source_table=event["source_table"], source_row_id=event["source_row_id"]
     )
-    if existing is None:
-        repository.archive_event(event)
-        counts[event["event_type"]] = counts.get(event["event_type"], 0) + 1
+    if existing is not None and existing.source_hash == event["source_hash"]:
+        return
+    repository.archive_event(event)
+    counts[event["event_type"]] = counts.get(event["event_type"], 0) + 1
 
 
 def _market_event(row: Market) -> dict[str, Any]:
@@ -361,24 +382,14 @@ def _trade_event(row: PublicTrade) -> dict[str, Any]:
 
 
 def _feature_event(session: Session, row: StrategyFeatureSnapshot) -> dict[str, Any]:
-    vector = row.complete_feature_vector
+    vector = _feature_vector_for_snapshot(session, row)
     readiness = row.replay_readiness or "FULL"
     blockers = list(row.replay_blockers or [])
-    if not vector and row.feature_schema_version == "momentum_v2_features_v2":
-        decision = session.scalar(
-            select(StrategyDecision)
-            .where(StrategyDecision.feature_snapshot_id == row.feature_snapshot_id)
-            .order_by(desc(StrategyDecision.id))
-            .limit(1)
-        )
-        measurements = decision.measurements if decision else None
-        vector = measurements.get("features") if isinstance(measurements, dict) else None
-        if vector is None:
-            readiness = "PARTIAL"
-            blockers.append("v2_feature_vector_unrecoverable")
     if not vector:
         vector = {}
         readiness = "PARTIAL"
+        if row.feature_schema_version == "momentum_v2_features_v2":
+            blockers.append("v2_feature_vector_unrecoverable")
         blockers.append("feature_vector_missing")
     return _event(
         row=row,
@@ -398,6 +409,23 @@ def _feature_event(session: Session, row: StrategyFeatureSnapshot) -> dict[str, 
             "context_hash": row.context_hash,
         },
     )
+
+
+def _feature_vector_for_snapshot(
+    session: Session, row: StrategyFeatureSnapshot
+) -> dict[str, Any] | None:
+    vector = row.complete_feature_vector
+    if vector or row.feature_schema_version != "momentum_v2_features_v2":
+        return vector if isinstance(vector, dict) else None
+    decision = session.scalar(
+        select(StrategyDecision)
+        .where(StrategyDecision.feature_snapshot_id == row.feature_snapshot_id)
+        .order_by(desc(StrategyDecision.id))
+        .limit(1)
+    )
+    measurements = decision.measurements if decision else None
+    recovered = measurements.get("features") if isinstance(measurements, dict) else None
+    return recovered if isinstance(recovered, dict) else None
 
 
 def _lifecycle_event(row: Any, source_table: str) -> dict[str, Any]:
@@ -638,11 +666,11 @@ def _labels_for_market(
         .where(StrategyFeatureSnapshot.market_ticker == market.market_ticker)
         .order_by(StrategyFeatureSnapshot.evaluated_at.asc(), StrategyFeatureSnapshot.id.asc())
     ):
-        vector = event.complete_feature_vector or {}
+        vector = _feature_vector_for_snapshot(session, event) or {}
         side = vector.get("candidate_side") or event.candidate_side
         if (event.replay_readiness or "FULL") == "FULL" and side in {"YES", "NO"}:
             labels[event.feature_snapshot_id] = _counterfactual_label(
-                event, books, ticks, market, outcome
+                event, books, ticks, market, outcome, feature_vector=vector
             )
     return {"label_schema_version": RESEARCH_LABEL_SCHEMA_VERSION, "counterfactual_labels": labels}
 
@@ -653,9 +681,13 @@ def _counterfactual_label(
     ticks: list[ReferenceTick],
     market: Market,
     outcome: ResearchMarketOutcome | None = None,
+    *,
+    feature_vector: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     at = _utc(feature.evaluated_at)
-    vector = _hydrate_persisted_feature_vector(feature.complete_feature_vector)
+    vector = _hydrate_persisted_feature_vector(
+        feature_vector if feature_vector is not None else feature.complete_feature_vector
+    )
     side = vector.get("candidate_side") or feature.candidate_side
     effective_after = at + timedelta(milliseconds=500)
     expires_at = at + timedelta(milliseconds=2500)

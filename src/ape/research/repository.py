@@ -34,6 +34,11 @@ class ResearchRepository:
             source_table=values["source_table"], source_row_id=str(values["source_row_id"])
         )
         if existing is not None:
+            if existing.source_hash != values["source_hash"]:
+                for key, value in _values(values).items():
+                    if key not in {"id", "created_at"}:
+                        setattr(existing, key, value)
+                self.session.flush()
             return existing
         row = ResearchReplayEvent(**_values(values))
         self.session.add(row)
