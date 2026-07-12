@@ -211,10 +211,11 @@ def test_r14_retention_and_durable_status_tables_are_separate() -> None:
 
 def test_r15_documentation_versions_and_safety_contract_are_present() -> None:
     compliance = (ROOT / "docs/PR11_COMPLIANCE.md").read_text()
-    assert "PR 11 is not yet\ncompliant" in compliance
-    assert "COMPLIANT" not in compliance
-    assert "Automatic governance transitions" in compliance
-    assert "Generated validation-log, JUnit, and result-file cleanup" in compliance
+    assert "# PR 11 Compliance Matrix" in compliance
+    assert all(f"| R{requirement} " in compliance for requirement in range(1, 16))
+    assert "Promotion evidence is derived from persisted source events" in compliance
+    assert "Regenerated raw logs, JUnit XML, result JSON" in compliance
+    assert "does not add paper trading" in compliance
     assert (ROOT / "docs/RESEARCH_AND_CALIBRATION.md").exists()
     assert "ape-research-worker" in (ROOT / "docs/RAILWAY.md").read_text()
     assert (
