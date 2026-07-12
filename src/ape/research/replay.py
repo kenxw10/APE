@@ -192,6 +192,7 @@ class DeterministicReplayEngine:
                             held_bid=held_bid,
                             market_matches=market == open_position.pending.market_ticker,
                             evaluated_at=at,
+                            parameters=self.parameters,
                         ),
                         self.parameters,
                     )
@@ -600,10 +601,11 @@ def _lifecycle_inputs(
     held_bid: Decimal | None,
     market_matches: bool,
     evaluated_at: datetime,
+    parameters: dict[str, Any],
 ) -> dict[str, Any]:
     entry_features = position.pending.evaluation.measurements.get("features") or {}
     tier = position.pending.evaluation.timing_tier
-    tier_parameters = V2_PARAMETERS["tiers"].get(tier or "", {})
+    tier_parameters = parameters["tiers"].get(tier or "", {})
     return {
         "candidate_side": evaluation.candidate_side,
         "boundary": features.get("boundary"),

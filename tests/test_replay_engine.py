@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import copy
 from datetime import timedelta
+from decimal import Decimal
 
 from tests.test_research_helpers import at_base, feature_event, orderbook_event, valid_vector
 
-from ape.research.replay import DeterministicReplayEngine
-from ape.strategy.momentum_v2 import evaluate_momentum_v2_feature_vector
+from ape.research.replay import (
+    DeterministicReplayEngine,
+    _lifecycle_inputs,
+    _OpenPosition,
+    _PendingEntry,
+)
+from ape.strategy.momentum_v2 import V2_PARAMETERS, evaluate_momentum_v2_feature_vector
 
 
 def test_replay_is_order_deterministic_and_has_no_future_leakage() -> None:
@@ -69,3 +76,41 @@ def test_persisted_vector_and_live_vector_evaluator_parity() -> None:
         first.score,
         first.edge_lower_bound_cents,
     ) == (second.state, second.reason, second.blockers, second.score, second.edge_lower_bound_cents)
+
+
+def test_replay_lifecycle_inputs_use_candidate_tier_hold_windows() -> None:
+    at = at_base()
+    evaluation = evaluate_momentum_v2_feature_vector(valid_vector())
+    pending = _PendingEntry(
+        evaluation=evaluation,
+        market_ticker="M1",
+        event_id="entry",
+        decision_at=at,
+        effective_after=at,
+        expires_at=at + timedelta(seconds=2),
+    )
+    position = _OpenPosition(
+        pending=pending,
+        entry_at=at,
+        entry_price=Decimal("0.60"),
+        entry_event_id="fill",
+        best_bid=Decimal("0.60"),
+        worst_bid=Decimal("0.60"),
+        best_at=at,
+        worst_at=at,
+    )
+    candidate_parameters = copy.deepcopy(V2_PARAMETERS)
+    candidate_parameters["tiers"]["normal"].update({"time_stop": 71, "max_hold": 93})
+
+    inputs = _lifecycle_inputs(
+        position=position,
+        evaluation=evaluation,
+        features=valid_vector(),
+        held_bid=Decimal("0.60"),
+        market_matches=True,
+        evaluated_at=at,
+        parameters=candidate_parameters,
+    )
+
+    assert inputs["entry_time_stop_seconds"] == 71
+    assert inputs["entry_max_hold_seconds"] == 93

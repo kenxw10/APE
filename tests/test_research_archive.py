@@ -15,7 +15,7 @@ from ape.db.models import (
     StrategyFeatureSnapshot,
 )
 from ape.db.session import create_engine_from_config, create_session_factory
-from ape.research.archive import _counterfactual_label, archive_research_events
+from ape.research.archive import _counterfactual_label, _labels_for_market, archive_research_events
 from ape.research.fixtures import replayable_feature_vector
 
 
@@ -101,3 +101,42 @@ def test_counterfactual_label_uses_the_first_in_window_executable_book() -> None
     assert label["entry_price"] == "0.60"
     assert label["gross_markout_5s_cents"] == "5.00"
     assert label["net_markout_5s_cents"] is not None
+
+
+def test_legacy_null_replay_readiness_snapshot_remains_labelable(tmp_path) -> None:
+    engine = create_engine_from_config(
+        load_config({"DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'legacy-label.sqlite'}"})
+    )
+    run_migrations(engine)
+    factory = create_session_factory(engine)
+    at = datetime(2026, 7, 11, 12, 5, tzinfo=UTC)
+    try:
+        with factory() as session:
+            market = Market(
+                market_ticker="KXBTC15M-LEGACY-LABEL",
+                open_time=at - timedelta(minutes=5),
+                close_time=at + timedelta(minutes=10),
+                functional_strike=Decimal("62000"),
+            )
+            snapshot = StrategyFeatureSnapshot(
+                feature_snapshot_id="legacy-feature-label",
+                market_ticker=market.market_ticker,
+                evaluated_at=at,
+                feature_schema_version="momentum_v2_features_v3",
+                context_hash="legacy-context",
+                candidate_side="YES",
+                boundary=Decimal("62000"),
+                complete_feature_vector={
+                    key: str(value) if isinstance(value, Decimal) else value
+                    for key, value in replayable_feature_vector().items()
+                },
+                replay_readiness=None,
+            )
+            session.add_all((market, snapshot))
+            session.flush()
+
+            labels = _labels_for_market(session, market, [], None)
+
+            assert "legacy-feature-label" in labels["counterfactual_labels"]
+    finally:
+        engine.dispose()

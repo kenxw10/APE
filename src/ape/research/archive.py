@@ -576,7 +576,7 @@ def _labels_for_market(
     ):
         vector = event.complete_feature_vector or {}
         side = vector.get("candidate_side") or event.candidate_side
-        if event.replay_readiness == "FULL" and side in {"YES", "NO"}:
+        if (event.replay_readiness or "FULL") == "FULL" and side in {"YES", "NO"}:
             labels[event.feature_snapshot_id] = _counterfactual_label(
                 event, books, ticks, market, outcome
             )
