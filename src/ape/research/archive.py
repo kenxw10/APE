@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import String, and_, cast, desc, exists, func, or_, select
+from sqlalchemy import String, and_, cast, desc, exists, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from ape.db.models import (
@@ -39,6 +39,14 @@ ARCHIVE_SOURCE_STAGES = (
     "strategy_trade_intents",
     "strategy_position_outcomes",
 )
+_ARCHIVE_SOURCE_DETAILS = {
+    "reference_ticks": (ReferenceTick, "REFERENCE"),
+    "orderbook_snapshots": (OrderbookSnapshot, "ORDERBOOK"),
+    "public_trades": (PublicTrade, "TRADE"),
+    "strategy_feature_snapshots": (StrategyFeatureSnapshot, "FEATURE_SNAPSHOT"),
+    "strategy_trade_intents": (StrategyTradeIntent, "MARKET_LIFECYCLE"),
+    "strategy_position_outcomes": (StrategyPositionOutcome, "MARKET_LIFECYCLE"),
+}
 _REPLAY_EVENT_HASH_FIELDS = (
     "event_id",
     "market_ticker",
@@ -92,6 +100,7 @@ def archive_research_events(session: Session, *, now: datetime | None = None) ->
 
 def archive_research_batch(session: Session, *, source_stage: str) -> ArchiveBatchResult:
     """Archive at most ``ARCHIVE_BATCH_SIZE`` rows from one deterministic source."""
+    _acquire_archive_source_lock(session, _archive_source_table(source_stage))
     repository = ResearchRepository(session)
     rows, source_table, event_type = _archive_source_rows(session, repository, source_stage)
     if not rows:
@@ -135,22 +144,33 @@ def _archive_source_rows(session: Session, repository: ResearchRepository, sourc
         if not rows:
             rows = list(_updated_archived_rows(session, Market, "markets"))
         return rows, "markets", "MARKET"
-    sources = {
-        "reference_ticks": (ReferenceTick, "REFERENCE"),
-        "orderbook_snapshots": (OrderbookSnapshot, "ORDERBOOK"),
-        "public_trades": (PublicTrade, "TRADE"),
-        "strategy_feature_snapshots": (StrategyFeatureSnapshot, "FEATURE_SNAPSHOT"),
-        "strategy_trade_intents": (StrategyTradeIntent, "MARKET_LIFECYCLE"),
-        "strategy_position_outcomes": (StrategyPositionOutcome, "MARKET_LIFECYCLE"),
-    }
     try:
-        model, event_type = sources[source_stage]
+        model, event_type = _ARCHIVE_SOURCE_DETAILS[source_stage]
     except KeyError as error:
         raise ValueError(f"Unsupported archive source stage: {source_stage}") from error
     return (
         list(_unarchived_rows(session, repository, model, source_stage)),
         source_stage,
         event_type,
+    )
+
+
+def _archive_source_table(source_stage: str) -> str:
+    if source_stage == "markets":
+        return "markets"
+    if source_stage not in _ARCHIVE_SOURCE_DETAILS:
+        raise ValueError(f"Unsupported archive source stage: {source_stage}")
+    return source_stage
+
+
+def _acquire_archive_source_lock(session: Session, source_table: str) -> None:
+    """Serialize mutable archive selection on PostgreSQL; SQLite stays single-process safe."""
+    bind = session.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+    session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+        {"lock_key": f"ape:research_archive:{source_table}"},
     )
 
 
