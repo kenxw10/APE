@@ -449,6 +449,11 @@ class StrategyObserver:
                     pinned_candidate=pinned_candidate,
                     pin_blocker=candidate_pin_blocker,
                 )
+                decisions = _block_candidate_entries_during_pin_cleanup(
+                    decisions=decisions,
+                    cleanup_decisions=cleanup_decisions,
+                    pinned_candidate=pinned_candidate,
+                )
                 decisions.extend(cleanup_decisions)
                 repository = StrategyDecisionsRepository(session)
                 ledger_results: dict[str, DryRunLedgerResult] = {}
@@ -1885,6 +1890,37 @@ def _candidate_pin_cleanup_decisions(
             )
         )
     return cleanup_decisions
+
+
+def _block_candidate_entries_during_pin_cleanup(
+    *,
+    decisions: list[tuple[AppConfig, StrategyDecisionInput]],
+    cleanup_decisions: list[tuple[AppConfig, StrategyDecisionInput]],
+    pinned_candidate: PinnedCandidate | None,
+) -> list[tuple[AppConfig, StrategyDecisionInput]]:
+    """Wait for stale candidate state to drain before opening the replacement candidate."""
+    if not cleanup_decisions or pinned_candidate is None:
+        return decisions
+
+    blocker = "v2_candidate_pin_cleanup_in_progress"
+    blocked_decisions = []
+    for variant_config, decision in decisions:
+        if (
+            decision.strategy_id == pinned_candidate.strategy_id
+            and decision.decision_state == STATE_V2_ENTRY_SIGNAL
+        ):
+            measurements = dict(decision.measurements or {})
+            measurements["candidate_pin_cleanup_in_progress"] = True
+            decision = replace(
+                decision,
+                decision_state=STATE_V2_HARD_GATE_BLOCKED,
+                primary_reason=blocker,
+                measurements=measurements,
+                blockers=[*(decision.blockers or []), blocker],
+                warnings=[*(decision.warnings or []), blocker],
+            )
+        blocked_decisions.append((variant_config, decision))
+    return blocked_decisions
 
 
 def strategy_variant_configs(

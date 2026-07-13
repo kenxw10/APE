@@ -490,6 +490,101 @@ def test_pin_switch_cleans_only_the_previously_pinned_candidate(session) -> None
     assert exit_intent.trigger_classification == "FORCE"
 
 
+def test_candidate_pin_cleanup_blocks_a_replacement_candidate_entry(session) -> None:
+    now = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
+    previous_strategy_id = "btc15_momentum_v2_candidate_previous"
+    current_strategy_id = "btc15_momentum_v2_candidate_current"
+    config = load_config(
+        {
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+            "STRATEGY_V2_ENABLED": "true",
+            "TRADING_ENABLED": "false",
+            "EXECUTE": "false",
+        }
+    )
+    baseline = StrategyDecisionInput(
+        decision_id="candidate-pin-cleanup-baseline",
+        evaluated_at=now,
+        decision_state=STATE_V2_HARD_GATE_BLOCKED,
+        primary_reason="fixture",
+        app_mode="DRY_RUN",
+        strategy_id=V2_STRATEGY_ID,
+        market_ticker="KXBTC15M-PREVIOUS",
+        boundary=Decimal("62000"),
+        brti_value=Decimal("62010"),
+        seconds_left=300,
+        measurements={"features": {"return_5s": "0", "return_15s": "0"}},
+        raw_context_hash="candidate-pin-cleanup",
+    )
+    current_entry = replace(
+        baseline,
+        decision_id="candidate-pin-cleanup-current-entry",
+        decision_state=STATE_V2_ENTRY_SIGNAL,
+        primary_reason="v2_entry_signal",
+        strategy_id=current_strategy_id,
+        market_ticker="KXBTC15M-CURRENT",
+        candidate_side="YES",
+        measurements={"intended_entry_price": "0.62"},
+    )
+    intents = StrategyV2Repository(session)
+    intents.insert_intent_if_absent(
+        StrategyTradeIntentInput(
+            intent_id="candidate-pin-cleanup-previous-entry",
+            strategy_id=previous_strategy_id,
+            decision_id="candidate-pin-cleanup-previous-decision",
+            market_ticker="KXBTC15M-PREVIOUS",
+            side_candidate="YES",
+            action="ENTRY",
+            created_at=now - timedelta(seconds=3),
+            effective_after=now - timedelta(seconds=2),
+            expires_at=now + timedelta(seconds=1),
+            intended_limit_price=Decimal("0.62"),
+            quantity=Decimal("1"),
+        )
+    )
+    candidate = PinnedCandidate(current_strategy_id, "current-config", V2_PARAMETERS, "commit")
+    decisions = [
+        (replace(config, strategy_id=V2_STRATEGY_ID), baseline),
+        (replace(config, strategy_id=current_strategy_id), current_entry),
+    ]
+    cleanup_decisions = observer_module._candidate_pin_cleanup_decisions(
+        config=config,
+        session=session,
+        decisions=decisions,
+        pinned_candidate=candidate,
+        pin_blocker=None,
+    )
+    decisions = observer_module._block_candidate_entries_during_pin_cleanup(
+        decisions=decisions,
+        cleanup_decisions=cleanup_decisions,
+        pinned_candidate=candidate,
+    )
+
+    blocked_current_entry = decisions[1][1]
+    assert blocked_current_entry.decision_state == STATE_V2_HARD_GATE_BLOCKED
+    assert blocked_current_entry.primary_reason == "v2_candidate_pin_cleanup_in_progress"
+
+    repository = StrategyDecisionsRepository(session)
+    for variant_config, decision in [*decisions, *cleanup_decisions]:
+        repository.insert_decision(decision)
+        observer_module._apply_v2_hypothetical_lifecycle(
+            config=variant_config,
+            session=session,
+            decision=decision,
+        )
+
+    previous_intent = intents.get_intent("candidate-pin-cleanup-previous-entry")
+    current_intent = intents.get_pending_intent(
+        strategy_id=current_strategy_id,
+        market_ticker="KXBTC15M-CURRENT",
+        action="ENTRY",
+    )
+    assert previous_intent is not None
+    assert previous_intent.status == "EXPIRED"
+    assert current_intent is None
+
+
 def test_v2_boundary_cross_decision_does_not_create_an_entry_intent(session) -> None:
     now = datetime(2026, 7, 11, 12, 10, tzinfo=UTC)
 

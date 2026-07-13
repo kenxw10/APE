@@ -154,6 +154,7 @@ class DeterministicReplayEngine:
                         blockers[blocker] = blockers.get(blocker, 0) + 1
                 if (
                     evaluation.state == "DRY_RUN_ENTRY_SIGNAL"
+                    and not pending
                     and market not in pending
                     and market not in entry_attempted_markets
                     and open_position is None
