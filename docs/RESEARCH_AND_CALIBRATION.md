@@ -34,10 +34,11 @@ pins fail closed for that candidate only and never replace the control baseline.
 All research APIs are read-only and bounded. No research route can promote, activate,
 trade, inspect an account, access private feeds, or expose raw payloads.
 
-Candidate pins resolve once when the strategy worker starts. They are deliberately
-not revalidated for each observer evaluation: changing a pin, retiring a candidate,
-or changing the environment takes effect only after a worker restart. This preserves
-an immutable running decision configuration and keeps the control variants unchanged.
+Candidate pins are revalidated on every strategy-observer evaluation. Changing or
+retiring a candidate takes effect on the next observer tick without a worker restart:
+an invalid pin fails closed for the candidate, cancels pending candidate ENTRY
+intents, and force-exits existing candidate positions while leaving control variants
+unchanged.
 
 ## Calibration Evidence
 

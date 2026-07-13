@@ -166,6 +166,12 @@ def build_latest_zero_entry(config: AppConfig) -> dict[str, Any]:
                 "configured": True,
                 "report": ResearchRepository(session).latest_zero_entry_report(),
             }
+    except SQLAlchemyError:
+        return {
+            "configured": True,
+            "report": None,
+            "error": "research_database_error",
+        }
     finally:
         engine.dispose()
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import SQLAlchemyError
 
 from ape.api.main import create_app
 from ape.config import load_config
@@ -11,6 +12,7 @@ from ape.db.models import ResearchReplayEvent
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.repositories.inputs import WorkerHeartbeatInput
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
+from ape.research.repository import ResearchRepository
 from ape.research.status import build_research_status
 from ape.worker.services import WORKER_SERVICE_RESEARCH
 
@@ -54,6 +56,40 @@ def test_research_routes_are_bounded_read_only_and_safe_without_data(tmp_path) -
                 route for route in app.routes if getattr(route, "path", "").startswith("/research/")
             ]
             assert all(route.methods == {"GET"} for route in research_routes)
+    finally:
+        engine.dispose()
+
+
+def test_zero_entry_route_returns_bounded_database_error(tmp_path, monkeypatch) -> None:
+    config = load_config(
+        {
+            "DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'zero-entry-db-error.sqlite'}",
+            "APP_MODE": "DRY_RUN",
+            "TRADING_ENABLED": "false",
+            "EXECUTE": "false",
+        }
+    )
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+
+    def raise_database_error(_self) -> None:
+        raise SQLAlchemyError("research table unavailable")
+
+    try:
+        monkeypatch.setattr(
+            ResearchRepository,
+            "latest_zero_entry_report",
+            raise_database_error,
+        )
+        with TestClient(create_app(config)) as client:
+            response = client.get("/research/zero-entry/latest")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "configured": True,
+            "report": None,
+            "error": "research_database_error",
+        }
     finally:
         engine.dispose()
 
