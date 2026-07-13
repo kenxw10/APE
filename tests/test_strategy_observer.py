@@ -344,6 +344,152 @@ def test_pin_failure_runs_pending_candidate_intent_cleanup(tmp_path, monkeypatch
         engine.dispose()
 
 
+def test_pin_switch_cleans_only_the_previously_pinned_candidate(session) -> None:
+    now = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
+    previous_strategy_id = "btc15_momentum_v2_candidate_previous"
+    current_strategy_id = "btc15_momentum_v2_candidate_current"
+    previous_config_version_id = "candidate-config-previous"
+    current_config_version_id = "candidate-config-current"
+    config = load_config(
+        {
+            "APP_MODE": "DRY_RUN",
+            "STRATEGY_DRY_RUN_ENABLED": "true",
+            "STRATEGY_V2_ENABLED": "true",
+            "STRATEGY_V2_CANDIDATE_CONFIG_VERSION_ID": current_config_version_id,
+            "TRADING_ENABLED": "false",
+            "EXECUTE": "false",
+        }
+    )
+    baseline = StrategyDecisionInput(
+        decision_id="candidate-pin-switch-baseline",
+        evaluated_at=now,
+        decision_state=STATE_V2_HARD_GATE_BLOCKED,
+        primary_reason="fixture",
+        app_mode="DRY_RUN",
+        strategy_id=V2_STRATEGY_ID,
+        market_ticker="KXBTC15M-PIN-SWITCH-PREVIOUS",
+        boundary=Decimal("62000"),
+        brti_value=Decimal("62010"),
+        seconds_left=300,
+        measurements={"features": {"return_5s": "0", "return_15s": "0"}},
+        raw_context_hash="candidate-pin-switch",
+    )
+    v2_repository = StrategyV2Repository(session)
+    v2_repository.ensure_config_version(
+        replace(
+            observer_module.built_in_config_version(previous_strategy_id, V2_PARAMETERS),
+            strategy_config_version_id=previous_config_version_id,
+            code_commit_sha="previous-commit",
+        )
+    )
+    v2_repository.ensure_config_version(
+        replace(
+            observer_module.built_in_config_version(current_strategy_id, V2_PARAMETERS),
+            strategy_config_version_id=current_config_version_id,
+            code_commit_sha="current-commit",
+        )
+    )
+    v2_repository.insert_intent_if_absent(
+        StrategyTradeIntentInput(
+            intent_id="candidate-pin-switch-previous-entry",
+            strategy_id=previous_strategy_id,
+            strategy_config_version_id=previous_config_version_id,
+            decision_id="candidate-pin-switch-previous-decision",
+            market_ticker="KXBTC15M-PIN-SWITCH-PREVIOUS",
+            side_candidate="YES",
+            action="ENTRY",
+            created_at=now - timedelta(seconds=3),
+            effective_after=now - timedelta(seconds=2),
+            expires_at=now + timedelta(seconds=1),
+            intended_limit_price=Decimal("0.62"),
+            quantity=Decimal("1"),
+        )
+    )
+    v2_repository.insert_intent_if_absent(
+        StrategyTradeIntentInput(
+            intent_id="candidate-pin-switch-current-entry",
+            strategy_id=current_strategy_id,
+            strategy_config_version_id=current_config_version_id,
+            decision_id="candidate-pin-switch-current-decision",
+            market_ticker="KXBTC15M-PIN-SWITCH-CURRENT",
+            side_candidate="YES",
+            action="ENTRY",
+            created_at=now - timedelta(seconds=3),
+            effective_after=now - timedelta(seconds=2),
+            expires_at=now + timedelta(seconds=1),
+            intended_limit_price=Decimal("0.62"),
+            quantity=Decimal("1"),
+        )
+    )
+    StrategyDryRunRepository(session).insert_position_if_absent(
+        StrategyDryRunPositionInput(
+            position_id="candidate-pin-switch-previous-position",
+            strategy_id=previous_strategy_id,
+            market_ticker="KXBTC15M-PIN-SWITCH-PREVIOUS",
+            decision_id="candidate-pin-switch-previous-decision",
+            side_candidate="YES",
+            economic_side="YES",
+            opened_at=now - timedelta(minutes=1),
+            open_price=Decimal("0.62"),
+            contract_count=1,
+            entry_reason="fixture",
+            status="OPEN",
+            strategy_config_version_id=previous_config_version_id,
+        )
+    )
+    OrderbookRepository(session).insert_snapshot(
+        OrderbookSnapshotInput(
+            market_ticker="KXBTC15M-PIN-SWITCH-PREVIOUS",
+            received_at=now - timedelta(seconds=1),
+            yes_bid=Decimal("0.60"),
+            yes_bid_count=Decimal("1"),
+            yes_ask=Decimal("0.61"),
+            yes_ask_count=Decimal("1"),
+            book_status="ok",
+        )
+    )
+
+    cleanup_decisions = observer_module._candidate_pin_cleanup_decisions(
+        config=config,
+        session=session,
+        decisions=[(config, baseline)],
+        pinned_candidate=PinnedCandidate(
+            current_strategy_id,
+            current_config_version_id,
+            V2_PARAMETERS,
+            "current-commit",
+        ),
+        pin_blocker=None,
+    )
+
+    assert len(cleanup_decisions) == 1
+    cleanup_config, cleanup = cleanup_decisions[0]
+    assert cleanup.strategy_id == previous_strategy_id
+    assert cleanup.primary_reason == "candidate_pin_replaced"
+    assert cleanup.strategy_config_version_id == previous_config_version_id
+    StrategyDecisionsRepository(session).insert_decision(cleanup)
+    observer_module._apply_v2_hypothetical_lifecycle(
+        config=cleanup_config,
+        session=session,
+        decision=cleanup,
+    )
+
+    previous_intent = v2_repository.get_intent("candidate-pin-switch-previous-entry")
+    current_intent = v2_repository.get_intent("candidate-pin-switch-current-entry")
+    exit_intent = v2_repository.get_pending_exit_intent(
+        position_id="candidate-pin-switch-previous-position"
+    )
+
+    assert previous_intent is not None
+    assert previous_intent.status == "EXPIRED"
+    assert previous_intent.resolution_reason == "v2_candidate_pin_replaced_entry_cancelled"
+    assert current_intent is not None
+    assert current_intent.status == "PENDING"
+    assert exit_intent is not None
+    assert exit_intent.trigger == "v2_candidate_pin_replaced_force_exit"
+    assert exit_intent.trigger_classification == "FORCE"
+
+
 def test_v2_boundary_cross_decision_does_not_create_an_entry_intent(session) -> None:
     now = datetime(2026, 7, 11, 12, 10, tzinfo=UTC)
 

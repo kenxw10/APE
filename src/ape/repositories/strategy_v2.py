@@ -143,6 +143,15 @@ class StrategyV2Repository:
             is not None
         )
 
+    def list_pending_intents(self) -> list[StrategyTradeIntent]:
+        return list(
+            self.session.scalars(
+                select(StrategyTradeIntent)
+                .where(StrategyTradeIntent.status == "PENDING")
+                .order_by(StrategyTradeIntent.created_at.asc(), StrategyTradeIntent.id.asc())
+            )
+        )
+
     def expire_pending_entry_intents(
         self,
         *,

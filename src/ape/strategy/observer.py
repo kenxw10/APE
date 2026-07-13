@@ -442,14 +442,14 @@ class StrategyObserver:
                     pin_blocker=candidate_pin_blocker,
                     pin_resolved=True,
                 )
-                cleanup = _candidate_pin_cleanup_decision(
+                cleanup_decisions = _candidate_pin_cleanup_decisions(
                     config=self.config,
                     session=session,
                     decisions=decisions,
+                    pinned_candidate=pinned_candidate,
                     pin_blocker=candidate_pin_blocker,
                 )
-                if cleanup is not None:
-                    decisions.append(cleanup)
+                decisions.extend(cleanup_decisions)
                 repository = StrategyDecisionsRepository(session)
                 ledger_results: dict[str, DryRunLedgerResult] = {}
                 for variant_config, decision in decisions:
@@ -1791,15 +1791,14 @@ def evaluate_strategy_variants(
     return results
 
 
-def _candidate_pin_cleanup_decision(
+def _candidate_pin_cleanup_decisions(
     *,
     config: AppConfig,
     session: Session,
     decisions: list[tuple[AppConfig, StrategyDecisionInput]],
+    pinned_candidate: PinnedCandidate | None,
     pin_blocker: str | None,
-) -> tuple[AppConfig, StrategyDecisionInput] | None:
-    if pin_blocker is None or not config.strategy_v2_candidate_config_version_id:
-        return None
+) -> list[tuple[AppConfig, StrategyDecisionInput]]:
     baseline = next(
         (
             (variant_config, decision)
@@ -1809,48 +1808,83 @@ def _candidate_pin_cleanup_decision(
         None,
     )
     if baseline is None:
-        return None
-    version = StrategyV2Repository(session).get_config_version(
-        config.strategy_v2_candidate_config_version_id
-    )
-    if (
-        version is None
-        or version.strategy_id == V2_STRATEGY_ID
-        or not _is_v2_strategy_id(version.strategy_id)
-    ):
-        return None
+        return []
     intents = StrategyV2Repository(session)
     positions = StrategyDryRunRepository(session)
-    if not intents.has_pending_intents(
-        strategy_id=version.strategy_id
-    ) and not positions.count_open_positions(strategy_id=version.strategy_id):
-        return None
-    variant_config, decision = baseline
-    measurements = dict(decision.measurements or {})
-    measurements["candidate_pin_cleanup"] = True
-    measurements["candidate_pin_blocker"] = pin_blocker
-    return (
-        replace(variant_config, strategy_id=version.strategy_id),
-        replace(
-            decision,
-            decision_id=_decision_id(
-                evaluated_at=decision.evaluated_at,
-                poll_seconds=config.strategy_observer_poll_seconds,
-                strategy_id=version.strategy_id,
-                market_ticker=decision.market_ticker,
-                context_hash=decision.raw_context_hash or "candidate-pin-cleanup",
-            ),
-            decision_state=STATE_V2_HARD_GATE_BLOCKED,
-            primary_reason=pin_blocker,
-            strategy_id=version.strategy_id,
-            candidate_side=None,
-            strategy_config_version_id=version.strategy_config_version_id,
-            code_commit_sha=version.code_commit_sha,
-            measurements=measurements,
-            blockers=[pin_blocker],
-            warnings=[*(decision.warnings or []), pin_blocker],
-        ),
+    active_config_versions: dict[str, str] = {}
+    active_strategy_ids = set()
+    for intent in intents.list_pending_intents():
+        active_strategy_ids.add(intent.strategy_id)
+        if intent.strategy_config_version_id is not None:
+            active_config_versions.setdefault(
+                intent.strategy_id,
+                intent.strategy_config_version_id,
+            )
+    for position in positions.list_open_positions():
+        active_strategy_ids.add(position.strategy_id)
+        if position.strategy_config_version_id is not None:
+            active_config_versions.setdefault(
+                position.strategy_id,
+                position.strategy_config_version_id,
+            )
+    current_strategy_id = pinned_candidate.strategy_id if pinned_candidate is not None else None
+    stale_strategy_ids = sorted(
+        strategy_id
+        for strategy_id in active_strategy_ids
+        if strategy_id != V2_STRATEGY_ID
+        and strategy_id != current_strategy_id
+        and _is_v2_strategy_id(strategy_id)
     )
+    if not stale_strategy_ids:
+        return []
+
+    variant_config, decision = baseline
+    cleanup_reason = pin_blocker or (
+        "candidate_pin_replaced"
+        if current_strategy_id is not None
+        else "candidate_pin_not_configured"
+    )
+    cleanup_decisions = []
+    for strategy_id in stale_strategy_ids:
+        config_version_id = active_config_versions.get(strategy_id)
+        version = (
+            intents.get_config_version(config_version_id)
+            if config_version_id is not None
+            else None
+        )
+        measurements = dict(decision.measurements or {})
+        measurements["candidate_pin_cleanup"] = True
+        measurements["candidate_pin_blocker"] = cleanup_reason
+        measurements["candidate_pin_cleanup_reason"] = cleanup_reason
+        cleanup_decisions.append(
+            (
+                replace(variant_config, strategy_id=strategy_id),
+                replace(
+                    decision,
+                    decision_id=_decision_id(
+                        evaluated_at=decision.evaluated_at,
+                        poll_seconds=config.strategy_observer_poll_seconds,
+                        strategy_id=strategy_id,
+                        market_ticker=decision.market_ticker,
+                        context_hash=decision.raw_context_hash or "candidate-pin-cleanup",
+                    ),
+                    decision_state=STATE_V2_HARD_GATE_BLOCKED,
+                    primary_reason=cleanup_reason,
+                    strategy_id=strategy_id,
+                    candidate_side=None,
+                    strategy_config_version_id=(
+                        version.strategy_config_version_id
+                        if version is not None
+                        else config_version_id
+                    ),
+                    code_commit_sha=version.code_commit_sha if version is not None else None,
+                    measurements=measurements,
+                    blockers=[cleanup_reason],
+                    warnings=[*(decision.warnings or []), cleanup_reason],
+                ),
+            )
+        )
+    return cleanup_decisions
 
 
 def strategy_variant_configs(
@@ -5164,9 +5198,14 @@ def _v2_management_state(
 ) -> tuple[str, str | None, str | None, str | None]:
     measurements = decision.measurements if isinstance(decision.measurements, dict) else {}
     if measurements.get("candidate_pin_cleanup") is True:
+        force_exit_reason = (
+            "v2_candidate_pin_replaced_force_exit"
+            if measurements.get("candidate_pin_cleanup_reason") == "candidate_pin_replaced"
+            else "v2_candidate_pin_invalid_force_exit"
+        )
         return (
             STATE_V2_FORCE_EXIT,
-            "v2_candidate_pin_invalid_force_exit",
+            force_exit_reason,
             "FORCE",
             None,
         )
@@ -5340,10 +5379,15 @@ def _apply_v2_hypothetical_lifecycle(
     decisions = StrategyDecisionsRepository(session)
     measurements = decision.measurements if isinstance(decision.measurements, dict) else {}
     if measurements.get("candidate_pin_cleanup") is True:
+        entry_cancellation_reason = (
+            "v2_candidate_pin_replaced_entry_cancelled"
+            if measurements.get("candidate_pin_cleanup_reason") == "candidate_pin_replaced"
+            else "v2_candidate_pin_invalid_entry_cancelled"
+        )
         cancelled_entries = intents.expire_pending_entry_intents(
             strategy_id=strategy_id,
             resolved_at=now,
-            reason="v2_candidate_pin_invalid_entry_cancelled",
+            reason=entry_cancellation_reason,
         )
         if cancelled_entries:
             latest_event_type = "EXPIRED"
