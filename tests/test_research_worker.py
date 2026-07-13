@@ -636,5 +636,85 @@ def test_automatic_governance_uses_persisted_candidate_evidence(tmp_path) -> Non
             assert repository.advance_candidate_governance(
                 candidate_id="candidate-governance", actor="test"
             ) == []
+
+            StrategyV2Repository(session).ensure_config_version(
+                StrategyConfigVersionInput(
+                    strategy_config_version_id="config-governance-replacement",
+                    strategy_id="btc15_momentum_v2_candidate_governance_replacement",
+                    architecture_version=V2_ARCHITECTURE_VERSION,
+                    feature_schema_version=V2_FEATURE_SCHEMA_VERSION,
+                    parameter_snapshot=V2_PARAMETERS,
+                    parameter_hash="fixture-replacement",
+                    code_commit_sha="fixture",
+                    source="RESEARCH",
+                    parent_config_version_id="config-baseline",
+                    lifecycle_state="DRAFT",
+                    candidate_id="candidate-governance-replacement",
+                )
+            )
+            repository.create_candidate(
+                {
+                    "candidate_id": "candidate-governance-replacement",
+                    "strategy_config_version_id": "config-governance-replacement",
+                    "calibration_run_id": "calibration-governance",
+                    "parent_strategy_config_version_id": "config-baseline",
+                    "generated_strategy_id": "btc15_momentum_v2_candidate_governance_replacement",
+                    "architecture_version": V2_ARCHITECTURE_VERSION,
+                    "feature_schema_version": V2_FEATURE_SCHEMA_VERSION,
+                    "replay_schema_version": REPLAY_SCHEMA_VERSION,
+                    "model_type": "WEIGHTED_HEURISTIC",
+                    "parameter_snapshot": V2_PARAMETERS,
+                    "model_artifact_checksum": "fixture-replacement",
+                    "validation_metrics": metrics,
+                    "holdout_metrics": {
+                        "net_pnl_per_market": "1",
+                        "closed_trade_count": 50,
+                        "bootstrap": {"net_pnl_per_market": {"lower": "1"}},
+                    },
+                    "lifecycle_state": "DRAFT",
+                    "eligibility_status": "RESEARCH_ONLY",
+                }
+            )
+            for index in range(50):
+                repository.insert_replay_trade(
+                    {
+                        "trade_id": f"replacement-governance-trade-{index}",
+                        "replay_run_id": "replay-governance",
+                        "candidate_id": "candidate-governance-replacement",
+                        "strategy_config_version_id": "config-governance-replacement",
+                        "market_ticker": f"M{index}",
+                        "side": "YES",
+                        "status": "CLOSED",
+                        "entry_fill_event_id": f"replacement-governance-entry-{index}",
+                        "measurements": {
+                            "evidence_partition": "frozen_holdout",
+                            "source_decision_id": f"replacement-governance-decision-{index}",
+                        },
+                    }
+                )
+
+            replacement_transitions = repository.advance_candidate_governance(
+                candidate_id="candidate-governance-replacement", actor="test"
+            )
+            replacement = repository.get_candidate("candidate-governance-replacement")
+            replacement_events = repository.list_recent_governance_events(
+                10,
+                candidate_id="candidate-governance-replacement",
+            )
+
+            assert [event.to_state for event in replacement_transitions] == [
+                "BACKTESTED",
+                "SHADOW",
+            ]
+            assert replacement is not None
+            assert replacement.lifecycle_state == "SHADOW"
+            assert replacement.governance_report["blockers"] == [
+                "active_dry_run_challenger_exists_for_architecture"
+            ]
+            assert replacement_events[0].from_state == "SHADOW"
+            assert replacement_events[0].to_state == "SHADOW"
+            assert replacement_events[0].reason == (
+                "active_dry_run_challenger_exists_for_architecture"
+            )
     finally:
         engine.dispose()

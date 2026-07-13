@@ -291,6 +291,49 @@ class ResearchRepository:
                     }
                     self.session.flush()
                     break
+                self._lock_challenger_architecture(candidate.architecture_version)
+                active_challenger_count = self.active_challenger_count(
+                    candidate.architecture_version
+                )
+                if active_challenger_count > 0:
+                    blocker = "active_dry_run_challenger_exists_for_architecture"
+                    blocked_evidence = {
+                        **evidence,
+                        "active_challenger_count": active_challenger_count,
+                        "blockers": [blocker],
+                    }
+                    candidate.governance_report = {
+                        "evidence": blocked_evidence,
+                        "blockers": [blocker],
+                    }
+                    self.record_governance_event(
+                        {
+                            "governance_event_id": (
+                                "governance-"
+                                + hashlib.sha256(
+                                    json.dumps(
+                                        {
+                                            "candidate": candidate_id,
+                                            "from": candidate.lifecycle_state,
+                                            "to": candidate.lifecycle_state,
+                                            "reason": blocker,
+                                            "evidence": blocked_evidence,
+                                        },
+                                        sort_keys=True,
+                                        default=str,
+                                    ).encode()
+                                ).hexdigest()[:24]
+                            ),
+                            "candidate_id": candidate_id,
+                            "from_state": candidate.lifecycle_state,
+                            "to_state": candidate.lifecycle_state,
+                            "actor": actor,
+                            "reason": blocker,
+                            "evidence": blocked_evidence,
+                        }
+                    )
+                    self.session.flush()
+                    break
             transitions.append(
                 self.transition_candidate_state(
                     candidate_id=candidate_id,
