@@ -26,6 +26,24 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
         "worker_observed_enabled": None,
         "heartbeat_fresh": False,
         "effective_enabled": False,
+        "healthy": False,
+        "worker_state": "waiting_for_worker",
+        "cycle_state": "waiting_for_worker",
+        "current_stage": None,
+        "last_successful_stage": None,
+        "cycle_id": None,
+        "cycle_running": False,
+        "last_error": None,
+        "statement_timeout_detected": False,
+        "cycle_started_at": None,
+        "cycle_finished_at": None,
+        "current_source_table": None,
+        "completed_archive_batches": None,
+        "archive_event_count": None,
+        "archived_counts_by_type": {},
+        "last_progress_at": None,
+        "failed_stage": None,
+        "last_archive_batch": None,
         "worker_role": "research",
         "worker_heartbeat": None,
         "last_archive_run": None,
@@ -58,11 +76,16 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
             )
             details = metadata.get("research") if isinstance(metadata.get("research"), dict) else {}
             heartbeat_at = _as_utc(heartbeat.heartbeat_at) if heartbeat is not None else None
+            heartbeat_interval_seconds = _positive_float(
+                details.get("poll_seconds"), config.research_poll_seconds
+            )
             heartbeat_fresh = bool(
                 heartbeat_at is not None
                 and (checked_at - heartbeat_at).total_seconds()
-                <= max(config.research_poll_seconds * 2, 60.0)
+                <= max(heartbeat_interval_seconds * 2, 60.0)
             )
+            worker_state = str(details.get("worker_state") or "waiting_for_worker")
+            last_error = _safe_error(details.get("last_error"))
             latest_replay = repository.latest_replay_run()
             latest_calibration = repository.latest_calibration_run()
             outcomes = repository.list_complete_outcomes()
@@ -71,6 +94,10 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
                 effective_enabled=bool(details.get("enabled", False))
                 and bool(heartbeat.is_safe if heartbeat is not None else False)
                 and heartbeat_fresh,
+                healthy=bool(details.get("enabled", False))
+                and bool(heartbeat.is_safe if heartbeat is not None else False)
+                and heartbeat_fresh
+                and worker_state == "healthy",
                 worker_observed_configuration={
                     "research_enabled": details.get("enabled"),
                     "calibration_enabled": details.get("calibration_enabled"),
@@ -83,11 +110,33 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
                 heartbeat_fresh=heartbeat_fresh,
                 worker_heartbeat={
                     "at": heartbeat_at.isoformat() if heartbeat_at else None,
-                    "metadata": details,
+                    "metadata": _safe_worker_metadata(details),
                 }
                 if heartbeat
                 else None,
                 last_archive_run=details.get("last_archive_run"),
+                last_archive_batch=details.get("last_archive_batch"),
+                worker_state=worker_state,
+                cycle_state=str(details.get("cycle_state") or worker_state),
+                current_stage=details.get("current_stage"),
+                last_successful_stage=details.get("last_successful_stage"),
+                cycle_id=details.get("cycle_id"),
+                cycle_running=bool(details.get("cycle_running")),
+                last_error=last_error,
+                statement_timeout_detected=bool(
+                    details.get("statement_timeout_detected")
+                    or (last_error or {}).get("statement_timeout_detected")
+                ),
+                cycle_started_at=details.get("cycle_started_at"),
+                cycle_finished_at=details.get("cycle_finished_at"),
+                current_source_table=details.get("current_source_table"),
+                completed_archive_batches=details.get("completed_archive_batches"),
+                archive_event_count=details.get("archive_event_count"),
+                archived_counts_by_type=details.get("archived_counts_by_type")
+                if isinstance(details.get("archived_counts_by_type"), dict)
+                else {},
+                last_progress_at=details.get("last_progress_at"),
+                failed_stage=details.get("failed_stage"),
                 last_zero_entry_audit=repository.latest_zero_entry_report(),
                 last_replay_run=_row(latest_replay),
                 last_calibration_run=_row(latest_calibration),
@@ -189,3 +238,56 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _positive_float(value: Any, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _safe_error(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        "type": str(value.get("type") or "ResearchError")[:80],
+        "code": str(value.get("code") or "research_stage_failed")[:80],
+        "statement_timeout_detected": bool(value.get("statement_timeout_detected")),
+    }
+
+
+def _safe_worker_metadata(details: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "enabled": details.get("enabled"),
+        "calibration_enabled": details.get("calibration_enabled"),
+        "worker_role": details.get("worker_role"),
+        "worker_state": details.get("worker_state"),
+        "cycle_state": details.get("cycle_state"),
+        "current_stage": details.get("current_stage"),
+        "last_successful_stage": details.get("last_successful_stage"),
+        "cycle_id": details.get("cycle_id"),
+        "cycle_running": bool(details.get("cycle_running")),
+        "cycle_started_at": details.get("cycle_started_at"),
+        "cycle_finished_at": details.get("cycle_finished_at"),
+        "current_source_table": details.get("current_source_table"),
+        "completed_archive_batches": details.get("completed_archive_batches"),
+        "archive_event_count": details.get("archive_event_count"),
+        "archived_counts_by_type": details.get("archived_counts_by_type")
+        if isinstance(details.get("archived_counts_by_type"), dict)
+        else {},
+        "last_progress_at": details.get("last_progress_at"),
+        "failed_stage": details.get("failed_stage"),
+        "last_archive_batch": details.get("last_archive_batch"),
+        "last_error": _safe_error(details.get("last_error")),
+        "statement_timeout_detected": bool(details.get("statement_timeout_detected")),
+        "warnings": _bounded_strings(details.get("warnings")),
+        "blockers": _bounded_strings(details.get("blockers")),
+    }
+
+
+def _bounded_strings(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item)[:128] for item in value[:8]]

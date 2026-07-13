@@ -749,3 +749,26 @@ Initial deployment:
 5. Leave `STRATEGY_V2_CANDIDATE_CONFIG_VERSION_ID` unset initially.
 6. Validate archive, official outcome coverage, labels, replay, calibration, and governance read APIs.
 7. Keep `TRADING_ENABLED=false` and `EXECUTE=false`; do not activate paper or live modes.
+
+## PR 11a Research Runtime Rollout
+
+PR 11a does not add a migration, environment variable, Railway service, credential,
+or execution capability. It changes only the existing research worker's persistence
+boundary: archive source rows commit in batches of at most 250 and heartbeat progress
+is written independently from archive, replay, and calibration transactions.
+
+After the PR is merged and the required GPT audit and exact unsharded PR CI are green:
+
+1. Leave the research worker paused until the deployed code is confirmed.
+2. Start the existing `ape-research-worker` with `RESEARCH_ENABLED=true` and
+   `CALIBRATION_ENABLED=false` first. Keep `APP_MODE=DRY_RUN`,
+   `TRADING_ENABLED=false`, and `EXECUTE=false`.
+3. Check `/research/status` for a fresh heartbeat, `worker_state=healthy`, a completed
+   archive/replay stage, and no sanitized database error.
+4. Check `/research/coverage/latest`, `/research/replay/runs/recent`, and
+   `/research/zero-entry/latest` before enabling calibration.
+5. Only after those records progress normally, enable `CALIBRATION_ENABLED=true` on
+   the same research worker and re-check `/research/status` for the calibration stage.
+
+Do not enable paper trading, live trading, private credentials, candidate pins, or
+additional services as part of this rollout.

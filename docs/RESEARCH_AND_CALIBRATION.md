@@ -34,6 +34,17 @@ pins fail closed for that candidate only and never replace the control baseline.
 All research APIs are read-only and bounded. No research route can promote, activate,
 trade, inspect an account, access private feeds, or expose raw payloads.
 
+## Runtime Recovery
+
+PR 11a keeps the existing research semantics but makes archive work resumable. The
+research worker commits at most 250 source events per archive batch, writes a fresh
+worker heartbeat before work and after each committed batch, and records the current
+stage through archive, label refresh, coverage, baseline replay, and calibration.
+If a database stage fails, the error heartbeat is committed from a separate session;
+already committed archive batches and baseline replay evidence remain available for
+the next cycle. Error metadata is bounded and sanitized, including a statement-timeout
+indicator, and never includes connection strings, SQL parameters, or raw payloads.
+
 Candidate pins resolve once when the strategy worker starts. The running process does
 not hot reload candidate configuration. Database or environment changes require a
 worker restart. At startup, the resolved candidate or startup blocker is compared with

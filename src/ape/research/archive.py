@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import String, and_, cast, desc, exists, func, or_, select
+from sqlalchemy import String, and_, cast, desc, exists, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from ape.db.models import (
@@ -28,7 +28,25 @@ from ape.research import REPLAY_SCHEMA_VERSION, RESEARCH_LABEL_SCHEMA_VERSION
 from ape.research.fees import verified_kalshi_taker_fee_model
 from ape.research.repository import ResearchRepository
 
-ARCHIVE_BATCH_SIZE = 5_000
+ARCHIVE_BATCH_SIZE = 250
+ARCHIVE_MAX_BATCHES_PER_CYCLE = 20
+ARCHIVE_SOURCE_STAGES = (
+    "markets",
+    "reference_ticks",
+    "orderbook_snapshots",
+    "public_trades",
+    "strategy_feature_snapshots",
+    "strategy_trade_intents",
+    "strategy_position_outcomes",
+)
+_ARCHIVE_SOURCE_DETAILS = {
+    "reference_ticks": (ReferenceTick, "REFERENCE"),
+    "orderbook_snapshots": (OrderbookSnapshot, "ORDERBOOK"),
+    "public_trades": (PublicTrade, "TRADE"),
+    "strategy_feature_snapshots": (StrategyFeatureSnapshot, "FEATURE_SNAPSHOT"),
+    "strategy_trade_intents": (StrategyTradeIntent, "MARKET_LIFECYCLE"),
+    "strategy_position_outcomes": (StrategyPositionOutcome, "MARKET_LIFECYCLE"),
+}
 _REPLAY_EVENT_HASH_FIELDS = (
     "event_id",
     "market_ticker",
@@ -57,36 +75,122 @@ class ArchiveResult:
     coverage: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class ArchiveBatchResult:
+    source_stage: str
+    source_rows: int
+    archived_events: int
+    archived_by_type: dict[str, int]
+
+
 def archive_research_events(session: Session, *, now: datetime | None = None) -> ArchiveResult:
     """Incrementally archive normalized, replayable source data without raw payload copies."""
     checked_at = _utc(now or datetime.now(UTC))
-    repository = ResearchRepository(session)
     counts: dict[str, int] = {}
-    for row in _unarchived_rows(session, repository, Market, "markets"):
-        _archive(repository, _market_event(row), counts)
-    for row in _updated_archived_rows(session, Market, "markets"):
-        _archive(repository, _market_event(row), counts)
-    for row in _unarchived_rows(session, repository, ReferenceTick, "reference_ticks"):
-        _archive(repository, _reference_event(session, row), counts)
-    for row in _unarchived_rows(session, repository, OrderbookSnapshot, "orderbook_snapshots"):
-        _archive(repository, _orderbook_event(row), counts)
-    for row in _unarchived_rows(session, repository, PublicTrade, "public_trades"):
-        _archive(repository, _trade_event(row), counts)
-    for row in _unarchived_rows(
-        session, repository, StrategyFeatureSnapshot, "strategy_feature_snapshots"
-    ):
-        _archive(repository, _feature_event(session, row), counts)
-    for row in _unarchived_rows(session, repository, StrategyTradeIntent, "strategy_trade_intents"):
-        _archive(repository, _lifecycle_event(row, "strategy_trade_intents"), counts)
-    for row in _unarchived_rows(
-        session, repository, StrategyPositionOutcome, "strategy_position_outcomes"
-    ):
-        _archive(repository, _lifecycle_event(row, "strategy_position_outcomes"), counts)
+    for source_stage in ARCHIVE_SOURCE_STAGES:
+        while True:
+            batch = archive_research_batch(session, source_stage=source_stage)
+            _merge_archive_counts(counts, batch.archived_by_type)
+            if batch.source_rows == 0:
+                break
+    refresh_research_archive_labels(session)
+    coverage = archive_research_coverage(session, now=checked_at)
+    return ArchiveResult(sum(counts.values()), counts, 0, coverage)
+
+
+def archive_research_batch(session: Session, *, source_stage: str) -> ArchiveBatchResult:
+    """Archive at most ``ARCHIVE_BATCH_SIZE`` rows from one deterministic source."""
+    _acquire_archive_source_lock(session, _archive_source_table(source_stage))
+    repository = ResearchRepository(session)
+    rows, source_table, event_type = _archive_source_rows(session, repository, source_stage)
+    if not rows:
+        return ArchiveBatchResult(source_stage, 0, 0, {})
+    events = [_archive_source_event(session, source_stage, row) for row in rows]
+    changed = repository.archive_events_batch(events)
+    return ArchiveBatchResult(
+        source_stage=source_stage,
+        source_rows=len(rows),
+        archived_events=changed,
+        archived_by_type={event_type: changed} if changed else {},
+    )
+
+
+def archive_research_source_pending(session: Session, *, source_stage: str) -> bool:
+    """Read-only backlog check used when a runtime batch budget is exhausted."""
+    rows, _, _ = _archive_source_rows(session, ResearchRepository(session), source_stage)
+    return bool(rows)
+
+
+def refresh_research_archive_labels(session: Session) -> None:
+    """Persist reference association and mature labels independently of replay work."""
+    repository = ResearchRepository(session)
     _associate_unassigned_reference_events(session)
     _refresh_mature_labels(session, repository)
+    session.flush()
+
+
+def archive_research_coverage(session: Session, *, now: datetime | None = None) -> dict[str, Any]:
+    checked_at = _utc(now or datetime.now(UTC))
+    repository = ResearchRepository(session)
     coverage = _coverage(session, data_cutoff=checked_at)
     repository.archive_event(_coverage_event(coverage, checked_at))
-    return ArchiveResult(sum(counts.values()), counts, 0, coverage)
+    session.flush()
+    return coverage
+
+
+def _archive_source_rows(session: Session, repository: ResearchRepository, source_stage: str):
+    if source_stage == "markets":
+        rows = list(_unarchived_rows(session, repository, Market, "markets"))
+        if not rows:
+            rows = list(_updated_archived_rows(session, Market, "markets"))
+        return rows, "markets", "MARKET"
+    try:
+        model, event_type = _ARCHIVE_SOURCE_DETAILS[source_stage]
+    except KeyError as error:
+        raise ValueError(f"Unsupported archive source stage: {source_stage}") from error
+    return (
+        list(_unarchived_rows(session, repository, model, source_stage)),
+        source_stage,
+        event_type,
+    )
+
+
+def _archive_source_table(source_stage: str) -> str:
+    if source_stage == "markets":
+        return "markets"
+    if source_stage not in _ARCHIVE_SOURCE_DETAILS:
+        raise ValueError(f"Unsupported archive source stage: {source_stage}")
+    return source_stage
+
+
+def _acquire_archive_source_lock(session: Session, source_table: str) -> None:
+    """Serialize mutable archive selection on PostgreSQL; SQLite stays single-process safe."""
+    bind = session.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+    session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+        {"lock_key": f"ape:research_archive:{source_table}"},
+    )
+
+
+def _archive_source_event(session: Session, source_stage: str, row: Any) -> dict[str, Any]:
+    if source_stage == "markets":
+        return _market_event(row)
+    if source_stage == "reference_ticks":
+        return _reference_event(session, row)
+    if source_stage == "orderbook_snapshots":
+        return _orderbook_event(row)
+    if source_stage == "public_trades":
+        return _trade_event(row)
+    if source_stage == "strategy_feature_snapshots":
+        return _feature_event(session, row)
+    return _lifecycle_event(row, source_stage)
+
+
+def _merge_archive_counts(target: dict[str, int], incoming: dict[str, int]) -> None:
+    for event_type, count in incoming.items():
+        target[event_type] = target.get(event_type, 0) + count
 
 
 def _unarchived_rows(session: Session, repository: ResearchRepository, model, source_table: str):
@@ -290,7 +394,6 @@ def _archive(repository: ResearchRepository, event: dict[str, Any], counts: dict
         existing.event_time = event["event_time"]
         existing.received_at = event["received_at"]
         existing.event_hash = _normalized_event_hash(existing)
-        repository.session.flush()
         return
     repository.archive_event(event)
     counts[event["event_type"]] = counts.get(event["event_type"], 0) + 1
