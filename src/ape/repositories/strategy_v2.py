@@ -143,6 +143,33 @@ class StrategyV2Repository:
             is not None
         )
 
+    def expire_pending_entry_intents(
+        self,
+        *,
+        strategy_id: str,
+        resolved_at: datetime,
+        reason: str,
+    ) -> list[StrategyTradeIntent]:
+        pending = list(
+            self.session.scalars(
+                select(StrategyTradeIntent)
+                .where(
+                    StrategyTradeIntent.strategy_id == strategy_id,
+                    StrategyTradeIntent.action == "ENTRY",
+                    StrategyTradeIntent.status == "PENDING",
+                )
+                .order_by(StrategyTradeIntent.created_at.asc(), StrategyTradeIntent.id.asc())
+            )
+        )
+        for intent in pending:
+            self.resolve_intent(
+                intent,
+                status="EXPIRED",
+                resolved_at=resolved_at,
+                reason=reason,
+            )
+        return pending
+
     def count_exit_attempts(self, *, position_id: str) -> int:
         return int(
             self.session.scalar(

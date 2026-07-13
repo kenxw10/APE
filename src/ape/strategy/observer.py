@@ -5338,6 +5338,15 @@ def _apply_v2_hypothetical_lifecycle(
     latest_event_type: str | None = None
     latest_position_id: str | None = None
     decisions = StrategyDecisionsRepository(session)
+    measurements = decision.measurements if isinstance(decision.measurements, dict) else {}
+    if measurements.get("candidate_pin_cleanup") is True:
+        cancelled_entries = intents.expire_pending_entry_intents(
+            strategy_id=strategy_id,
+            resolved_at=now,
+            reason="v2_candidate_pin_invalid_entry_cancelled",
+        )
+        if cancelled_entries:
+            latest_event_type = "EXPIRED"
     for expired_pending in intents.list_expired_pending_intents(
         strategy_id=strategy_id,
         before=now,

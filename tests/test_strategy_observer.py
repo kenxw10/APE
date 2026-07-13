@@ -248,7 +248,7 @@ def test_pin_failure_runs_pending_candidate_intent_cleanup(tmp_path, monkeypatch
                     primary_reason="v2_entry_signal",
                     app_mode="DRY_RUN",
                     strategy_id=candidate_strategy_id,
-                    market_ticker="KXBTC15M-PIN-CLEANUP",
+                    market_ticker="KXBTC15M-PIN-CLEANUP-OPEN",
                     candidate_side="YES",
                 )
             )
@@ -258,12 +258,12 @@ def test_pin_failure_runs_pending_candidate_intent_cleanup(tmp_path, monkeypatch
                     strategy_id=candidate_strategy_id,
                     strategy_config_version_id=candidate_config_version_id,
                     decision_id="candidate-pin-original-entry",
-                    market_ticker="KXBTC15M-PIN-CLEANUP",
+                    market_ticker="KXBTC15M-PIN-CLEANUP-OPEN",
                     side_candidate="YES",
                     action="ENTRY",
                     created_at=now - timedelta(seconds=3),
                     effective_after=now - timedelta(seconds=2),
-                    expires_at=now - timedelta(seconds=1),
+                    expires_at=now + timedelta(seconds=1),
                     intended_limit_price=Decimal("0.62"),
                     quantity=Decimal("1"),
                 )
@@ -332,6 +332,7 @@ def test_pin_failure_runs_pending_candidate_intent_cleanup(tmp_path, monkeypatch
 
         assert intent is not None
         assert intent.status == "EXPIRED"
+        assert intent.resolution_reason == "v2_candidate_pin_invalid_entry_cancelled"
         assert exit_intent is not None
         assert exit_intent.trigger == "v2_candidate_pin_invalid_force_exit"
         assert exit_intent.trigger_classification == "FORCE"
