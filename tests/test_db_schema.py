@@ -20,6 +20,7 @@ def test_schema_can_be_created_in_local_sqlite_database(tmp_path) -> None:
 
     try:
         run_migrations(engine)
+        run_migrations(engine)
 
         inspector = inspect(engine)
         assert set(inspector.get_table_names()) >= {
@@ -39,6 +40,13 @@ def test_schema_can_be_created_in_local_sqlite_database(tmp_path) -> None:
             "strategy_position_outcomes",
             "worker_heartbeats",
             "storage_retention_runs",
+            "research_replay_events",
+            "research_market_outcomes",
+            "research_replay_runs",
+            "research_replay_trades",
+            "calibration_runs",
+            "research_candidates",
+            "research_governance_events",
         }
 
         session_factory = create_session_factory(engine)
@@ -47,7 +55,7 @@ def test_schema_can_be_created_in_local_sqlite_database(tmp_path) -> None:
                 select(SchemaMigration).where(SchemaMigration.version == CURRENT_SCHEMA_VERSION)
             )
             assert migration is not None
-            assert session.scalar(select(func.count()).select_from(SchemaMigration)) == 9
+            assert session.scalar(select(func.count()).select_from(SchemaMigration)) == 10
 
         orderbook_columns = {
             column["name"] for column in inspector.get_columns("orderbook_snapshots")
@@ -80,6 +88,22 @@ def test_schema_can_be_created_in_local_sqlite_database(tmp_path) -> None:
             "code_commit_sha",
         }
         assert "ix_strategy_decisions_strategy_id_evaluated" in decision_indexes
+        research_event_columns = {
+            column["name"] for column in inspector.get_columns("research_replay_events")
+        }
+        research_event_indexes = {
+            index["name"] for index in inspector.get_indexes("research_replay_events")
+        }
+        assert research_event_columns >= {
+            "event_id",
+            "event_hash",
+            "source_table",
+            "source_row_id",
+            "feature_snapshot_id",
+            "replay_readiness",
+            "blockers",
+        }
+        assert "ix_research_replay_events_market_time" in research_event_indexes
     finally:
         engine.dispose()
 

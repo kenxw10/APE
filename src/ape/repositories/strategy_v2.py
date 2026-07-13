@@ -63,6 +63,13 @@ class StrategyV2Repository:
             .limit(1)
         )
 
+    def get_config_version(self, strategy_config_version_id: str) -> StrategyConfigVersion | None:
+        return self.session.scalar(
+            select(StrategyConfigVersion)
+            .where(StrategyConfigVersion.strategy_config_version_id == strategy_config_version_id)
+            .limit(1)
+        )
+
     def get_latest_feature_snapshot(self) -> StrategyFeatureSnapshot | None:
         return self.session.scalar(
             select(StrategyFeatureSnapshot)
@@ -122,6 +129,55 @@ class StrategyV2Repository:
             .order_by(desc(StrategyTradeIntent.created_at), desc(StrategyTradeIntent.id))
             .limit(1)
         )
+
+    def has_pending_intents(self, *, strategy_id: str) -> bool:
+        return (
+            self.session.scalar(
+                select(StrategyTradeIntent.id)
+                .where(
+                    StrategyTradeIntent.strategy_id == strategy_id,
+                    StrategyTradeIntent.status == "PENDING",
+                )
+                .limit(1)
+            )
+            is not None
+        )
+
+    def list_pending_intents(self) -> list[StrategyTradeIntent]:
+        return list(
+            self.session.scalars(
+                select(StrategyTradeIntent)
+                .where(StrategyTradeIntent.status == "PENDING")
+                .order_by(StrategyTradeIntent.created_at.asc(), StrategyTradeIntent.id.asc())
+            )
+        )
+
+    def expire_pending_entry_intents(
+        self,
+        *,
+        strategy_id: str,
+        resolved_at: datetime,
+        reason: str,
+    ) -> list[StrategyTradeIntent]:
+        pending = list(
+            self.session.scalars(
+                select(StrategyTradeIntent)
+                .where(
+                    StrategyTradeIntent.strategy_id == strategy_id,
+                    StrategyTradeIntent.action == "ENTRY",
+                    StrategyTradeIntent.status == "PENDING",
+                )
+                .order_by(StrategyTradeIntent.created_at.asc(), StrategyTradeIntent.id.asc())
+            )
+        )
+        for intent in pending:
+            self.resolve_intent(
+                intent,
+                status="EXPIRED",
+                resolved_at=resolved_at,
+                reason=reason,
+            )
+        return pending
 
     def count_exit_attempts(self, *, position_id: str) -> int:
         return int(
@@ -390,6 +446,9 @@ def _values(value: object) -> dict[str, object]:
         "contract_features",
         "microstructure_features",
         "execution_features",
+        "complete_feature_vector",
+        "replay_blockers",
+        "model_artifact",
         "measurements",
         "boundary_state",
     ):

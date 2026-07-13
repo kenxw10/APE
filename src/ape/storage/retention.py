@@ -146,6 +146,18 @@ RETENTION_POLICIES: tuple[RetentionPolicy, ...] = (
             "OR (close_time IS NULL AND updated_at < :cutoff)"
         ),
     ),
+    RetentionPolicy(
+        table_name="research_replay_events",
+        retention_config_key="storage_retention_research_replay_events_seconds",
+        timestamp_expression="event_time",
+        delete_condition_sql="event_time < :cutoff",
+    ),
+    RetentionPolicy(
+        table_name="research_replay_trades",
+        retention_config_key="storage_retention_research_replay_trades_seconds",
+        timestamp_expression="created_at",
+        delete_condition_sql="created_at < :cutoff",
+    ),
 )
 
 RETENTION_TABLE_NAMES = tuple(policy.table_name for policy in RETENTION_POLICIES)
@@ -162,6 +174,11 @@ STATUS_TABLES: tuple[StorageStatusTable, ...] = tuple(
         table_name="strategy_position_outcomes",
         timestamp_expression="closed_at",
     ),
+    StorageStatusTable(table_name="research_market_outcomes", timestamp_expression="updated_at"),
+    StorageStatusTable(table_name="research_replay_runs", timestamp_expression="started_at"),
+    StorageStatusTable(table_name="calibration_runs", timestamp_expression="started_at"),
+    StorageStatusTable(table_name="research_candidates", timestamp_expression="updated_at"),
+    StorageStatusTable(table_name="research_governance_events", timestamp_expression="created_at"),
 )
 
 

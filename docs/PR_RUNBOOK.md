@@ -586,3 +586,27 @@ $safety
   market transport, and BRTI `stale_transport` remain hard regressions.
 - Confirm `/safety` still reports `trading_enabled=false`, `execute=false`, and
   no unsafe live/paper behavior.
+
+## PR 11 Research Validation
+
+Deployment order is fixed: merge only after GPT audit and green exact PR CI,
+redeploy existing services, confirm migration `0010_research_replay_calibration`,
+then create `ape-research-worker`. Give that worker only `DATABASE_URL` and the
+research/safety variables. Do not give it Kalshi private credentials or a candidate
+pin. Validate archive, official outcomes, coverage, labels, replay, calibration, and
+governance before any later operator decision. Keep `TRADING_ENABLED=false` and
+`EXECUTE=false`; do not activate paper or live mode.
+
+After the database migration and research worker are running, use only read-only
+checks:
+
+```powershell
+Invoke-RestMethod https://ape-api-production.up.railway.app/research/status
+Invoke-RestMethod https://ape-api-production.up.railway.app/research/coverage/latest
+Invoke-RestMethod https://ape-api-production.up.railway.app/research/zero-entry/latest
+Invoke-RestMethod "https://ape-api-production.up.railway.app/research/replay/runs/recent?limit=100"
+Invoke-RestMethod "https://ape-api-production.up.railway.app/research/calibration/runs/recent?limit=100"
+```
+
+Do not enable paper or live modes, do not give the research worker private Kalshi
+credentials, and do not set a candidate pin until a later explicit operator decision.

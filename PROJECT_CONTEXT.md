@@ -100,16 +100,34 @@ This ladder is directional and should be reviewed before each PR.
 9g. Market worker persistence backpressure hardening. Completed by PR 9g.
 9h. Maintenance worker liveness/status and retention load smoothing. Completed by PR 9h.
 9i. DRY_RUN control versus fast momentum challenger comparison, hypothetical-only. Completed by PR 9i.
-10. Momentum v2 feature, score, and lifecycle architecture. Completed through PR 10b: immutable shared feature/config records, compact top-five ladders, DRY_RUN-only V2, causal hypothetical intents, read-only evidence routes, `BOUNDARY_CROSS_HOLD` research-only gating, first-book-only EXIT fills, and status-visible but unretained outcomes. Current V2 attribution is `momentum_v2_heuristic_v3` with `momentum_v2_lifecycle_v2`; the `momentum_v2_features_v2` schema is unchanged and no migration was added.
-11. Local replay fixtures.
-12. Deterministic replay harness for captured market/reference data.
-13. Spread, depth, liquidity, and anti-chop calibration diagnostics.
+10. Momentum v2 feature, score, and lifecycle architecture. Completed through PR 10b: immutable shared feature/config records, compact top-five ladders, DRY_RUN-only V2, causal hypothetical intents, read-only evidence routes, `BOUNDARY_CROSS_HOLD` research-only gating, first-book-only EXIT fills, and status-visible but unretained outcomes. PR 11 updates the replayable feature schema to `momentum_v2_features_v3` under migration `0010_research_replay_calibration`; architecture and lifecycle remain `momentum_v2_heuristic_v3` and `momentum_v2_lifecycle_v2`.
+11. Local replay fixtures. Completed together by PR 11.
+12. Deterministic replay harness for captured market/reference data. Completed together by PR 11.
+13. Spread, depth, liquidity, and anti-chop calibration diagnostics. Completed together by PR 11.
 14. Paper trading simulator after dry-run evidence review.
-15. Calibration and reporting workflow for strategy quality.
+15. Calibration and reporting workflow for strategy quality. Completed together by PR 11.
 16. Paper-trading readiness review with explicit safety approval.
 17. Reporting workflow for dry-run and paper-trading evidence.
 18. Railway Postgres/Vercel dashboard wiring beyond the backend scaffold.
 19. Manual live-canary safety plan with tiny limits and approvals.
 20. Post-canary monitoring, rollback, alerting, and hardening.
+
+## PR 11 Research Completion
+
+PR 11 completes the former separate replay, deterministic replay harness, and
+calibration/reporting roadmap items together. It remains DRY_RUN-only, keeps the
+active V2 baseline unchanged, treats zero entries as a frequency warning rather than
+healthy selectivity, and allows automatic governance only as far as a database
+`DRY_RUN_CHALLENGER` state. It adds one database-only research worker and no
+paper/live/order/private-account capability.
+
+PR 11 evidence is immutable and replayable: calibration persists the complete
+search snapshot and partition-specific candidate trades, while governance uses only
+complete eligible feature coverage and the declared frozen out-of-sample evidence
+set. Candidate pins resolve once when the strategy worker starts. The running process
+does not hot reload candidate configuration. Database or environment changes require
+a worker restart. Qualified setup target is 5-15 per 100 markets, preferred fills are 3-10,
+and the challenger hard fill band is 3-15. These remain research governance
+diagnostics and do not authorize paper or live execution.
 
 Next manual checkpoint after PR 9h: keep API, market, reference, and maintenance workers running, but do not deploy or enable strategy until storage validation is clean. Confirm `/storage/status` uses `liveness_source=component` from `ape-worker.maintenance`, shows `worker_role=maintenance`, `latest_component_heartbeat_mode=storage_retention`, `worker_heartbeat_stale=false`, `retention_config.effective_enabled=true`, and latest run status `success` or `success_partial` with no blockers. `success_partial` is acceptable when bounded cleanup made progress and only the configured time, table, or per-table row budget was reached. Market validation may allow `QUIET_CARRY_FORWARD` when transport is healthy, subscriptions are reconciled, there is no unrecovered blocker, and the snapshot is inside the hard carry-forward cap; `BLOCKED_UNRECOVERED`, stale market transport, or BRTI `stale_transport` remain hard regressions. Keep `TRADING_ENABLED=false` and `EXECUTE=false` everywhere. The API and dashboard may stay read-only; Vercel must not receive Kalshi credentials, WebSocket variables, BRTI env vars, strategy env vars, storage retention env vars, dry-run controls, private-channel controls, account reads, or order/execution controls.

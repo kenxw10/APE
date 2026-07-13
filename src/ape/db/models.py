@@ -414,6 +414,12 @@ class StrategyFeatureSnapshot(Base):
     contract_features: Mapped[Any | None] = mapped_column(JSON)
     microstructure_features: Mapped[Any | None] = mapped_column(JSON)
     execution_features: Mapped[Any | None] = mapped_column(JSON)
+    complete_feature_vector: Mapped[Any | None] = mapped_column(JSON)
+    feature_vector_hash: Mapped[str | None] = mapped_column(String(128), index=True)
+    architecture_version: Mapped[str | None] = mapped_column(String(128))
+    replay_schema_version: Mapped[str | None] = mapped_column(String(128))
+    replay_readiness: Mapped[str | None] = mapped_column(String(32))
+    replay_blockers: Mapped[Any | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
@@ -435,6 +441,14 @@ class StrategyConfigVersion(Base):
     parameter_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     code_commit_sha: Mapped[str] = mapped_column(String(128), nullable=False)
     source: Mapped[str] = mapped_column(String(64), nullable=False)
+    parent_config_version_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    calibration_run_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    lifecycle_state: Mapped[str | None] = mapped_column(String(64), index=True)
+    approval_state: Mapped[str | None] = mapped_column(String(64))
+    model_type: Mapped[str | None] = mapped_column(String(64))
+    model_artifact_checksum: Mapped[str | None] = mapped_column(String(128))
+    data_cutoff: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    candidate_id: Mapped[str | None] = mapped_column(String(128), index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
@@ -599,3 +613,253 @@ class StorageRetentionRun(Base):
     blockers: Mapped[Any | None] = mapped_column(JSON)
     error_type: Mapped[str | None] = mapped_column(String(128))
     error_message: Mapped[str | None] = mapped_column(Text)
+
+
+class ResearchReplayEvent(Base):
+    __tablename__ = "research_replay_events"
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_research_replay_events_event_id"),
+        UniqueConstraint("source_table", "source_row_id", name="uq_research_replay_events_source"),
+        Index("ix_research_replay_events_market_time", "market_ticker", "event_time"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    market_ticker: Mapped[str | None] = mapped_column(String(128), index=True)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    event_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    source_table: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_row_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_hash: Mapped[str | None] = mapped_column(String(128))
+    sequence_number: Mapped[int | None] = mapped_column(Integer)
+    feature_snapshot_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    feature_schema_version: Mapped[str | None] = mapped_column(String(128))
+    architecture_version: Mapped[str | None] = mapped_column(String(128))
+    replay_schema_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload: Mapped[Any] = mapped_column(JSON, nullable=False)
+    event_hash: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    replay_readiness: Mapped[str] = mapped_column(String(32), nullable=False)
+    blockers: Mapped[Any | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class ResearchMarketOutcome(Base):
+    __tablename__ = "research_market_outcomes"
+    __table_args__ = (
+        UniqueConstraint("outcome_id", name="uq_research_market_outcomes_outcome_id"),
+        UniqueConstraint("market_ticker", name="uq_research_market_outcomes_market"),
+        Index("ix_research_market_outcomes_status_resolved", "outcome_status", "resolved_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    outcome_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    market_ticker: Mapped[str] = mapped_column(String(128), nullable=False)
+    market_open_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    market_close_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expiration_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    boundary: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    result_side: Mapped[str | None] = mapped_column(String(32))
+    settlement_value: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    final_reference_value: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    final_minute_reference_average: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    outcome_status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    outcome_source: Mapped[str | None] = mapped_column(String(128))
+    source_payload_hash: Mapped[str | None] = mapped_column(String(128))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expected_frame_count: Mapped[int | None] = mapped_column(Integer)
+    actual_frame_count: Mapped[int | None] = mapped_column(Integer)
+    coverage_percentage: Mapped[Decimal | None] = mapped_column(Numeric(12, 8))
+    maximum_event_gap_seconds: Mapped[int | None] = mapped_column(Integer)
+    quality_flags: Mapped[Any | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class ResearchReplayRun(Base):
+    __tablename__ = "research_replay_runs"
+    __table_args__ = (
+        UniqueConstraint("replay_run_id", name="uq_research_replay_runs_id"),
+        Index("ix_research_replay_runs_dataset_started", "dataset_hash", "started_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    replay_run_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    replay_engine_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    label_schema_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    code_commit_sha: Mapped[str] = mapped_column(String(128), nullable=False)
+    baseline_strategy_config_version_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    dataset_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    data_cutoff: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    unique_market_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    event_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    partition_manifest: Mapped[Any | None] = mapped_column(JSON)
+    cost_model: Mapped[Any | None] = mapped_column(JSON)
+    zero_entry_report: Mapped[Any | None] = mapped_column(JSON)
+    blocker_funnel: Mapped[Any | None] = mapped_column(JSON)
+    raw_metrics: Mapped[Any | None] = mapped_column(JSON)
+    adjusted_metrics: Mapped[Any | None] = mapped_column(JSON)
+    warnings: Mapped[Any | None] = mapped_column(JSON)
+    blockers: Mapped[Any | None] = mapped_column(JSON)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ResearchReplayTrade(Base):
+    __tablename__ = "research_replay_trades"
+    __table_args__ = (
+        UniqueConstraint("trade_id", name="uq_research_replay_trades_id"),
+        Index(
+            "ix_research_replay_trades_run_market_config",
+            "replay_run_id",
+            "market_ticker",
+            "strategy_config_version_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    replay_run_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    candidate_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    strategy_config_version_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    market_ticker: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    side: Mapped[str] = mapped_column(String(32), nullable=False)
+    entry_decision_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    entry_fill_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    entry_limit: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    entry_fill_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    entry_fill_event_id: Mapped[str | None] = mapped_column(String(128))
+    exit_trigger_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    exit_intent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    exit_fill_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    exit_limit: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    exit_fill_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    exit_fill_event_id: Mapped[str | None] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    gross_pnl_cents: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    fee_cents: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    net_pnl_cents: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    holding_duration_ms: Mapped[int | None] = mapped_column(Integer)
+    mfe_cents: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    mae_cents: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    time_to_mfe_ms: Mapped[int | None] = mapped_column(Integer)
+    time_to_mae_ms: Mapped[int | None] = mapped_column(Integer)
+    entry_reason: Mapped[str | None] = mapped_column(Text)
+    exit_reason: Mapped[str | None] = mapped_column(Text)
+    timing_tier: Mapped[str | None] = mapped_column(String(64))
+    volatility_regime: Mapped[str | None] = mapped_column(String(64))
+    liquidity_regime: Mapped[str | None] = mapped_column(String(64))
+    entry_feature_snapshot_id: Mapped[str | None] = mapped_column(String(128))
+    exit_feature_snapshot_id: Mapped[str | None] = mapped_column(String(128))
+    lifecycle_version: Mapped[str | None] = mapped_column(String(128))
+    measurements: Mapped[Any | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class CalibrationRun(Base):
+    __tablename__ = "calibration_runs"
+    __table_args__ = (
+        UniqueConstraint("calibration_run_id", name="uq_calibration_runs_id"),
+        Index("ix_calibration_runs_replay_started", "replay_run_id", "started_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    calibration_run_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    calibration_schema_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    replay_run_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    dataset_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    code_commit_sha: Mapped[str] = mapped_column(String(128), nullable=False)
+    random_seed: Mapped[int] = mapped_column(Integer, nullable=False)
+    search_space_snapshot: Mapped[Any | None] = mapped_column(JSON)
+    partition_manifest: Mapped[Any | None] = mapped_column(JSON)
+    frozen_holdout_hash: Mapped[str | None] = mapped_column(String(128))
+    holdout_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    evaluated_candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    selected_candidate_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    training_metrics: Mapped[Any | None] = mapped_column(JSON)
+    validation_metrics: Mapped[Any | None] = mapped_column(JSON)
+    test_metrics: Mapped[Any | None] = mapped_column(JSON)
+    holdout_metrics: Mapped[Any | None] = mapped_column(JSON)
+    bootstrap_metrics: Mapped[Any | None] = mapped_column(JSON)
+    penalties: Mapped[Any | None] = mapped_column(JSON)
+    warnings: Mapped[Any | None] = mapped_column(JSON)
+    blockers: Mapped[Any | None] = mapped_column(JSON)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ResearchCandidate(Base):
+    __tablename__ = "research_candidates"
+    __table_args__ = (
+        UniqueConstraint("candidate_id", name="uq_research_candidates_id"),
+        UniqueConstraint("strategy_config_version_id", name="uq_research_candidates_config"),
+        Index(
+            "ix_research_candidates_architecture_state", "architecture_version", "lifecycle_state"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    candidate_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    strategy_config_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    calibration_run_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    parent_strategy_config_version_id: Mapped[str | None] = mapped_column(String(128))
+    generated_strategy_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    architecture_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    feature_schema_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    replay_schema_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    model_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    parameter_snapshot: Mapped[Any] = mapped_column(JSON, nullable=False)
+    feature_columns: Mapped[Any | None] = mapped_column(JSON)
+    model_artifact: Mapped[Any | None] = mapped_column(JSON)
+    model_artifact_checksum: Mapped[str] = mapped_column(String(128), nullable=False)
+    training_metrics: Mapped[Any | None] = mapped_column(JSON)
+    validation_metrics: Mapped[Any | None] = mapped_column(JSON)
+    test_metrics: Mapped[Any | None] = mapped_column(JSON)
+    holdout_metrics: Mapped[Any | None] = mapped_column(JSON)
+    governance_report: Mapped[Any | None] = mapped_column(JSON)
+    lifecycle_state: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    eligibility_status: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class ResearchGovernanceEvent(Base):
+    __tablename__ = "research_governance_events"
+    __table_args__ = (
+        UniqueConstraint("governance_event_id", name="uq_research_governance_events_id"),
+        Index("ix_research_governance_events_candidate_created", "candidate_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    governance_event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    candidate_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    from_state: Mapped[str | None] = mapped_column(String(64))
+    to_state: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence: Mapped[Any | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )

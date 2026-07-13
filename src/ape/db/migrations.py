@@ -9,7 +9,7 @@ from ape.config import ConfigError, load_config
 from ape.db.models import Base, SchemaMigration, utc_now
 from ape.db.session import DatabaseConfigError, create_engine_from_config
 
-CURRENT_SCHEMA_VERSION = "0009_momentum_v2_scope_completion"
+CURRENT_SCHEMA_VERSION = "0010_research_replay_calibration"
 SCHEMA_VERSIONS = (
     "0001_initial_schema",
     "0002_fixed_point_ws_quantities",
@@ -19,6 +19,7 @@ SCHEMA_VERSIONS = (
     "0006_kalshi_ws_protocol_events",
     "0007_strategy_decision_strategy_id",
     "0008_momentum_v2_feature_architecture",
+    "0009_momentum_v2_scope_completion",
     CURRENT_SCHEMA_VERSION,
 )
 POSTGRES_MIGRATION_LOCK_ID = 4_150_002
@@ -36,6 +37,7 @@ def run_migrations(engine: Engine) -> None:
         _ensure_strategy_decision_strategy_id(connection)
         _ensure_momentum_v2_columns(connection)
         _ensure_momentum_v2_scope_completion_columns(connection)
+        _ensure_research_replay_calibration_columns(connection)
         _record_schema_versions(connection)
 
 
@@ -287,6 +289,58 @@ def _ensure_momentum_v2_scope_completion_columns(connection: Connection) -> None
     )
 
 
+def _ensure_research_replay_calibration_columns(connection: Connection) -> None:
+    """Make the single research migration safe on both new and existing databases."""
+    columns = {
+        "strategy_config_versions": {
+            "parent_config_version_id": "VARCHAR(128)",
+            "calibration_run_id": "VARCHAR(128)",
+            "lifecycle_state": "VARCHAR(64)",
+            "approval_state": "VARCHAR(64)",
+            "model_type": "VARCHAR(64)",
+            "model_artifact_checksum": "VARCHAR(128)",
+            "data_cutoff": "TIMESTAMP",
+            "candidate_id": "VARCHAR(128)",
+        },
+        "strategy_feature_snapshots": {
+            "complete_feature_vector": "JSON",
+            "feature_vector_hash": "VARCHAR(128)",
+            "architecture_version": "VARCHAR(128)",
+            "replay_schema_version": "VARCHAR(128)",
+            "replay_readiness": "VARCHAR(32)",
+            "replay_blockers": "JSON",
+        },
+    }
+    inspector = inspect(connection)
+    table_names = set(inspector.get_table_names())
+    for table_name, expected in columns.items():
+        if table_name not in table_names:
+            continue
+        existing = {column["name"] for column in inspector.get_columns(table_name)}
+        for column_name, type_sql in expected.items():
+            if column_name not in existing:
+                connection.execute(
+                    text(_add_column_statement(connection, table_name, column_name, type_sql))
+                )
+
+    _ensure_composite_index(
+        connection,
+        table_name="research_replay_events",
+        index_name="ix_research_replay_events_market_time",
+        column_names=("market_ticker", "event_time"),
+    )
+    _ensure_composite_index(
+        connection,
+        table_name="research_replay_trades",
+        index_name="ix_research_replay_trades_run_market_config",
+        column_names=("replay_run_id", "market_ticker", "strategy_config_version_id"),
+    )
+    _ensure_composite_index(
+        connection,
+        table_name="research_candidates",
+        index_name="ix_research_candidates_architecture_state",
+        column_names=("architecture_version", "lifecycle_state"),
+    )
 def _add_column_statement(
     connection: Connection,
     table_name: str,

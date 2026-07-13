@@ -267,8 +267,8 @@ def test_pr10b_r3_status_reads_are_separate_from_all_mutation_paths(session) -> 
 def test_pr10b_r4_versions_preserve_schema_and_revise_v2_semantics(monkeypatch) -> None:
     assert momentum_v2.V2_ARCHITECTURE_VERSION == "momentum_v2_heuristic_v3"
     assert momentum_v2.V2_LIFECYCLE_SCHEMA_VERSION == "momentum_v2_lifecycle_v2"
-    assert momentum_v2.V2_FEATURE_SCHEMA_VERSION == "momentum_v2_features_v2"
-    assert CURRENT_SCHEMA_VERSION == "0009_momentum_v2_scope_completion"
+    assert momentum_v2.V2_FEATURE_SCHEMA_VERSION == "momentum_v2_features_v3"
+    assert CURRENT_SCHEMA_VERSION == "0010_research_replay_calibration"
 
     monkeypatch.setattr(momentum_v2, "resolve_code_version", lambda: "pr10b-test")
     corrected = momentum_v2.built_in_config_version(

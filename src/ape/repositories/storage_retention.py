@@ -17,6 +17,8 @@ ALLOWED_RETENTION_TABLES = {
     "markets",
     "orderbook_snapshots",
     "public_trades",
+    "research_replay_events",
+    "research_replay_trades",
     "reference_ticks",
     "strategy_decisions",
     "strategy_dry_run_events",
@@ -28,6 +30,11 @@ ALLOWED_RETENTION_TABLES = {
 }
 ALLOWED_STATUS_READ_TABLES = ALLOWED_RETENTION_TABLES | {
     "strategy_position_outcomes",
+    "research_market_outcomes",
+    "research_replay_runs",
+    "calibration_runs",
+    "research_candidates",
+    "research_governance_events",
 }
 ALLOWED_RAW_PAYLOAD_READ_TABLES = {
     "orderbook_snapshots",
