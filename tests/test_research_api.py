@@ -191,6 +191,7 @@ def test_research_status_uses_worker_observed_enabled_state(tmp_path) -> None:
                             "enabled": True,
                             "calibration_enabled": True,
                             "worker_role": "research",
+                            "last_archive_run": {"archived_events": 10},
                         }
                     },
                 )
@@ -202,5 +203,7 @@ def test_research_status_uses_worker_observed_enabled_state(tmp_path) -> None:
         assert status["api_local_configuration"]["research_enabled"] is False
         assert status["worker_observed_enabled"] is True
         assert status["effective_enabled"] is True
+        assert status["last_archive_run"] == {"archived_events": 10}
+        assert status["last_outcome_label_run"] is None
     finally:
         engine.dispose()

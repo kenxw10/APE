@@ -391,6 +391,8 @@ def zero_entry_audit(
     signal_markets: set[str] = set()
     for market, evaluation in observed_samples:
         features = evaluation.measurements.get("features") or {}
+        score_margin: str | None = None
+        edge_margin: str | None = None
         mode = str(evaluation.candidate_mode or "missing")
         tier = str(evaluation.timing_tier or "missing")
         candidate_modes[mode] = candidate_modes.get(mode, 0) + 1
@@ -421,14 +423,15 @@ def zero_entry_audit(
             else "three_or_more"
         ] += 1
         if evaluation.score is not None and evaluation.score_threshold is not None:
-            score_margins.append(str(evaluation.score - evaluation.score_threshold))
-        if evaluation.edge_lower_bound_cents is not None:
-            edge_margins.append(
-                str(
-                    evaluation.edge_lower_bound_cents
-                    - Decimal(str(features.get("edge_threshold_cents", "1.5")))
-                )
+            score_margin = str(evaluation.score - evaluation.score_threshold)
+            score_margins.append(score_margin)
+        edge = evaluation.measurements.get("edge")
+        edge_threshold = edge.get("threshold_cents") if isinstance(edge, dict) else None
+        if evaluation.edge_lower_bound_cents is not None and edge_threshold is not None:
+            edge_margin = str(
+                evaluation.edge_lower_bound_cents - Decimal(str(edge_threshold))
             )
+            edge_margins.append(edge_margin)
         for key, target in (
             ("desired_ask", desired_asks),
             ("desired_spread_cents", spreads),
@@ -457,8 +460,8 @@ def zero_entry_audit(
                     "market_ticker": market,
                     "state": evaluation.state,
                     "blockers": blockers,
-                    "score_margin": score_margins[-1] if score_margins else None,
-                    "edge_margin": edge_margins[-1] if edge_margins else None,
+                    "score_margin": score_margin,
+                    "edge_margin": edge_margin,
                 }
             )
     return {

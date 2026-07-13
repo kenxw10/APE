@@ -88,7 +88,6 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
                 if heartbeat
                 else None,
                 last_archive_run=details.get("last_archive_run"),
-                last_outcome_label_run=details.get("last_archive_run"),
                 last_zero_entry_audit=repository.latest_zero_entry_report(),
                 last_replay_run=_row(latest_replay),
                 last_calibration_run=_row(latest_calibration),

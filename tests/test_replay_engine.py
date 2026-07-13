@@ -12,6 +12,7 @@ from ape.research.replay import (
     _lifecycle_inputs,
     _OpenPosition,
     _PendingEntry,
+    zero_entry_audit,
 )
 from ape.strategy.momentum_v2 import V2_PARAMETERS, evaluate_momentum_v2_feature_vector
 
@@ -170,6 +171,23 @@ def test_zero_entry_audit_is_not_reported_as_healthy_selectivity() -> None:
     result = DeterministicReplayEngine().replay([feature_event(at=at_base(), vector=vector)])
     assert result.zero_entry_report["frequency_classification"] == "ZERO_ENTRY_UNVALIDATABLE"
     assert result.zero_entry_report["validation_status"] == "UNVALIDATABLE"
+
+
+def test_zero_entry_audit_uses_the_evaluated_candidate_edge_threshold() -> None:
+    parameters = copy.deepcopy(V2_PARAMETERS)
+    parameters["edge_threshold_cents"] = "3.25"
+    evaluation = evaluate_momentum_v2_feature_vector(valid_vector(), parameters)
+
+    assert evaluation.edge_lower_bound_cents is not None
+    report = zero_entry_audit(
+        {"all_samples": 1},
+        market_count=1,
+        samples=[("M1", evaluation)],
+    )
+
+    assert report["edge_margin_distribution"] == [
+        str(evaluation.edge_lower_bound_cents - Decimal("3.25"))
+    ]
 
 
 def test_persisted_vector_and_live_vector_evaluator_parity() -> None:
