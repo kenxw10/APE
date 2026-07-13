@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from threading import Event
 
 from sqlalchemy import select
 
@@ -217,6 +219,50 @@ def test_market_outcome_reconciler_uses_public_rest_configuration(monkeypatch) -
         "base_url": config.kalshi_api_base_url,
         "timeout_seconds": config.kalshi_rest_timeout_seconds,
     }
+
+
+def test_market_outcome_reconciler_offloads_blocking_cycle(monkeypatch) -> None:
+    calls: list[str] = []
+    reconciled: list[object] = []
+
+    class FakeSession:
+        commits = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def commit(self) -> None:
+            self.commits += 1
+
+    session = FakeSession()
+    market_client = object()
+
+    def reconcile(session_arg, *, client) -> None:
+        assert session_arg is session
+        reconciled.append(client)
+
+    async def run_in_captured_thread(function, *args):
+        calls.append(function.__name__)
+        return function(*args)
+
+    monkeypatch.setattr(research_service, "reconcile_market_outcomes", reconcile)
+    monkeypatch.setattr(research_service.asyncio, "to_thread", run_in_captured_thread)
+    reconciler = research_service.MarketOutcomeReconciler(
+        config=load_config({}),
+        safety=None,
+        session_factory=lambda: session,
+        started_at=datetime.now(UTC),
+        market_client=market_client,
+    )
+
+    asyncio.run(reconciler.run(stop_event=Event(), max_iterations=1))
+
+    assert calls == ["run_once"]
+    assert reconciled == [market_client]
+    assert session.commits == 1
 
 
 def test_research_cycle_does_not_reuse_a_frozen_holdout(tmp_path, monkeypatch) -> None:

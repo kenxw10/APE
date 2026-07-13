@@ -99,17 +99,21 @@ class MarketOutcomeReconciler:
     async def run(self, *, stop_event, max_iterations: int | None = None) -> None:
         iterations = 0
         while not stop_event.is_set():
-            if self.session_factory is not None:
-                try:
-                    with self.session_factory() as session:
-                        reconcile_market_outcomes(session, client=self.market_client)
-                        session.commit()
-                except SQLAlchemyError:
-                    LOGGER.warning("Market outcome reconciliation failed.", exc_info=True)
+            await asyncio.to_thread(self.run_once)
             iterations += 1
             if max_iterations is not None and iterations >= max_iterations:
                 return
             await asyncio.to_thread(stop_event.wait, max(self.config.research_poll_seconds, 60.0))
+
+    def run_once(self) -> None:
+        if self.session_factory is None:
+            return
+        try:
+            with self.session_factory() as session:
+                reconcile_market_outcomes(session, client=self.market_client)
+                session.commit()
+        except SQLAlchemyError:
+            LOGGER.warning("Market outcome reconciliation failed.", exc_info=True)
 
 
 def run_research_cycle(
