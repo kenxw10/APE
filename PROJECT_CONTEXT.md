@@ -124,8 +124,9 @@ paper/live/order/private-account capability.
 PR 11 evidence is immutable and replayable: calibration persists the complete
 search snapshot and partition-specific candidate trades, while governance uses only
 complete eligible feature coverage and the declared frozen out-of-sample evidence
-set. Candidate pins remain startup-only and require an explicit worker restart to
-change. Qualified setup target is 5-15 per 100 markets, preferred fills are 3-10,
+set. Candidate pins resolve once when the strategy worker starts. The running process
+does not hot reload candidate configuration. Database or environment changes require
+a worker restart. Qualified setup target is 5-15 per 100 markets, preferred fills are 3-10,
 and the challenger hard fill band is 3-15. These remain research governance
 diagnostics and do not authorize paper or live execution.
 

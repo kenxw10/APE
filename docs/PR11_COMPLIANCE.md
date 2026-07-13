@@ -2,9 +2,9 @@
 
 PR 11 is DRY_RUN-only research infrastructure. It does not add paper trading,
 live trading, orders, cancels, private channels, account reads, credentials, or
-execution capability. Candidate pins are revalidated against persisted governance
-state on every strategy-observer cycle, so approval and revocation take effect
-without a worker restart.
+execution capability. Candidate pins resolve once when the strategy worker starts.
+The running process does not hot reload candidate configuration. Database or
+environment changes require a worker restart.
 
 | Requirement | Implementation evidence | Behavioral evidence |
 | --- | --- | --- |
@@ -19,7 +19,7 @@ without a worker restart.
 | R9 bounded search and fold-specific logistic fitting | `src/ape/research/calibration.py` | `test_r9_bounded_search_and_logistic_artifacts_are_deterministic` verifies the 256-candidate cap, deterministic snapshot hash, tier grids, and reproducible L2 artifact. |
 | R10 bootstrap and penalties | `src/ape/research/calibration.py` | `test_r10_market_normalization_bootstrap_and_penalties_are_explicit` verifies zero-trade-market normalization, exact 2,000 resamples, and lower-confidence penalties. |
 | R11 governance evidence and transitions | `src/ape/research/repository.py`, `src/ape/research/service.py` | `test_r11_only_qualified_candidates_can_reach_dry_run_challenger` verifies the promotion threshold, under-sampled rejection, and paper/live rejection; `test_automatic_governance_uses_persisted_candidate_evidence` verifies an occupied architecture slot leaves a replacement candidate in `SHADOW` with durable blocker evidence rather than crashing the worker; smoke supplies persisted 500-market evidence. |
-| R12 governed candidate pin | `src/ape/strategy/observer.py`, `src/ape/research/pin.py` | `test_r12_candidate_pin_is_revalidated_each_cycle_and_fails_closed` verifies missing, approved, and revoked pin states are applied without restart; `test_pin_failure_runs_pending_candidate_intent_cleanup` proves a fillable pending challenger ENTRY is cancelled before it can create a position after revocation; `test_pin_switch_cleans_only_the_previously_pinned_candidate` proves A-to-B switches cancel and force-exit A while preserving B; `test_candidate_pin_cleanup_blocks_a_replacement_candidate_entry` prevents B from opening until A's stale state drains. |
+| R12 governed candidate pin | `src/ape/strategy/observer.py`, `src/ape/research/pin.py` | `test_r12_candidate_pin_resolves_once_per_observer_lifetime` and `test_strategy_observer_candidate_pin_is_cached_until_restart` verify startup-only resolution, immutable runtime candidate/blocker state, and restart-required changes; `test_restart_with_replacement_candidate_cleans_stale_prior_candidate_state` proves a restarted worker cancels and force-exits stale A state against startup-resolved B; `test_candidate_pin_cleanup_blocks_a_replacement_candidate_entry` prevents B from opening until A's stale state drains while baseline V2, v1, and v1_fast decisions remain unchanged. |
 | R13 bounded read-only APIs and status | `src/ape/api/main.py`, `src/ape/research/status.py` | `tests/test_research_api.py`, including `test_zero_entry_route_returns_bounded_database_error`, `test_research_status_uses_worker_observed_enabled_state` for separate archive/label status, `test_r13_research_api_surface_is_read_only_and_bounded`, and smoke's research/storage read-route map. |
 | R14 retention and durable evidence | `src/ape/storage/retention.py`, `src/ape/repositories/storage_retention.py` | `test_r14_retention_and_durable_status_tables_are_separate` proves status reads remain separate from all four mutation paths and raw-payload reads. |
 | R15 fixtures, smoke, documentation, deployment boundaries | `src/ape/research/fixtures.py`, `scripts/research_smoke.py` | `test_r15_eighteen_market_fixture_has_real_event_time_sources_and_labels`, real fixture replay outcomes, and machine-readable smoke invariants. |
@@ -30,7 +30,7 @@ R1-R15 were not reduced, deferred, substituted, or relabeled. The scope contract
 executes direct behavioral checks for the migration, evaluator parity, worker
 ownership, archive recovery, zero-entry funnel, fee model, causal lifecycle,
 chronological partitions, deterministic bounded search, market-normalized
-metrics, governance, per-cycle candidate pin revalidation, read APIs, retention boundaries, and
+metrics, governance, startup-only candidate pin resolution, read APIs, retention boundaries, and
 the event-time fixture corpus.
 
 ## Governance Evidence

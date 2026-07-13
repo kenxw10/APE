@@ -106,7 +106,7 @@ def test_invalid_candidate_pin_fails_closed_without_a_baseline_substitute(tmp_pa
         engine.dispose()
 
 
-def test_strategy_observer_candidate_pin_is_revalidated_each_cycle(
+def test_strategy_observer_candidate_pin_is_cached_until_restart(
     tmp_path, monkeypatch
 ) -> None:
     config = load_config(
@@ -125,11 +125,11 @@ def test_strategy_observer_candidate_pin_is_revalidated_each_cycle(
     first = PinnedCandidate("candidate-first", "config-pin", V2_PARAMETERS, "first")
     second = PinnedCandidate("candidate-second", "config-pin", V2_PARAMETERS, "second")
     resolved: list[tuple[PinnedCandidate | None, str | None]] = [(first, None)]
-    resolver_calls: list[PinnedCandidate | None] = []
+    resolver_calls: list[tuple[PinnedCandidate | None, str | None]] = []
     observed: list[tuple[PinnedCandidate | None, str | None]] = []
 
     def fake_resolve(*_args):
-        resolver_calls.append(resolved[0][0])
+        resolver_calls.append(resolved[0])
         return resolved[0]
 
     def fake_variants(**kwargs):
@@ -154,23 +154,44 @@ def test_strategy_observer_candidate_pin_is_revalidated_each_cycle(
         observer_module, "_apply_dry_run_ledger", lambda **_kwargs: DryRunLedgerResult()
     )
     try:
-        observer = StrategyObserver(
-            config=config,
-            safety=assess_startup_safety(config),
-            session_factory=factory,
-            started_at=datetime(2026, 7, 12, 12, 0, tzinfo=UTC),
-            now=lambda: datetime(2026, 7, 12, 12, 0, tzinfo=UTC),
-        )
+        def make_observer() -> StrategyObserver:
+            observer = StrategyObserver(
+                config=config,
+                safety=assess_startup_safety(config),
+                session_factory=factory,
+                started_at=datetime(2026, 7, 12, 12, 0, tzinfo=UTC),
+                now=lambda: datetime(2026, 7, 12, 12, 0, tzinfo=UTC),
+            )
+            monkeypatch.setattr(observer, "record_heartbeat", lambda: None)
+            return observer
+
+        observer = make_observer()
         observer.evaluate_once()
         resolved[0] = (second, None)  # Represents a changed pin row after startup.
         observer.evaluate_once()
-
-        assert resolver_calls == [first, second]
-        assert observed == [(first, None), (second, None)]
-
-        resolved[0] = (None, "candidate_pin_missing")
+        resolved[0] = (None, "candidate_pin_missing")  # Represents revocation.
         observer.evaluate_once()
-        assert resolver_calls == [first, second, None]
+
+        assert resolver_calls == [(first, None)]
+        assert observed == [(first, None), (first, None), (first, None)]
+
+        blocked_observer = make_observer()
+        blocked_observer.evaluate_once()
+        assert resolver_calls == [(first, None), (None, "candidate_pin_missing")]
         assert observed[-1] == (None, "candidate_pin_missing")
+
+        resolved[0] = (second, None)  # The database is repaired after startup.
+        blocked_observer.evaluate_once()
+        assert resolver_calls == [(first, None), (None, "candidate_pin_missing")]
+        assert observed[-1] == (None, "candidate_pin_missing")
+
+        restarted_observer = make_observer()
+        restarted_observer.evaluate_once()
+        assert resolver_calls == [
+            (first, None),
+            (None, "candidate_pin_missing"),
+            (second, None),
+        ]
+        assert observed[-1] == (second, None)
     finally:
         engine.dispose()

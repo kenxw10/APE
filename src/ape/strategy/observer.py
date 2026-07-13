@@ -399,6 +399,9 @@ class StrategyObserver:
         self.status = StrategyObserverRuntimeStatus(enabled=config.strategy_observer_enabled)
         self.status.dry_run_enabled = _dry_run_runtime_enabled(config, safety)
         self._last_strategy_heartbeat_at: datetime | None = None
+        self._pinned_candidate: PinnedCandidate | None = None
+        self._candidate_pin_blocker: str | None = None
+        self._candidate_pin_resolved = False
 
     async def run(
         self,
@@ -430,29 +433,32 @@ class StrategyObserver:
 
         try:
             with self.session_factory() as session:
-                pinned_candidate, candidate_pin_blocker = resolve_pinned_candidate(
-                    self.config, session
-                )
+                if not self._candidate_pin_resolved:
+                    (
+                        self._pinned_candidate,
+                        self._candidate_pin_blocker,
+                    ) = resolve_pinned_candidate(self.config, session)
+                    self._candidate_pin_resolved = True
                 decisions = evaluate_strategy_variants(
                     config=self.config,
                     safety=self.safety,
                     session=session,
                     now=self.now(),
-                    pinned_candidate=pinned_candidate,
-                    pin_blocker=candidate_pin_blocker,
+                    pinned_candidate=self._pinned_candidate,
+                    pin_blocker=self._candidate_pin_blocker,
                     pin_resolved=True,
                 )
                 cleanup_decisions = _candidate_pin_cleanup_decisions(
                     config=self.config,
                     session=session,
                     decisions=decisions,
-                    pinned_candidate=pinned_candidate,
-                    pin_blocker=candidate_pin_blocker,
+                    pinned_candidate=self._pinned_candidate,
+                    pin_blocker=self._candidate_pin_blocker,
                 )
                 decisions = _block_candidate_entries_during_pin_cleanup(
                     decisions=decisions,
                     cleanup_decisions=cleanup_decisions,
-                    pinned_candidate=pinned_candidate,
+                    pinned_candidate=self._pinned_candidate,
                 )
                 decisions.extend(cleanup_decisions)
                 repository = StrategyDecisionsRepository(session)

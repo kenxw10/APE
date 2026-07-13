@@ -46,11 +46,11 @@ PR 10b corrects V2 sample semantics without broadening strategy scope. `BOUNDARY
 
 PR 11 adds database-only replay, archive, calibration, and governance evidence for
 V2 DRY_RUN research. It introduces no paper/live/order/private-account capability.
-Candidate promotions stop at `DRY_RUN_CHALLENGER`. Candidate pins are revalidated
-on every strategy-observer evaluation, so pin changes or revocation take effect on
-the next strategy tick without restarting the worker. The target is 5-15 qualified
-setups, 3-10 preferred fills, and a 3-15 challenger hard fill band per 100 markets;
-these are governance diagnostics, not execution controls.
+Candidate promotions stop at `DRY_RUN_CHALLENGER`. Candidate pins resolve once
+when the strategy worker starts. The running process does not hot reload candidate
+configuration. Database or environment changes require a worker restart. The target
+is 5-15 qualified setups, 3-10 preferred fills, and a 3-15 challenger hard fill band
+per 100 markets; these are governance diagnostics, not execution controls.
 
 ## Safety Defaults
 

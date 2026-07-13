@@ -753,7 +753,7 @@ def test_r11_only_qualified_candidates_can_reach_dry_run_challenger() -> None:
             )
 
 
-def test_r12_candidate_pin_is_revalidated_each_cycle_and_fails_closed(
+def test_r12_candidate_pin_resolves_once_per_observer_lifetime(
     tmp_path, monkeypatch
 ) -> None:
     config = load_config(
@@ -773,13 +773,15 @@ def test_r12_candidate_pin_is_revalidated_each_cycle_and_fails_closed(
     first = PinnedCandidate("candidate-first", "candidate-config", {}, "first")
     second = PinnedCandidate("candidate-second", "candidate-config", {}, "second")
     resolved: list[tuple[PinnedCandidate | None, str | None]] = [(first, None)]
-    observed: list[PinnedCandidate | None] = []
+    resolver_calls: list[tuple[PinnedCandidate | None, str | None]] = []
+    observed: list[tuple[PinnedCandidate | None, str | None]] = []
 
     def fake_resolve(*_args):
+        resolver_calls.append(resolved[0])
         return resolved[0]
 
     def fake_variants(**kwargs):
-        observed.append(kwargs["pinned_candidate"])
+        observed.append((kwargs["pinned_candidate"], kwargs["pin_blocker"]))
         return [
             (
                 kwargs["config"],
@@ -810,11 +812,22 @@ def test_r12_candidate_pin_is_revalidated_each_cycle_and_fails_closed(
         observer.evaluate_once()
         resolved[0] = (second, None)
         observer.evaluate_once()
-        assert observed == [first, second]
-
         resolved[0] = (None, "candidate_pin_missing")
         observer.evaluate_once()
-        assert observed[-1] is None
+
+        assert resolver_calls == [(first, None)]
+        assert observed == [(first, None), (first, None), (first, None)]
+
+        restarted_observer = StrategyObserver(
+            config=config,
+            safety=assess_startup_safety(config),
+            session_factory=session_factory,
+            started_at=at,
+            now=lambda: at,
+        )
+        restarted_observer.evaluate_once()
+        assert resolver_calls == [(first, None), (None, "candidate_pin_missing")]
+        assert observed[-1] == (None, "candidate_pin_missing")
     finally:
         engine.dispose()
 

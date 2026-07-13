@@ -105,7 +105,7 @@ def test_strategy_observer_evaluates_observer_only_market(session) -> None:
     assert "ENTER" not in decision.decision_state
 
 
-def test_strategy_observer_revalidates_candidate_pin_each_cycle(tmp_path, monkeypatch) -> None:
+def test_strategy_observer_caches_candidate_pin_for_process_lifetime(tmp_path, monkeypatch) -> None:
     now = datetime(2026, 7, 5, 12, 10, tzinfo=UTC)
     config = load_config(
         {
@@ -126,13 +126,8 @@ def test_strategy_observer_revalidates_candidate_pin_each_cycle(tmp_path, monkey
         V2_PARAMETERS,
         "candidate-commit",
     )
-    pin_states = iter(
-        (
-            (None, "candidate_pin_missing"),
-            (candidate, None),
-            (None, "candidate_pin_not_dry_run_challenger"),
-        )
-    )
+    pin_state: list[tuple[PinnedCandidate | None, str | None]] = [(candidate, None)]
+    resolver_calls: list[tuple[PinnedCandidate | None, str | None]] = []
     observed_pin_states: list[tuple[PinnedCandidate | None, str | None]] = []
     decision = StrategyDecisionInput(
         decision_id="candidate-pin-refresh",
@@ -144,7 +139,8 @@ def test_strategy_observer_revalidates_candidate_pin_each_cycle(tmp_path, monkey
     )
 
     def fake_resolve_pinned_candidate(_config, _session):
-        return next(pin_states)
+        resolver_calls.append(pin_state[0])
+        return pin_state[0]
 
     def fake_evaluate_strategy_variants(**kwargs):
         observed_pin_states.append(
@@ -174,14 +170,12 @@ def test_strategy_observer_revalidates_candidate_pin_each_cycle(tmp_path, monkey
         monkeypatch.setattr(observer, "record_heartbeat", lambda: None)
 
         observer.evaluate_once()
+        pin_state[0] = (None, "candidate_pin_not_dry_run_challenger")
         observer.evaluate_once()
         observer.evaluate_once()
 
-        assert observed_pin_states == [
-            (None, "candidate_pin_missing"),
-            (candidate, None),
-            (None, "candidate_pin_not_dry_run_challenger"),
-        ]
+        assert resolver_calls == [(candidate, None)]
+        assert observed_pin_states == [(candidate, None), (candidate, None), (candidate, None)]
     finally:
         engine.dispose()
 
@@ -344,7 +338,7 @@ def test_pin_failure_runs_pending_candidate_intent_cleanup(tmp_path, monkeypatch
         engine.dispose()
 
 
-def test_pin_switch_cleans_only_the_previously_pinned_candidate(session) -> None:
+def test_restart_with_replacement_candidate_cleans_stale_prior_candidate_state(session) -> None:
     now = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
     previous_strategy_id = "btc15_momentum_v2_candidate_previous"
     current_strategy_id = "btc15_momentum_v2_candidate_current"
@@ -527,6 +521,20 @@ def test_candidate_pin_cleanup_blocks_a_replacement_candidate_entry(session) -> 
         candidate_side="YES",
         measurements={"intended_entry_price": "0.62"},
     )
+    control_decision = replace(
+        baseline,
+        decision_id="candidate-pin-cleanup-control",
+        decision_state=STATE_OBSERVE_ONLY_MARKET,
+        primary_reason="control_fixture",
+        strategy_id=CONTROL_STRATEGY_ID,
+    )
+    fast_decision = replace(
+        baseline,
+        decision_id="candidate-pin-cleanup-fast",
+        decision_state=STATE_OBSERVE_ONLY_MARKET,
+        primary_reason="fast_fixture",
+        strategy_id=CHALLENGER_STRATEGY_ID,
+    )
     intents = StrategyV2Repository(session)
     intents.insert_intent_if_absent(
         StrategyTradeIntentInput(
@@ -545,6 +553,8 @@ def test_candidate_pin_cleanup_blocks_a_replacement_candidate_entry(session) -> 
     )
     candidate = PinnedCandidate(current_strategy_id, "current-config", V2_PARAMETERS, "commit")
     decisions = [
+        (replace(config, strategy_id=CONTROL_STRATEGY_ID), control_decision),
+        (replace(config, strategy_id=CHALLENGER_STRATEGY_ID), fast_decision),
         (replace(config, strategy_id=V2_STRATEGY_ID), baseline),
         (replace(config, strategy_id=current_strategy_id), current_entry),
     ]
@@ -561,7 +571,12 @@ def test_candidate_pin_cleanup_blocks_a_replacement_candidate_entry(session) -> 
         pinned_candidate=candidate,
     )
 
-    blocked_current_entry = decisions[1][1]
+    decisions_by_strategy = {decision.strategy_id: decision for _, decision in decisions}
+    assert decisions_by_strategy[CONTROL_STRATEGY_ID] == control_decision
+    assert decisions_by_strategy[CHALLENGER_STRATEGY_ID] == fast_decision
+    assert decisions_by_strategy[V2_STRATEGY_ID] == baseline
+
+    blocked_current_entry = decisions_by_strategy[current_strategy_id]
     assert blocked_current_entry.decision_state == STATE_V2_HARD_GATE_BLOCKED
     assert blocked_current_entry.primary_reason == "v2_candidate_pin_cleanup_in_progress"
 
