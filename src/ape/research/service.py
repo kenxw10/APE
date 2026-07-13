@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -19,7 +20,17 @@ from ape.research import (
     REPLAY_SCHEMA_VERSION,
     RESEARCH_LABEL_SCHEMA_VERSION,
 )
-from ape.research.archive import archive_research_events, reconcile_market_outcomes
+from ape.research.archive import (
+    ARCHIVE_MAX_BATCHES_PER_CYCLE,
+    ARCHIVE_SOURCE_STAGES,
+    ArchiveResult,
+    archive_research_batch,
+    archive_research_coverage,
+    archive_research_events,
+    archive_research_source_pending,
+    reconcile_market_outcomes,
+    refresh_research_archive_labels,
+)
 from ape.research.calibration import (
     LIFECYCLE_DRAFT,
     complete_search_space_snapshot,
@@ -61,17 +72,216 @@ class ResearchWorker:
         checked_at = datetime.now(UTC)
         if self.session_factory is None:
             return {"status": "blocked", "blockers": ["research_database_not_configured"]}
+        cycle_started_at = checked_at
+        result = _cycle_progress(
+            state="running",
+            stage="startup",
+            cycle_started_at=cycle_started_at,
+        )
+        self._write_heartbeat(checked_at, result)
+        LOGGER.info("Research cycle starting.")
         try:
+            result = _cycle_progress(
+                state="running",
+                stage="archive",
+                cycle_started_at=cycle_started_at,
+            )
+            self._write_heartbeat(datetime.now(UTC), result)
+            archive, archive_budget_exhausted = self._archive_stage(
+                checked_at=checked_at,
+                cycle_started_at=cycle_started_at,
+            )
+            if archive_budget_exhausted:
+                result = {
+                    "status": "partial",
+                    **_cycle_progress(
+                        state="partial",
+                        stage="archive",
+                        cycle_started_at=cycle_started_at,
+                        last_successful_stage="archive",
+                        archive=archive,
+                        warnings=["research_archive_batch_budget_exhausted"],
+                    ),
+                }
+                self._write_heartbeat(datetime.now(UTC), result)
+                LOGGER.warning("Research archive batch budget exhausted; replay deferred.")
+                return result
+
+            result = _cycle_progress(
+                state="running",
+                stage="association_labels",
+                cycle_started_at=cycle_started_at,
+                last_successful_stage="archive",
+                archive=archive,
+            )
+            self._write_heartbeat(datetime.now(UTC), result)
             with self.session_factory() as session:
-                result = run_research_cycle(self.config, session, checked_at=checked_at)
-                _record_research_heartbeat(
-                    session, self.config, self.safety, self.started_at, checked_at, result
+                refresh_research_archive_labels(session)
+                session.commit()
+
+            result = _cycle_progress(
+                state="running",
+                stage="coverage",
+                cycle_started_at=cycle_started_at,
+                last_successful_stage="association_labels",
+                archive=archive,
+            )
+            self._write_heartbeat(datetime.now(UTC), result)
+            with self.session_factory() as session:
+                coverage = archive_research_coverage(session, now=checked_at)
+                session.commit()
+            archive = ArchiveResult(
+                archived_events=archive.archived_events,
+                archived_by_type=archive.archived_by_type,
+                outcomes_reconciled=archive.outcomes_reconciled,
+                coverage=coverage,
+            )
+
+            def report_replay_progress(stage: str, details: dict[str, Any]) -> None:
+                nonlocal result
+                progress_details = dict(details)
+                last_successful_stage = progress_details.pop(
+                    "last_successful_stage", "coverage"
+                )
+                result = _cycle_progress(
+                    state="running",
+                    stage=stage,
+                    cycle_started_at=cycle_started_at,
+                    last_successful_stage=last_successful_stage,
+                    archive=archive,
+                    **progress_details,
+                )
+                self._write_heartbeat(datetime.now(UTC), result)
+
+            with self.session_factory() as session:
+                result = run_research_cycle(
+                    self.config,
+                    session,
+                    checked_at=checked_at,
+                    archive_result=archive,
+                    progress_callback=report_replay_progress,
                 )
                 session.commit()
-                return result
+            result = {
+                **result,
+                **_cycle_progress(
+                    state="healthy" if result["status"] == "completed" else "degraded",
+                    stage="complete",
+                    cycle_started_at=cycle_started_at,
+                    last_successful_stage="calibration"
+                    if self.config.calibration_enabled
+                    else "baseline_replay",
+                    archive=archive,
+                ),
+            }
+            self._write_heartbeat(datetime.now(UTC), result)
+            LOGGER.info(
+                "Research cycle completed archive_events=%s replay_run=%s calibration=%s.",
+                archive.archived_events,
+                result.get("replay_run_id"),
+                result.get("calibration_status"),
+            )
+            return result
+        except SQLAlchemyError as error:
+            LOGGER.exception("Research cycle database stage failed.")
+            result = {
+                "status": "error",
+                "blockers": ["research_database_error"],
+                **_cycle_progress(
+                    state="error",
+                    stage=result.get("current_stage", "unknown"),
+                    cycle_started_at=cycle_started_at,
+                    last_successful_stage=result.get("last_successful_stage"),
+                    error=error,
+                ),
+            }
+            self._write_heartbeat(datetime.now(UTC), result)
+            return result
+        except Exception as error:
+            LOGGER.exception("Research cycle unexpected stage failed.")
+            result = {
+                "status": "error",
+                "blockers": ["research_cycle_unexpected_error"],
+                **_cycle_progress(
+                    state="error",
+                    stage=result.get("current_stage", "unknown"),
+                    cycle_started_at=cycle_started_at,
+                    last_successful_stage=result.get("last_successful_stage"),
+                    error=error,
+                ),
+            }
+            self._write_heartbeat(datetime.now(UTC), result)
+            return result
+
+    def _archive_stage(
+        self,
+        *,
+        checked_at: datetime,
+        cycle_started_at: datetime,
+    ) -> tuple[ArchiveResult, bool]:
+        del checked_at
+        counts: dict[str, int] = {}
+        archived_events = 0
+        batch_count = 0
+        for stage_index, source_stage in enumerate(ARCHIVE_SOURCE_STAGES):
+            while batch_count < ARCHIVE_MAX_BATCHES_PER_CYCLE:
+                with self.session_factory() as session:
+                    batch = archive_research_batch(session, source_stage=source_stage)
+                    if batch.source_rows:
+                        session.commit()
+                if batch.source_rows == 0:
+                    break
+                batch_count += 1
+                archived_events += batch.archived_events
+                for event_type, count in batch.archived_by_type.items():
+                    counts[event_type] = counts.get(event_type, 0) + count
+                self._write_heartbeat(
+                    datetime.now(UTC),
+                    _cycle_progress(
+                        state="running",
+                        stage="archive",
+                        cycle_started_at=cycle_started_at,
+                        last_successful_stage="archive",
+                        archive=ArchiveResult(archived_events, counts, 0, {}),
+                        last_archive_batch={
+                            "source_stage": batch.source_stage,
+                            "source_rows": batch.source_rows,
+                            "archived_events": batch.archived_events,
+                            "batch_count": batch_count,
+                        },
+                    ),
+                )
+            if batch_count >= ARCHIVE_MAX_BATCHES_PER_CYCLE:
+                with self.session_factory() as session:
+                    current_pending = archive_research_source_pending(
+                        session, source_stage=source_stage
+                    )
+                if current_pending:
+                    return ArchiveResult(archived_events, counts, 0, {}), True
+                for remaining_stage in ARCHIVE_SOURCE_STAGES[stage_index + 1 :]:
+                    with self.session_factory() as session:
+                        if archive_research_source_pending(
+                            session, source_stage=remaining_stage
+                        ):
+                            return ArchiveResult(archived_events, counts, 0, {}), True
+                return ArchiveResult(archived_events, counts, 0, {}), False
+        return ArchiveResult(archived_events, counts, 0, {}), False
+
+    def _write_heartbeat(self, heartbeat_at: datetime, result: dict[str, Any]) -> None:
+        """Persist liveness from a fresh transaction so failed work cannot erase it."""
+        try:
+            with self.session_factory() as session:
+                _record_research_heartbeat(
+                    session,
+                    self.config,
+                    self.safety,
+                    self.started_at,
+                    heartbeat_at,
+                    result,
+                )
+                session.commit()
         except SQLAlchemyError:
-            LOGGER.warning("Research cycle persistence failed.", exc_info=True)
-            return {"status": "error", "blockers": ["research_database_error"]}
+            LOGGER.warning("Research heartbeat persistence failed.", exc_info=True)
 
 
 class MarketOutcomeReconciler:
@@ -117,11 +327,16 @@ class MarketOutcomeReconciler:
 
 
 def run_research_cycle(
-    config: AppConfig, session, *, checked_at: datetime | None = None
+    config: AppConfig,
+    session,
+    *,
+    checked_at: datetime | None = None,
+    archive_result: ArchiveResult | None = None,
+    progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Execute archive -> labels -> baseline replay -> optional bounded calibration."""
     checked_at = checked_at or datetime.now(UTC)
-    archive = archive_research_events(session, now=checked_at)
+    archive = archive_result or archive_research_events(session, now=checked_at)
     repository = ResearchRepository(session)
     events = repository.list_events(limit=None)
     outcomes = repository.list_complete_outcomes()
@@ -182,9 +397,31 @@ def run_research_cycle(
                 evidence_partition="full_dataset_baseline",
             )
         )
+    repository.finish_replay_run(replay_run, status="COMPLETED", finished_at=checked_at)
+    if progress_callback is not None:
+        # Commit replay evidence before calibration so a later calibration failure
+        # cannot roll back a completed archive/replay stage.
+        session.commit()
+        progress_callback(
+            "baseline_replay",
+            {
+                "last_successful_stage": "baseline_replay",
+                "replay_run_id": run_id,
+                "zero_entry_report": replay.zero_entry_report,
+            },
+        )
     calibration_status = "DISABLED"
     calibration_run_id = None
     if config.calibration_enabled:
+        if progress_callback is not None:
+            progress_callback(
+                "calibration",
+                {
+                    "last_successful_stage": "baseline_replay",
+                    "replay_run_id": run_id,
+                    "zero_entry_report": replay.zero_entry_report,
+                },
+            )
         calibration_run_id = (
             "calibration-" + _hash({"replay": run_id, "dataset": replay.dataset_hash})[:24]
         )
@@ -325,7 +562,6 @@ def run_research_cycle(
                             candidate_id=candidate.candidate_id,
                             actor="ape-research-worker",
                         )
-    repository.finish_replay_run(replay_run, status="COMPLETED", finished_at=checked_at)
     return {
         "status": "completed",
         "archive": archive.coverage,
@@ -401,6 +637,8 @@ def _record_research_heartbeat(
     heartbeat_at: datetime,
     result: dict[str, Any],
 ) -> None:
+    archive = result.get("archive")
+    last_error = result.get("last_error")
     WorkerHeartbeatRepository(session).record_heartbeat(
         WorkerHeartbeatInput(
             service_name=WORKER_SERVICE_RESEARCH,
@@ -413,17 +651,91 @@ def _record_research_heartbeat(
                 "research": {
                     "enabled": config.research_enabled,
                     "calibration_enabled": config.calibration_enabled,
+                    "poll_seconds": config.research_poll_seconds,
                     "worker_role": "research",
-                    "last_archive_run": result.get("archive"),
+                    "worker_state": result.get("worker_state", "healthy"),
+                    "cycle_state": result.get("cycle_state", "healthy"),
+                    "current_stage": result.get("current_stage"),
+                    "last_successful_stage": result.get("last_successful_stage"),
+                    "cycle_started_at": result.get("cycle_started_at"),
+                    "cycle_finished_at": result.get("cycle_finished_at"),
+                    "last_archive_run": archive,
+                    "last_archive_batch": result.get("last_archive_batch"),
                     "last_replay_run": result.get("replay_run_id"),
                     "last_calibration_run": result.get("calibration_run_id"),
                     "zero_entry_report": result.get("zero_entry_report"),
-                    "warnings": result.get("warnings", []),
-                    "blockers": result.get("blockers", []),
+                    "last_error": last_error,
+                    "statement_timeout_detected": bool(
+                        isinstance(last_error, dict)
+                        and last_error.get("statement_timeout_detected")
+                    ),
+                    "warnings": _bounded_strings(result.get("warnings")),
+                    "blockers": _bounded_strings(result.get("blockers")),
                 },
             },
         )
     )
+
+
+def _cycle_progress(
+    *,
+    state: str,
+    stage: str,
+    cycle_started_at: datetime,
+    last_successful_stage: str | None = None,
+    archive: ArchiveResult | None = None,
+    warnings: list[str] | None = None,
+    blockers: list[str] | None = None,
+    error: Exception | None = None,
+    **details: Any,
+) -> dict[str, Any]:
+    last_error = _sanitized_error(error) if error is not None else None
+    return {
+        "worker_state": state,
+        "cycle_state": state,
+        "current_stage": stage,
+        "last_successful_stage": last_successful_stage,
+        "cycle_started_at": cycle_started_at.isoformat(),
+        "cycle_finished_at": datetime.now(UTC).isoformat()
+        if state in {"healthy", "partial", "error", "degraded"}
+        else None,
+        "archive": archive.coverage if archive is not None else None,
+        "archive_event_count": archive.archived_events if archive is not None else None,
+        "last_error": last_error,
+        "warnings": _bounded_strings(warnings),
+        "blockers": _bounded_strings(blockers),
+        **details,
+    }
+
+
+def _sanitized_error(error: Exception) -> dict[str, Any]:
+    statement_timeout = _is_statement_timeout(error)
+    return {
+        "type": error.__class__.__name__[:80],
+        "code": "research_statement_timeout"
+        if statement_timeout
+        else "research_stage_failed",
+        "statement_timeout_detected": statement_timeout,
+    }
+
+
+def _is_statement_timeout(error: Exception) -> bool:
+    message = str(error).lower()
+    return any(
+        marker in message
+        for marker in (
+            "statement timeout",
+            "query canceled",
+            "query_cancelled",
+            "canceling statement",
+        )
+    )
+
+
+def _bounded_strings(value: Any, *, limit: int = 8) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item)[:128] for item in value[:limit]]
 
 
 def _hash(value: Any) -> str:

@@ -38,12 +38,53 @@ class ResearchRepository:
                 for key, value in _values(values).items():
                     if key not in {"id", "created_at"}:
                         setattr(existing, key, value)
-                self.session.flush()
             return existing
         row = ResearchReplayEvent(**_values(values))
         self.session.add(row)
-        self.session.flush()
         return row
+
+    def archive_events_batch(self, values: list[dict[str, Any]]) -> int:
+        """Persist one bounded source batch with a single flush.
+
+        Archive rows have a unique source identity. Loading the existing rows once
+        avoids a query and flush for every incoming event, which keeps PostgreSQL
+        statement work bounded during large backfills.
+        """
+        if not values:
+            return 0
+        source_table = values[0]["source_table"]
+        if any(value["source_table"] != source_table for value in values):
+            raise ValueError("Archive batches must contain one source table.")
+        source_row_ids = [str(value["source_row_id"]) for value in values]
+        existing_rows = self.session.scalars(
+            select(ResearchReplayEvent).where(
+                ResearchReplayEvent.source_table == source_table,
+                ResearchReplayEvent.source_row_id.in_(source_row_ids),
+            )
+        )
+        existing_by_source = {
+            row.source_row_id: row
+            for row in existing_rows
+        }
+        changed = 0
+        for value in values:
+            existing = existing_by_source.get(str(value["source_row_id"]))
+            if existing is not None and existing.source_hash == value["source_hash"]:
+                # Mutable sources advance their archive cursor without changing
+                # the normalized payload identity.
+                existing.event_time = value["event_time"]
+                existing.received_at = value["received_at"]
+                existing.event_hash = value["event_hash"]
+                continue
+            if existing is None:
+                self.session.add(ResearchReplayEvent(**_values(value)))
+            else:
+                for key, item in _values(value).items():
+                    if key not in {"id", "created_at"}:
+                        setattr(existing, key, item)
+            changed += 1
+        self.session.flush()
+        return changed
 
     def get_event_by_source(
         self, *, source_table: str, source_row_id: str
