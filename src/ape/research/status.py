@@ -45,6 +45,13 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
         "last_progress_at": None,
         "failed_stage": None,
         "last_archive_batch": None,
+        "archive_selector_mode": None,
+        "archive_source_cursor": None,
+        "archive_bootstrap_target": None,
+        "archive_verification_window_start": None,
+        "archive_verification_window_end": None,
+        "archive_missing_rows_archived": 0,
+        "archive_bootstrap_complete": None,
         "labels_processed": None,
         "labels_remaining": None,
         "association_rows_processed": None,
@@ -185,6 +192,19 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
                 else {},
                 last_progress_at=details.get("last_progress_at"),
                 failed_stage=details.get("failed_stage"),
+                archive_selector_mode=details.get("archive_selector_mode"),
+                archive_source_cursor=details.get("archive_source_cursor"),
+                archive_bootstrap_target=details.get("archive_bootstrap_target"),
+                archive_verification_window_start=details.get(
+                    "archive_verification_window_start"
+                ),
+                archive_verification_window_end=details.get(
+                    "archive_verification_window_end"
+                ),
+                archive_missing_rows_archived=details.get(
+                    "archive_missing_rows_archived", 0
+                ),
+                archive_bootstrap_complete=details.get("archive_bootstrap_complete"),
                 last_zero_entry_audit=repository.latest_zero_entry_report(),
                 last_replay_run=_row(latest_replay),
                 last_calibration_run=_row(latest_calibration),
@@ -335,6 +355,15 @@ def _safe_worker_metadata(details: dict[str, Any]) -> dict[str, Any]:
         "last_progress_at": details.get("last_progress_at"),
         "failed_stage": details.get("failed_stage"),
         "last_archive_batch": details.get("last_archive_batch"),
+        "archive_selector_mode": details.get("archive_selector_mode"),
+        "archive_source_cursor": details.get("archive_source_cursor"),
+        "archive_bootstrap_target": details.get("archive_bootstrap_target"),
+        "archive_verification_window_start": details.get(
+            "archive_verification_window_start"
+        ),
+        "archive_verification_window_end": details.get("archive_verification_window_end"),
+        "archive_missing_rows_archived": details.get("archive_missing_rows_archived", 0),
+        "archive_bootstrap_complete": details.get("archive_bootstrap_complete"),
         "association_rows_processed": details.get("association_rows_processed"),
         "association_rows_remaining": details.get("association_rows_remaining"),
         "label_markets_processed": details.get("label_markets_processed"),

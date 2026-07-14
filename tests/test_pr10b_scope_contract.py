@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from ape.config import load_config
-from ape.db.migrations import CURRENT_SCHEMA_VERSION, run_migrations
+from ape.db.migrations import CURRENT_SCHEMA_VERSION, SCHEMA_VERSIONS, run_migrations
 from ape.db.models import Market
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.repositories.inputs import (
@@ -268,7 +268,8 @@ def test_pr10b_r4_versions_preserve_schema_and_revise_v2_semantics(monkeypatch) 
     assert momentum_v2.V2_ARCHITECTURE_VERSION == "momentum_v2_heuristic_v3"
     assert momentum_v2.V2_LIFECYCLE_SCHEMA_VERSION == "momentum_v2_lifecycle_v2"
     assert momentum_v2.V2_FEATURE_SCHEMA_VERSION == "momentum_v2_features_v3"
-    assert CURRENT_SCHEMA_VERSION == "0010_research_replay_calibration"
+    assert "0010_research_replay_calibration" in SCHEMA_VERSIONS
+    assert CURRENT_SCHEMA_VERSION == "0011_research_archive_cursors"
 
     monkeypatch.setattr(momentum_v2, "resolve_code_version", lambda: "pr10b-test")
     corrected = momentum_v2.built_in_config_version(

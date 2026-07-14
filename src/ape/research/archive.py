@@ -16,6 +16,7 @@ from ape.db.models import (
     OrderbookSnapshot,
     PublicTrade,
     ReferenceTick,
+    ResearchArchiveCursor,
     ResearchMarketOutcome,
     ResearchReplayEvent,
     StrategyDecision,
@@ -35,6 +36,8 @@ from ape.research.repository import (
 
 ARCHIVE_BATCH_SIZE = 250
 ARCHIVE_MAX_BATCHES_PER_CYCLE = 20
+ARCHIVE_CURSOR_SCHEMA_VERSION = "research_archive_cursor_v1"
+ARCHIVE_BOOTSTRAP_WINDOW_SPAN = 10_000
 LABEL_MARKETS_PER_CYCLE = 25
 LABEL_MAX_HORIZON_SECONDS = 65
 ARCHIVE_SOURCE_STAGES = (
@@ -88,6 +91,15 @@ class ArchiveBatchResult:
     source_rows: int
     archived_events: int
     archived_by_type: dict[str, int]
+    operation_performed: bool = False
+    state_changed: bool = False
+    selector_mode: str | None = None
+    source_cursor: int | None = None
+    bootstrap_target: int | None = None
+    verification_window_start: int | None = None
+    verification_window_end: int | None = None
+    missing_rows_archived: int = 0
+    bootstrap_complete: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -111,7 +123,7 @@ def archive_research_events(session: Session, *, now: datetime | None = None) ->
         while True:
             batch = archive_research_batch(session, source_stage=source_stage)
             _merge_archive_counts(counts, batch.archived_by_type)
-            if batch.source_rows == 0:
+            if not batch.operation_performed:
                 break
     association = refresh_research_reference_associations(session)
     if association.remaining_rows:
@@ -125,25 +137,70 @@ def archive_research_events(session: Session, *, now: datetime | None = None) ->
 
 def archive_research_batch(session: Session, *, source_stage: str) -> ArchiveBatchResult:
     """Archive at most ``ARCHIVE_BATCH_SIZE`` rows from one deterministic source."""
-    _acquire_archive_source_lock(session, _archive_source_table(source_stage))
+    source_table = _archive_source_table(source_stage)
+    _acquire_archive_source_lock(session, source_table)
     repository = ResearchRepository(session)
-    rows, source_table, event_type = _archive_source_rows(session, repository, source_stage)
+    cursor = None
+    if source_stage in _ARCHIVE_SOURCE_DETAILS:
+        model, event_type = _ARCHIVE_SOURCE_DETAILS[source_stage]
+        rows, cursor, operation_performed, state_changed = _append_only_source_rows(
+            session,
+            model=model,
+            source_table=source_table,
+        )
+    else:
+        rows, source_table, event_type = _archive_source_rows(session, repository, source_stage)
+        operation_performed = bool(rows)
+        state_changed = bool(rows)
     if not rows:
-        return ArchiveBatchResult(source_stage, 0, 0, {})
+        return _archive_batch_result(
+            source_stage,
+            source_rows=0,
+            archived_events=0,
+            archived_by_type={},
+            cursor=cursor,
+            operation_performed=operation_performed,
+            state_changed=state_changed,
+        )
     events = [_archive_source_event(session, source_stage, row) for row in rows]
     changed = repository.archive_events_batch(events)
-    return ArchiveBatchResult(
+    return _archive_batch_result(
         source_stage=source_stage,
         source_rows=len(rows),
         archived_events=changed,
         archived_by_type={event_type: changed} if changed else {},
+        cursor=cursor,
+        operation_performed=True,
+        state_changed=True,
+        missing_rows_archived=len(rows),
     )
 
 
 def archive_research_source_pending(session: Session, *, source_stage: str) -> bool:
     """Read-only backlog check used when a runtime batch budget is exhausted."""
-    rows, _, _ = _archive_source_rows(session, ResearchRepository(session), source_stage)
-    return bool(rows)
+    if source_stage == "markets":
+        return _market_source_pending(session)
+    try:
+        model, _ = _ARCHIVE_SOURCE_DETAILS[source_stage]
+    except KeyError as error:
+        raise ValueError(f"Unsupported archive source stage: {source_stage}") from error
+    cursor = session.get(ResearchArchiveCursor, source_stage)
+    if cursor is None or cursor.selector_mode == "UNINITIALIZED":
+        return (
+            session.scalar(select(model.id).order_by(model.id.asc()).limit(1))
+            is not None
+        )
+    if not cursor.bootstrap_complete:
+        return True
+    return (
+        session.scalar(
+            select(model.id)
+            .where(model.id > cursor.source_cursor)
+            .order_by(model.id.asc())
+            .limit(1)
+        )
+        is not None
+    )
 
 
 def refresh_research_archive_labels(session: Session) -> LabelRefreshResult:
@@ -198,6 +255,185 @@ def _archive_source_rows(session: Session, repository: ResearchRepository, sourc
         list(_unarchived_rows(session, repository, model, source_stage)),
         source_stage,
         event_type,
+    )
+
+
+def _append_only_source_rows(
+    session: Session,
+    *,
+    model,
+    source_table: str,
+) -> tuple[list[Any], ResearchArchiveCursor, bool, bool]:
+    cursor, initialized = _get_or_initialize_archive_cursor(
+        session,
+        model=model,
+        source_table=source_table,
+    )
+    if cursor.selector_mode == "TAIL":
+        rows = list(
+            session.scalars(
+                select(model)
+                .where(model.id > cursor.source_cursor)
+                .order_by(model.id.asc())
+                .limit(ARCHIVE_BATCH_SIZE)
+            )
+        )
+        if rows:
+            cursor.source_cursor = max(int(row.id) for row in rows)
+            cursor.updated_at = _utc(datetime.now(UTC))
+        return rows, cursor, bool(rows), initialized or bool(rows)
+
+    window_start = int(cursor.verification_window_start or cursor.source_cursor + 1)
+    window_end = int(cursor.verification_window_end or window_start)
+    lower_bound = max(window_start, cursor.source_cursor + 1)
+    archived = exists(
+        select(1).where(
+            ResearchReplayEvent.source_table == source_table,
+            ResearchReplayEvent.source_row_id == cast(model.id, String),
+        )
+    )
+    rows = list(
+        session.scalars(
+            select(model)
+            .where(
+                model.id >= lower_bound,
+                model.id <= window_end,
+                ~archived,
+            )
+            .order_by(model.id.asc())
+            .limit(ARCHIVE_BATCH_SIZE)
+        )
+    )
+    if rows:
+        cursor.source_cursor = max(int(row.id) for row in rows)
+        cursor.updated_at = _utc(datetime.now(UTC))
+        return rows, cursor, True, True
+
+    target = int(cursor.frozen_bootstrap_target or cursor.source_cursor)
+    if window_end < target:
+        next_start = window_end + 1
+        cursor.source_cursor = window_end
+        cursor.verification_window_start = next_start
+        cursor.verification_window_end = min(
+            next_start + ARCHIVE_BOOTSTRAP_WINDOW_SPAN - 1,
+            target,
+        )
+        cursor.updated_at = _utc(datetime.now(UTC))
+        return [], cursor, True, True
+
+    cursor.source_cursor = target
+    cursor.selector_mode = "TAIL"
+    cursor.bootstrap_complete = True
+    cursor.updated_at = _utc(datetime.now(UTC))
+    return [], cursor, True, True
+
+
+def _get_or_initialize_archive_cursor(
+    session: Session,
+    *,
+    model,
+    source_table: str,
+) -> tuple[ResearchArchiveCursor, bool]:
+    existing = session.get(ResearchArchiveCursor, source_table)
+    if existing is not None and existing.selector_mode != "UNINITIALIZED":
+        return existing, False
+    minimum, maximum = session.execute(select(func.min(model.id), func.max(model.id))).one()
+    if maximum is None:
+        values = {
+            "selector_mode": "TAIL",
+            "source_cursor": 0,
+            "frozen_bootstrap_target": None,
+            "verification_window_start": None,
+            "verification_window_end": None,
+            "bootstrap_complete": True,
+        }
+    else:
+        values = {
+            "selector_mode": "BOOTSTRAP_VERIFY",
+            "source_cursor": int(minimum) - 1,
+            "frozen_bootstrap_target": int(maximum),
+            "verification_window_start": int(minimum),
+            "verification_window_end": min(
+                int(minimum) + ARCHIVE_BOOTSTRAP_WINDOW_SPAN - 1,
+                int(maximum),
+            ),
+            "bootstrap_complete": False,
+        }
+    if existing is None:
+        cursor = ResearchArchiveCursor(
+            source_table=source_table,
+            schema_version=ARCHIVE_CURSOR_SCHEMA_VERSION,
+            **values,
+        )
+        session.add(cursor)
+    else:
+        for key, value in values.items():
+            setattr(existing, key, value)
+        cursor = existing
+    cursor.schema_version = ARCHIVE_CURSOR_SCHEMA_VERSION
+    cursor.updated_at = _utc(datetime.now(UTC))
+    session.flush()
+    return cursor, True
+
+
+def _archive_batch_result(
+    source_stage: str,
+    *,
+    source_rows: int,
+    archived_events: int,
+    archived_by_type: dict[str, int],
+    cursor: ResearchArchiveCursor | None,
+    operation_performed: bool,
+    state_changed: bool,
+    missing_rows_archived: int = 0,
+) -> ArchiveBatchResult:
+    return ArchiveBatchResult(
+        source_stage=source_stage,
+        source_rows=source_rows,
+        archived_events=archived_events,
+        archived_by_type=archived_by_type,
+        operation_performed=operation_performed,
+        state_changed=state_changed,
+        selector_mode=cursor.selector_mode if cursor is not None else None,
+        source_cursor=cursor.source_cursor if cursor is not None else None,
+        bootstrap_target=(
+            cursor.frozen_bootstrap_target if cursor is not None else None
+        ),
+        verification_window_start=(
+            cursor.verification_window_start if cursor is not None else None
+        ),
+        verification_window_end=(
+            cursor.verification_window_end if cursor is not None else None
+        ),
+        missing_rows_archived=missing_rows_archived,
+        bootstrap_complete=cursor.bootstrap_complete if cursor is not None else None,
+    )
+
+
+def _market_source_pending(session: Session) -> bool:
+    archived = exists(
+        select(1).where(
+            ResearchReplayEvent.source_table == "markets",
+            ResearchReplayEvent.source_row_id == cast(Market.id, String),
+        )
+    )
+    if session.scalar(select(Market.id).where(~archived).order_by(Market.id.asc()).limit(1)):
+        return True
+    return (
+        session.scalar(
+            select(Market.id)
+            .join(
+                ResearchReplayEvent,
+                and_(
+                    ResearchReplayEvent.source_table == "markets",
+                    ResearchReplayEvent.source_row_id == cast(Market.id, String),
+                ),
+            )
+            .where(Market.updated_at > ResearchReplayEvent.event_time)
+            .order_by(Market.updated_at.asc(), Market.id.asc())
+            .limit(1)
+        )
+        is not None
     )
 
 

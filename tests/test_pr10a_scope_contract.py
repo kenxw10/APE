@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from ape.api.main import create_app
 from ape.config import load_config
-from ape.db.migrations import CURRENT_SCHEMA_VERSION
+from ape.db.migrations import CURRENT_SCHEMA_VERSION, SCHEMA_VERSIONS
 from ape.db.models import OrderbookSnapshot, StrategyPositionOutcome
 from ape.kalshi.ws_messages import parse_ws_payload
 from ape.kalshi.ws_state import OrderbookState
@@ -26,7 +26,8 @@ from ape.strategy.observer import (
 
 
 def test_pr10a_versions_states_schema_and_endpoint_contract() -> None:
-    assert CURRENT_SCHEMA_VERSION == "0010_research_replay_calibration"
+    assert "0010_research_replay_calibration" in SCHEMA_VERSIONS
+    assert CURRENT_SCHEMA_VERSION == "0011_research_archive_cursors"
     assert V2_ARCHITECTURE_VERSION == "momentum_v2_heuristic_v3"
     assert V2_FEATURE_SCHEMA_VERSION == "momentum_v2_features_v3"
     assert V2_LIFECYCLE_SCHEMA_VERSION == "momentum_v2_lifecycle_v2"

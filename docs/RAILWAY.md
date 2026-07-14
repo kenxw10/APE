@@ -743,7 +743,7 @@ on the existing strategy service unless an operator later approves one immutable
 Initial deployment:
 
 1. Merge only after the GPT audit and exact unsharded PR CI are green.
-2. Redeploy existing services and confirm migration `0010_research_replay_calibration`.
+2. Redeploy existing services and confirm migration `0011_research_archive_cursors`.
 3. Create `ape-research-worker` with `DATABASE_URL` plus only research and safety variables.
 4. Do not provide a Kalshi API key, private key, private-channel credentials, or account credentials.
 5. Leave `STRATEGY_V2_CANDIDATE_CONFIG_VERSION_ID` unset initially.
@@ -772,6 +772,24 @@ After the PR is merged and the required GPT audit and exact unsharded PR CI are 
 
 Do not enable paper trading, live trading, private credentials, candidate pins, or
 additional services as part of this rollout.
+
+## PR 11c Timeout-Safe Research Archive Cursor
+
+PR 11c adds one small migration, `0011_research_archive_cursors`, and no new
+service or required environment variable. The six append-only numeric-ID sources
+use bounded bootstrap verification windows, then switch to an indexed keyset tail
+(`id > cursor`, ascending, at most 250 rows). Mutable market refreshes keep their
+existing separate path. Research status exposes the current selector mode, cursor,
+frozen bootstrap target, verification window, missing rows archived, and bootstrap
+completion state.
+
+Roll out with `APP_MODE=DRY_RUN`, `CALIBRATION_ENABLED=false`,
+`TRADING_ENABLED=false`, and `EXECUTE=false`. Do not raise the existing database
+statement timeout, polling interval, archive batch size, or 20-operation budget.
+Confirm the cursor migration and `/research/status` fields before relying on a
+completed archive cycle. If the worker reports a sanitized statement-timeout
+error, keep the service running and verify that the next cycle resumes from the
+durable cursor before proceeding to association, labels, coverage, or replay.
 
 ## PR 11b Bounded Research Runtime
 
