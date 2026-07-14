@@ -11,12 +11,22 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from ape.config import load_config
 from ape.db.migrations import run_migrations
-from ape.db.models import Market, ResearchReplayEvent, ResearchReplayRun, WorkerHeartbeat
+from ape.db.models import (
+    Market,
+    ResearchArchiveCursor,
+    ResearchReplayEvent,
+    ResearchReplayRun,
+    WorkerHeartbeat,
+)
 from ape.db.session import create_engine_from_config, create_session_factory
 from ape.repositories.inputs import WorkerHeartbeatInput
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.research import service as research_service
-from ape.research.archive import ARCHIVE_BATCH_SIZE, archive_research_batch
+from ape.research.archive import (
+    ARCHIVE_BATCH_SIZE,
+    ARCHIVE_SOURCE_STAGES,
+    archive_research_batch,
+)
 from ape.research.repository import (
     REPLAY_EVENT_PAGE_SIZE,
     FrozenReplayEventReader,
@@ -653,6 +663,16 @@ def test_research_worker_resumes_after_a_bounded_archive_budget(tmp_path, monkey
     try:
         with factory() as session:
             _insert_markets(session, count=ARCHIVE_BATCH_SIZE + 1, at=at)
+            for source_stage in ARCHIVE_SOURCE_STAGES:
+                if source_stage == "markets":
+                    continue
+                cursor = session.get(ResearchArchiveCursor, source_stage)
+                assert cursor is not None
+                cursor.selector_mode = "TAIL"
+                cursor.source_cursor = 0
+                cursor.schema_version = "research_archive_cursor_v1"
+                cursor.bootstrap_complete = True
+            session.commit()
         monkeypatch.setattr(research_service, "ARCHIVE_MAX_BATCHES_PER_CYCLE", 1)
         worker = research_service.ResearchWorker(
             config=config,

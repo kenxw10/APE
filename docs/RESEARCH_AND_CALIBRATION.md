@@ -69,6 +69,29 @@ allowed to materialize a frozen input only up to the fixed 20,000-event runtime
 limit; a larger input records a durable blocked calibration result rather than
 loading the full archive into memory.
 
+## Post-Bootstrap Fair Scheduling (PR 11e)
+
+While any append-only cursor is uninitialized, in bootstrap verification, incomplete,
+or missing a valid durable state, the worker reports `BOOTSTRAP_STRICT` and keeps the
+existing canonical source order and 20-operation gate. Association, labels, coverage,
+replay, and calibration remain fail-closed until all six cursors are valid TAIL
+cursors. Mutable `markets` remains outside the bootstrap-completion predicate.
+
+After bootstrap, the worker reports `TAIL_FAIR`. Each bounded archive cycle first gives
+every pending canonical source one opportunity, then uses remaining operations in
+deterministic canonical round-robin passes. Each operation remains capped at 250 rows
+and the total remains capped at 20; continuously pending `public_trades` therefore
+cannot starve feature, intent, or outcome sources.
+
+Pending TAIL rows after the 20-operation slice are normal backlog, not a bootstrap
+blocker. The worker records `archive_tail_pending_after_budget` and continues through
+reference association, labels, frozen coverage, baseline replay, and optional
+calibration. `/research/status` and the research heartbeat expose the scheduling mode,
+bootstrap/tail budget flags, served sources, per-source operation counts,
+`post_archive_allowed`, and any deferred bootstrap reason. No migration, environment
+variable, Railway service, timeout, polling, batch-size, or operation-budget setting
+changes.
+
 ## Calibration Evidence
 
 Every bounded calibration run stores the complete immutable search-space snapshot:

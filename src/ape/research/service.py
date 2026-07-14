@@ -6,6 +6,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Event, Lock, Thread
 from typing import Any
@@ -26,6 +27,7 @@ from ape.research.archive import (
     ARCHIVE_MAX_BATCHES_PER_CYCLE,
     ARCHIVE_SOURCE_STAGES,
     ArchiveResult,
+    archive_bootstrap_required,
     archive_research_batch,
     archive_research_coverage,
     archive_research_events,
@@ -56,6 +58,30 @@ RESEARCH_HEARTBEAT_INTERVAL_SECONDS = 30.0
 ARCHIVE_DUPLICATE_RETRY_LIMIT = 3
 ARCHIVE_DUPLICATE_RETRY_DELAY_SECONDS = 0.05
 CALIBRATION_MATERIALIZE_EVENT_LIMIT = 20_000
+
+
+@dataclass(frozen=True)
+class ArchiveSchedulingResult:
+    archive: ArchiveResult
+    budget_exhausted: bool
+    scheduling_mode: str
+    bootstrap_pending_after_budget: bool
+    tail_pending_after_budget: bool
+    sources_served: tuple[str, ...]
+    operations_by_source: dict[str, int]
+    post_archive_allowed: bool
+    post_archive_deferred_reason: str | None
+
+    def progress_metadata(self) -> dict[str, Any]:
+        return {
+            "archive_scheduling_mode": self.scheduling_mode,
+            "archive_bootstrap_pending_after_budget": self.bootstrap_pending_after_budget,
+            "archive_tail_pending_after_budget": self.tail_pending_after_budget,
+            "archive_sources_served": list(self.sources_served),
+            "archive_operations_by_source": dict(self.operations_by_source),
+            "post_archive_allowed": self.post_archive_allowed,
+            "post_archive_deferred_reason": self.post_archive_deferred_reason,
+        }
 
 
 class ResearchWorker:
@@ -147,12 +173,22 @@ class ResearchWorker:
                 )
                 self._publish_progress(result)
 
-            archive, archive_budget_exhausted = self._archive_stage(
+            archive_schedule = self._archive_stage(
                 checked_at=checked_at,
                 cycle_started_at=cycle_started_at,
                 progress_callback=report_archive_progress,
             )
-            if archive_budget_exhausted:
+            archive = archive_schedule.archive
+            archive_metadata = archive_schedule.progress_metadata()
+            if not archive_schedule.post_archive_allowed:
+                bootstrap_warning = (
+                    "research_archive_bootstrap_budget_exhausted"
+                    if archive_schedule.budget_exhausted
+                    else "research_archive_bootstrap_incomplete"
+                )
+                warnings = [bootstrap_warning]
+                if archive_schedule.budget_exhausted:
+                    warnings.insert(0, "research_archive_batch_budget_exhausted")
                 result = _cycle_progress(
                     previous=result,
                     state="partial",
@@ -161,12 +197,18 @@ class ResearchWorker:
                     last_successful_stage="archive",
                     archive=archive,
                     archived_counts_by_type=dict(archive.archived_by_type),
-                    warnings=["research_archive_batch_budget_exhausted"],
+                    warnings=warnings,
                     status="partial",
+                    **archive_metadata,
                 )
                 self._publish_progress(result)
-                LOGGER.warning("Research archive batch budget exhausted; replay deferred.")
+                LOGGER.warning(
+                    "Research archive bootstrap remains incomplete; post-archive work deferred."
+                )
                 return result
+
+            with self.session_factory() as session:
+                archive_snapshot = ResearchRepository(session).replay_event_snapshot()
 
             result = _cycle_progress(
                 previous=result,
@@ -176,6 +218,7 @@ class ResearchWorker:
                 last_successful_stage="archive",
                 archive=archive,
                 post_archive_substage="reference_association",
+                **archive_metadata,
             )
             self._publish_progress(result)
             self._start_stage_heartbeat_ticker()
@@ -184,6 +227,11 @@ class ResearchWorker:
                     association_result = refresh_research_reference_associations(session)
             finally:
                 self._stop_stage_heartbeat_ticker()
+            tail_warnings = (
+                ["research_archive_tail_budget_exhausted"]
+                if archive_schedule.tail_pending_after_budget
+                else []
+            )
             result = _cycle_progress(
                 previous=result,
                 state="running",
@@ -194,6 +242,7 @@ class ResearchWorker:
                 post_archive_substage="reference_association",
                 association_rows_processed=association_result.processed_rows,
                 association_rows_remaining=association_result.remaining_rows,
+                **archive_metadata,
             )
             self._publish_progress(result)
             if association_result.remaining_rows > 0:
@@ -207,8 +256,12 @@ class ResearchWorker:
                     post_archive_substage="reference_association",
                     association_rows_processed=association_result.processed_rows,
                     association_rows_remaining=association_result.remaining_rows,
-                    warnings=["research_reference_association_batch_remaining"],
+                    warnings=[
+                        *tail_warnings,
+                        "research_reference_association_batch_remaining",
+                    ],
                     status="partial",
+                    **archive_metadata,
                 )
                 self._publish_progress(result)
                 LOGGER.info("Reference association remains; labels, coverage, and replay deferred.")
@@ -224,6 +277,7 @@ class ResearchWorker:
                 post_archive_substage="labels",
                 association_rows_processed=association_result.processed_rows,
                 association_rows_remaining=association_result.remaining_rows,
+                **archive_metadata,
             )
             self._publish_progress(result)
             self._start_stage_heartbeat_ticker()
@@ -234,7 +288,10 @@ class ResearchWorker:
             finally:
                 self._stop_stage_heartbeat_ticker()
             if label_result.remaining_markets > 0:
-                label_warnings = ["research_label_batch_budget_exhausted"]
+                label_warnings = [
+                    *tail_warnings,
+                    "research_label_batch_budget_exhausted",
+                ]
                 label_blockers: list[str] = []
                 if label_result.blocked_missing_market_count > 0:
                     label_warnings.append("research_label_markets_blocked_missing_market")
@@ -257,6 +314,7 @@ class ResearchWorker:
                     warnings=label_warnings,
                     blockers=label_blockers,
                     status="partial",
+                    **archive_metadata,
                 )
                 self._publish_progress(result)
                 LOGGER.info("Research labels remain; coverage and replay deferred.")
@@ -276,6 +334,7 @@ class ResearchWorker:
                 label_markets_blocked_missing_market=label_result.blocked_missing_market_count,
                 labels_processed=label_result.processed_markets,
                 labels_remaining=label_result.remaining_markets,
+                **archive_metadata,
             )
             self._publish_progress(result)
 
@@ -300,7 +359,7 @@ class ResearchWorker:
                 self._update_progress(result)
 
             with self.session_factory() as session:
-                snapshot = ResearchRepository(session).replay_event_snapshot()
+                snapshot = archive_snapshot
                 result = _cycle_progress(
                     previous=result,
                     state="running",
@@ -402,15 +461,24 @@ class ResearchWorker:
                 )
                 session.commit()
             self._stop_stage_heartbeat_ticker()
+            final_tail_pending = archive_schedule.tail_pending_after_budget
+            final_status = cycle_result["status"]
+            final_state = "healthy" if final_status == "completed" else "degraded"
+            if final_tail_pending and final_status == "completed":
+                final_status = "partial"
+                final_state = "partial"
             result = _cycle_progress(
                 previous={**result, **cycle_result},
-                state="healthy" if cycle_result["status"] == "completed" else "degraded",
+                state=final_state,
                 stage="complete",
                 cycle_started_at=cycle_started_at,
                 last_successful_stage="calibration"
                 if self.config.calibration_enabled
                 else "baseline_replay",
                 archive=archive,
+                warnings=tail_warnings,
+                status=final_status,
+                **archive_metadata,
             )
             self._publish_progress(result)
             LOGGER.info(
@@ -461,62 +529,132 @@ class ResearchWorker:
         checked_at: datetime,
         cycle_started_at: datetime,
         progress_callback: Callable[..., None],
-    ) -> tuple[ArchiveResult, bool]:
-        del checked_at
+    ) -> ArchiveSchedulingResult:
+        del checked_at, cycle_started_at
         counts: dict[str, int] = {}
         archived_events = 0
         batch_count = 0
-        for stage_index, source_stage in enumerate(ARCHIVE_SOURCE_STAGES):
-            while batch_count < ARCHIVE_MAX_BATCHES_PER_CYCLE:
-                progress_callback(
-                    ArchiveResult(archived_events, dict(counts), 0, {}),
-                    source_stage=source_stage,
-                    completed_batches=batch_count,
-                    last_archive_batch=None,
-                    archive_metadata=None,
-                )
-                batch = self._archive_batch_with_retry(source_stage)
-                if not batch.operation_performed:
+        operations_by_source = {source_stage: 0 for source_stage in ARCHIVE_SOURCE_STAGES}
+        sources_served: list[str] = []
+        scheduling_mode = (
+            "BOOTSTRAP_STRICT"
+            if self._bootstrap_required()
+            else "TAIL_FAIR"
+        )
+
+        def scheduling_metadata() -> dict[str, Any]:
+            return {
+                "archive_scheduling_mode": scheduling_mode,
+                "archive_bootstrap_pending_after_budget": False,
+                "archive_tail_pending_after_budget": False,
+                "archive_sources_served": list(sources_served),
+                "archive_operations_by_source": dict(operations_by_source),
+                "post_archive_allowed": scheduling_mode == "TAIL_FAIR",
+                "post_archive_deferred_reason": None,
+            }
+
+        def run_one(source_stage: str) -> bool:
+            nonlocal archived_events, batch_count
+            progress_callback(
+                ArchiveResult(archived_events, dict(counts), 0, {}),
+                source_stage=source_stage,
+                completed_batches=batch_count,
+                last_archive_batch=None,
+                archive_metadata=scheduling_metadata(),
+            )
+            batch = self._archive_batch_with_retry(source_stage)
+            if not batch.operation_performed:
+                return False
+            batch_count += 1
+            archived_events += batch.archived_events
+            operations_by_source[source_stage] += 1
+            if source_stage not in sources_served:
+                sources_served.append(source_stage)
+            for event_type, count in batch.archived_by_type.items():
+                counts[event_type] = counts.get(event_type, 0) + count
+            metadata = scheduling_metadata()
+            progress_callback(
+                ArchiveResult(archived_events, dict(counts), 0, {}),
+                source_stage=source_stage,
+                completed_batches=batch_count,
+                last_archive_batch={
+                    "source_stage": batch.source_stage,
+                    "source_rows": batch.source_rows,
+                    "archived_events": batch.archived_events,
+                    "batch_count": batch_count,
+                },
+                archive_metadata={
+                    **metadata,
+                    "archive_selector_mode": batch.selector_mode,
+                    "archive_source_cursor": batch.source_cursor,
+                    "archive_bootstrap_target": batch.bootstrap_target,
+                    "archive_verification_window_start": batch.verification_window_start,
+                    "archive_verification_window_end": batch.verification_window_end,
+                    "archive_missing_rows_archived": batch.missing_rows_archived,
+                    "archive_bootstrap_complete": batch.bootstrap_complete,
+                },
+            )
+            return True
+
+        if scheduling_mode == "BOOTSTRAP_STRICT":
+            for source_stage in ARCHIVE_SOURCE_STAGES:
+                while batch_count < ARCHIVE_MAX_BATCHES_PER_CYCLE:
+                    if not run_one(source_stage):
+                        break
+                if batch_count >= ARCHIVE_MAX_BATCHES_PER_CYCLE:
                     break
-                batch_count += 1
-                archived_events += batch.archived_events
-                for event_type, count in batch.archived_by_type.items():
-                    counts[event_type] = counts.get(event_type, 0) + count
-                progress_callback(
-                    ArchiveResult(archived_events, dict(counts), 0, {}),
-                    source_stage=source_stage,
-                    completed_batches=batch_count,
-                    last_archive_batch={
-                        "source_stage": batch.source_stage,
-                        "source_rows": batch.source_rows,
-                        "archived_events": batch.archived_events,
-                        "batch_count": batch_count,
-                    },
-                    archive_metadata={
-                        "archive_selector_mode": batch.selector_mode,
-                        "archive_source_cursor": batch.source_cursor,
-                        "archive_bootstrap_target": batch.bootstrap_target,
-                        "archive_verification_window_start": batch.verification_window_start,
-                        "archive_verification_window_end": batch.verification_window_end,
-                        "archive_missing_rows_archived": batch.missing_rows_archived,
-                        "archive_bootstrap_complete": batch.bootstrap_complete,
-                    },
+            bootstrap_pending = self._bootstrap_required()
+            if bootstrap_pending:
+                budget_exhausted = batch_count >= ARCHIVE_MAX_BATCHES_PER_CYCLE
+                return ArchiveSchedulingResult(
+                    archive=ArchiveResult(archived_events, counts, 0, {}),
+                    budget_exhausted=budget_exhausted,
+                    scheduling_mode="BOOTSTRAP_STRICT",
+                    bootstrap_pending_after_budget=budget_exhausted,
+                    tail_pending_after_budget=False,
+                    sources_served=tuple(sources_served),
+                    operations_by_source=operations_by_source,
+                    post_archive_allowed=False,
+                    post_archive_deferred_reason=(
+                        "bootstrap_pending_after_budget"
+                        if budget_exhausted
+                        else "bootstrap_incomplete"
+                    ),
                 )
-            if batch_count >= ARCHIVE_MAX_BATCHES_PER_CYCLE:
-                with self.session_factory() as session:
-                    current_pending = archive_research_source_pending(
-                        session, source_stage=source_stage
-                    )
-                if current_pending:
-                    return ArchiveResult(archived_events, counts, 0, {}), True
-                for remaining_stage in ARCHIVE_SOURCE_STAGES[stage_index + 1 :]:
-                    with self.session_factory() as session:
-                        if archive_research_source_pending(
-                            session, source_stage=remaining_stage
-                        ):
-                            return ArchiveResult(archived_events, counts, 0, {}), True
-                return ArchiveResult(archived_events, counts, 0, {}), False
-        return ArchiveResult(archived_events, counts, 0, {}), False
+            scheduling_mode = "TAIL_FAIR"
+
+        while batch_count < ARCHIVE_MAX_BATCHES_PER_CYCLE:
+            pass_served = False
+            for source_stage in ARCHIVE_SOURCE_STAGES:
+                if batch_count >= ARCHIVE_MAX_BATCHES_PER_CYCLE:
+                    break
+                if run_one(source_stage):
+                    pass_served = True
+            if not pass_served:
+                break
+
+        budget_exhausted = batch_count >= ARCHIVE_MAX_BATCHES_PER_CYCLE
+        with self.session_factory() as session:
+            tail_pending = any(
+                archive_research_source_pending(session, source_stage=source_stage)
+                for source_stage in ARCHIVE_SOURCE_STAGES
+            )
+        tail_pending_after_budget = budget_exhausted and tail_pending
+        return ArchiveSchedulingResult(
+            archive=ArchiveResult(archived_events, counts, 0, {}),
+            budget_exhausted=budget_exhausted,
+            scheduling_mode="TAIL_FAIR",
+            bootstrap_pending_after_budget=False,
+            tail_pending_after_budget=tail_pending_after_budget,
+            sources_served=tuple(sources_served),
+            operations_by_source=operations_by_source,
+            post_archive_allowed=True,
+            post_archive_deferred_reason=None,
+        )
+
+    def _bootstrap_required(self) -> bool:
+        with self.session_factory() as session:
+            return archive_bootstrap_required(session)
 
     def _archive_batch_with_retry(self, source_stage: str):
         for attempt in range(ARCHIVE_DUPLICATE_RETRY_LIMIT):
@@ -1110,6 +1248,23 @@ def _record_research_heartbeat(
                         "archive_missing_rows_archived", 0
                     ),
                     "archive_bootstrap_complete": result.get("archive_bootstrap_complete"),
+                    "archive_scheduling_mode": result.get("archive_scheduling_mode"),
+                    "archive_bootstrap_pending_after_budget": result.get(
+                        "archive_bootstrap_pending_after_budget"
+                    ),
+                    "archive_tail_pending_after_budget": result.get(
+                        "archive_tail_pending_after_budget"
+                    ),
+                    "archive_sources_served": _bounded_strings(
+                        result.get("archive_sources_served")
+                    ),
+                    "archive_operations_by_source": result.get(
+                        "archive_operations_by_source"
+                    ),
+                    "post_archive_allowed": result.get("post_archive_allowed"),
+                    "post_archive_deferred_reason": result.get(
+                        "post_archive_deferred_reason"
+                    ),
                     "labels_processed": result.get("labels_processed"),
                     "labels_remaining": result.get("labels_remaining"),
                     "association_rows_processed": result.get("association_rows_processed"),

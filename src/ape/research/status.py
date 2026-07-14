@@ -52,6 +52,13 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
         "archive_verification_window_end": None,
         "archive_missing_rows_archived": 0,
         "archive_bootstrap_complete": None,
+        "archive_scheduling_mode": None,
+        "archive_bootstrap_pending_after_budget": False,
+        "archive_tail_pending_after_budget": False,
+        "archive_sources_served": [],
+        "archive_operations_by_source": {},
+        "post_archive_allowed": None,
+        "post_archive_deferred_reason": None,
         "labels_processed": None,
         "labels_remaining": None,
         "association_rows_processed": None,
@@ -205,6 +212,23 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
                     "archive_missing_rows_archived", 0
                 ),
                 archive_bootstrap_complete=details.get("archive_bootstrap_complete"),
+                archive_scheduling_mode=details.get("archive_scheduling_mode"),
+                archive_bootstrap_pending_after_budget=bool(
+                    details.get("archive_bootstrap_pending_after_budget")
+                ),
+                archive_tail_pending_after_budget=bool(
+                    details.get("archive_tail_pending_after_budget")
+                ),
+                archive_sources_served=_bounded_strings(
+                    details.get("archive_sources_served")
+                ),
+                archive_operations_by_source=(
+                    details.get("archive_operations_by_source")
+                    if isinstance(details.get("archive_operations_by_source"), dict)
+                    else {}
+                ),
+                post_archive_allowed=details.get("post_archive_allowed"),
+                post_archive_deferred_reason=details.get("post_archive_deferred_reason"),
                 last_zero_entry_audit=repository.latest_zero_entry_report(),
                 last_replay_run=_row(latest_replay),
                 last_calibration_run=_row(latest_calibration),
@@ -364,6 +388,21 @@ def _safe_worker_metadata(details: dict[str, Any]) -> dict[str, Any]:
         "archive_verification_window_end": details.get("archive_verification_window_end"),
         "archive_missing_rows_archived": details.get("archive_missing_rows_archived", 0),
         "archive_bootstrap_complete": details.get("archive_bootstrap_complete"),
+        "archive_scheduling_mode": details.get("archive_scheduling_mode"),
+        "archive_bootstrap_pending_after_budget": bool(
+            details.get("archive_bootstrap_pending_after_budget")
+        ),
+        "archive_tail_pending_after_budget": bool(
+            details.get("archive_tail_pending_after_budget")
+        ),
+        "archive_sources_served": _bounded_strings(details.get("archive_sources_served")),
+        "archive_operations_by_source": (
+            details.get("archive_operations_by_source")
+            if isinstance(details.get("archive_operations_by_source"), dict)
+            else {}
+        ),
+        "post_archive_allowed": details.get("post_archive_allowed"),
+        "post_archive_deferred_reason": details.get("post_archive_deferred_reason"),
         "association_rows_processed": details.get("association_rows_processed"),
         "association_rows_remaining": details.get("association_rows_remaining"),
         "label_markets_processed": details.get("label_markets_processed"),

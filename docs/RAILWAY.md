@@ -805,3 +805,29 @@ coverage or replay. A calibration status of `BLOCKED_REPLAY_EVENT_LIMIT` is a
 fail-closed memory guard, not a reason to increase polling, batch sizes, or add a
 new setting. Keep calibration disabled until the archive/replay records progress
 normally.
+
+## PR 11e Post-Bootstrap Fair Research Scheduling
+
+PR 11e changes the existing `ape-research-worker` scheduling only. It adds no
+migration, environment variable, Railway service, credential, timeout, polling,
+batch-size, or operation-budget setting.
+
+During historical bootstrap, `/research/status` reports
+`archive_scheduling_mode=BOOTSTRAP_STRICT`. The worker keeps canonical source order,
+uses at most 20 archive operations per cycle, and defers association, labels,
+coverage, replay, and calibration until all six append-only cursors are valid TAIL
+cursors. This remains fail-closed and does not skip historical source IDs.
+
+After bootstrap, the mode becomes `TAIL_FAIR`. The canonical fairness pass gives each
+pending source one bounded operation before deterministic round-robin passes use any
+remaining operations. Each source operation remains capped at 250 rows and the cycle
+remains capped at 20 operations. A pending TAIL backlog is reported with
+`archive_tail_pending_after_budget` but does not block the downstream association,
+label, frozen coverage, replay, or optional calibration stages.
+
+Use the existing safe rollout settings: `APP_MODE=DRY_RUN`,
+`CALIBRATION_ENABLED=false`, `TRADING_ENABLED=false`, and `EXECUTE=false`. Verify
+`archive_scheduling_mode`, `archive_sources_served`,
+`archive_operations_by_source`, `post_archive_allowed`, and the tail/bootstrap budget
+flags in `/research/status` while the worker catches up. No production environment,
+service, migration, timeout, polling, batch-size, or budget change is required.
