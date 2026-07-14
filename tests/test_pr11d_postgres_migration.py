@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 from sqlalchemy import text
@@ -67,6 +68,92 @@ def _run_migrations_in_new_engine(database_url: str) -> None:
         run_migrations(engine)
     finally:
         engine.dispose()
+
+
+def _run_migrations_after_barrier(database_url: str, barrier: Barrier) -> None:
+    engine = _engine(database_url)
+    try:
+        barrier.wait()
+        run_migrations(engine)
+    finally:
+        engine.dispose()
+
+
+def _cursor_snapshot(engine: Engine) -> list[dict[str, object]]:
+    with engine.connect() as connection:
+        return [
+            dict(row._mapping)
+            for row in connection.execute(
+                text(
+                    """
+                    SELECT source_table, selector_mode, source_cursor,
+                           frozen_bootstrap_target, verification_window_start,
+                           verification_window_end, schema_version,
+                           bootstrap_complete, created_at, updated_at
+                    FROM research_archive_cursors
+                    ORDER BY source_table
+                    """
+                )
+            ).all()
+        ]
+
+
+def test_postgres_migration_concurrent_first_run_from_empty_schema(
+    postgres_engine: Engine, postgres_url: str
+) -> None:
+    barrier = Barrier(2)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(_run_migrations_after_barrier, postgres_url, barrier)
+            for _ in range(2)
+        ]
+        for future in futures:
+            future.result()
+
+    with postgres_engine.connect() as connection:
+        assert connection.scalar(
+            text("SELECT COUNT(*) FROM schema_migrations WHERE version = :version"),
+            {"version": CURRENT_SCHEMA_VERSION},
+        ) == 1
+        assert connection.scalar(text("SELECT COUNT(*) FROM research_archive_cursors")) == 6
+        assert connection.scalar(
+            text(
+                """
+                SELECT COUNT(DISTINCT source_table)
+                FROM research_archive_cursors
+                """
+            )
+        ) == 6
+        assert connection.scalar(
+            text(
+                """
+                SELECT COUNT(*)
+                FROM research_archive_cursors
+                WHERE bootstrap_complete IS FALSE
+                """
+            )
+        ) == 6
+        column = connection.execute(
+            text(
+                """
+                SELECT data_type
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'research_archive_cursors'
+                  AND column_name = 'bootstrap_complete'
+                """
+            )
+        ).one()
+        assert column.data_type == "boolean"
+
+    assert _table_exists(postgres_engine, "research_archive_cursors")
+    run_migrations(postgres_engine)
+    with postgres_engine.connect() as connection:
+        assert connection.scalar(
+            text("SELECT COUNT(*) FROM schema_migrations WHERE version = :version"),
+            {"version": CURRENT_SCHEMA_VERSION},
+        ) == 1
+        assert connection.scalar(text("SELECT COUNT(*) FROM research_archive_cursors")) == 6
 
 
 def test_postgres_migration_is_typed_idempotent_and_concurrent(
@@ -205,3 +292,82 @@ def test_postgres_migration_transaction_and_seed_recovery(
         ).one()
         assert (preserved_again.selector_mode, preserved_again.source_cursor) == ("TAIL", 42)
         assert preserved_again.bootstrap_complete is True
+
+
+def test_postgres_migration_recovers_partially_seeded_cursors_without_resetting_progress(
+    postgres_engine: Engine,
+) -> None:
+    run_migrations(postgres_engine)
+    with postgres_engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                UPDATE research_archive_cursors
+                SET selector_mode = 'TAIL',
+                    source_cursor = 42,
+                    bootstrap_complete = TRUE,
+                    updated_at = CURRENT_TIMESTAMP - INTERVAL '5 minutes'
+                WHERE source_table = 'reference_ticks'
+                """
+            )
+        )
+
+    before_progress = next(
+        row for row in _cursor_snapshot(postgres_engine) if row["source_table"] == "reference_ticks"
+    )
+    assert before_progress["selector_mode"] == "TAIL"
+    assert before_progress["source_cursor"] == 42
+    assert before_progress["bootstrap_complete"] is True
+
+    deleted_sources = {"public_trades", "strategy_position_outcomes"}
+    with postgres_engine.begin() as connection:
+        result = connection.execute(
+            text(
+                """
+                DELETE FROM research_archive_cursors
+                WHERE source_table IN (:first_source, :second_source)
+                """
+            ),
+            {
+                "first_source": "public_trades",
+                "second_source": "strategy_position_outcomes",
+            },
+        )
+        assert result.rowcount == 2
+
+    assert _cursor_count(postgres_engine) == 4
+    run_migrations(postgres_engine)
+    recovered_rows = _cursor_snapshot(postgres_engine)
+    recovered_by_source = {row["source_table"]: row for row in recovered_rows}
+    assert set(recovered_by_source) == {
+        "reference_ticks",
+        "orderbook_snapshots",
+        "public_trades",
+        "strategy_feature_snapshots",
+        "strategy_trade_intents",
+        "strategy_position_outcomes",
+    }
+    assert len(recovered_rows) == 6
+
+    for source_table in deleted_sources:
+        restored = recovered_by_source[source_table]
+        assert restored["selector_mode"] == "UNINITIALIZED"
+        assert restored["source_cursor"] == 0
+        assert restored["frozen_bootstrap_target"] is None
+        assert restored["verification_window_start"] is None
+        assert restored["verification_window_end"] is None
+        assert restored["schema_version"] == "research_archive_cursor_v1"
+        assert restored["bootstrap_complete"] is False
+
+    recovered_progress = recovered_by_source["reference_ticks"]
+    assert recovered_progress == before_progress
+
+    with postgres_engine.connect() as connection:
+        assert connection.scalar(
+            text("SELECT COUNT(*) FROM schema_migrations WHERE version = :version"),
+            {"version": CURRENT_SCHEMA_VERSION},
+        ) == 1
+
+    snapshot_after_recovery = recovered_rows
+    run_migrations(postgres_engine)
+    assert _cursor_snapshot(postgres_engine) == snapshot_after_recovery
