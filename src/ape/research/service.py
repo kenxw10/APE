@@ -121,6 +121,7 @@ class ResearchWorker:
                 source_stage: str,
                 completed_batches: int,
                 last_archive_batch: dict[str, Any] | None,
+                archive_metadata: dict[str, Any] | None,
             ) -> None:
                 nonlocal result
                 result = _cycle_progress(
@@ -137,6 +138,7 @@ class ResearchWorker:
                     current_source_table=source_stage,
                     completed_archive_batches=completed_batches,
                     archived_counts_by_type=dict(archive_progress.archived_by_type),
+                    **(archive_metadata if archive_metadata is not None else {}),
                     **(
                         {"last_archive_batch": last_archive_batch}
                         if last_archive_batch is not None
@@ -471,9 +473,10 @@ class ResearchWorker:
                     source_stage=source_stage,
                     completed_batches=batch_count,
                     last_archive_batch=None,
+                    archive_metadata=None,
                 )
                 batch = self._archive_batch_with_retry(source_stage)
-                if batch.source_rows == 0:
+                if not batch.operation_performed:
                     break
                 batch_count += 1
                 archived_events += batch.archived_events
@@ -488,6 +491,15 @@ class ResearchWorker:
                         "source_rows": batch.source_rows,
                         "archived_events": batch.archived_events,
                         "batch_count": batch_count,
+                    },
+                    archive_metadata={
+                        "archive_selector_mode": batch.selector_mode,
+                        "archive_source_cursor": batch.source_cursor,
+                        "archive_bootstrap_target": batch.bootstrap_target,
+                        "archive_verification_window_start": batch.verification_window_start,
+                        "archive_verification_window_end": batch.verification_window_end,
+                        "archive_missing_rows_archived": batch.missing_rows_archived,
+                        "archive_bootstrap_complete": batch.bootstrap_complete,
                     },
                 )
             if batch_count >= ARCHIVE_MAX_BATCHES_PER_CYCLE:
@@ -511,7 +523,7 @@ class ResearchWorker:
             with self.session_factory() as session:
                 try:
                     batch = archive_research_batch(session, source_stage=source_stage)
-                    if batch.source_rows:
+                    if batch.state_changed:
                         session.commit()
                     return batch
                 except IntegrityError as error:
@@ -1085,6 +1097,19 @@ def _record_research_heartbeat(
                     "failed_stage": result.get("failed_stage"),
                     "last_archive_run": archive,
                     "last_archive_batch": result.get("last_archive_batch"),
+                    "archive_selector_mode": result.get("archive_selector_mode"),
+                    "archive_source_cursor": result.get("archive_source_cursor"),
+                    "archive_bootstrap_target": result.get("archive_bootstrap_target"),
+                    "archive_verification_window_start": result.get(
+                        "archive_verification_window_start"
+                    ),
+                    "archive_verification_window_end": result.get(
+                        "archive_verification_window_end"
+                    ),
+                    "archive_missing_rows_archived": result.get(
+                        "archive_missing_rows_archived", 0
+                    ),
+                    "archive_bootstrap_complete": result.get("archive_bootstrap_complete"),
                     "labels_processed": result.get("labels_processed"),
                     "labels_remaining": result.get("labels_remaining"),
                     "association_rows_processed": result.get("association_rows_processed"),

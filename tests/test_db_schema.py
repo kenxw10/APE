@@ -47,6 +47,7 @@ def test_schema_can_be_created_in_local_sqlite_database(tmp_path) -> None:
             "calibration_runs",
             "research_candidates",
             "research_governance_events",
+            "research_archive_cursors",
         }
 
         session_factory = create_session_factory(engine)
@@ -55,7 +56,7 @@ def test_schema_can_be_created_in_local_sqlite_database(tmp_path) -> None:
                 select(SchemaMigration).where(SchemaMigration.version == CURRENT_SCHEMA_VERSION)
             )
             assert migration is not None
-            assert session.scalar(select(func.count()).select_from(SchemaMigration)) == 10
+            assert session.scalar(select(func.count()).select_from(SchemaMigration)) == 11
 
         orderbook_columns = {
             column["name"] for column in inspector.get_columns("orderbook_snapshots")

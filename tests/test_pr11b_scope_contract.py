@@ -16,7 +16,7 @@ from tests.test_research_helpers import (
 )
 
 from ape.config import load_config
-from ape.db.migrations import CURRENT_SCHEMA_VERSION, run_migrations
+from ape.db.migrations import CURRENT_SCHEMA_VERSION, SCHEMA_VERSIONS, run_migrations
 from ape.db.models import (
     Market,
     OrderbookSnapshot,
@@ -1220,5 +1220,6 @@ def test_r8_and_r9_keep_calibration_disabled_and_scope_boundaries_static() -> No
     assert "list_events(limit=None)" not in service_source
     assert "CALIBRATION_MATERIALIZE_EVENT_LIMIT" in service_source
     assert "REPLAY_EVENT_PAGE_SIZE = 250" in repository_source
-    assert CURRENT_SCHEMA_VERSION == "0010_research_replay_calibration"
+    assert "0010_research_replay_calibration" in SCHEMA_VERSIONS
+    assert CURRENT_SCHEMA_VERSION == "0011_research_archive_cursors"
     assert not list((ROOT / "src" / "ape" / "db" / "migrations").glob("0011*"))

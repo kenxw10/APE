@@ -615,6 +615,25 @@ class StorageRetentionRun(Base):
     error_message: Mapped[str | None] = mapped_column(Text)
 
 
+class ResearchArchiveCursor(Base):
+    __tablename__ = "research_archive_cursors"
+
+    source_table: Mapped[str] = mapped_column(String(128), primary_key=True)
+    selector_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_cursor: Mapped[int] = mapped_column(Integer, nullable=False)
+    frozen_bootstrap_target: Mapped[int | None] = mapped_column(Integer)
+    verification_window_start: Mapped[int | None] = mapped_column(Integer)
+    verification_window_end: Mapped[int | None] = mapped_column(Integer)
+    schema_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    bootstrap_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
 class ResearchReplayEvent(Base):
     __tablename__ = "research_replay_events"
     __table_args__ = (

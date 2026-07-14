@@ -9,7 +9,7 @@ from ape.config import ConfigError, load_config
 from ape.db.models import Base, SchemaMigration, utc_now
 from ape.db.session import DatabaseConfigError, create_engine_from_config
 
-CURRENT_SCHEMA_VERSION = "0010_research_replay_calibration"
+CURRENT_SCHEMA_VERSION = "0011_research_archive_cursors"
 SCHEMA_VERSIONS = (
     "0001_initial_schema",
     "0002_fixed_point_ws_quantities",
@@ -20,6 +20,7 @@ SCHEMA_VERSIONS = (
     "0007_strategy_decision_strategy_id",
     "0008_momentum_v2_feature_architecture",
     "0009_momentum_v2_scope_completion",
+    "0010_research_replay_calibration",
     CURRENT_SCHEMA_VERSION,
 )
 POSTGRES_MIGRATION_LOCK_ID = 4_150_002
@@ -38,6 +39,7 @@ def run_migrations(engine: Engine) -> None:
         _ensure_momentum_v2_columns(connection)
         _ensure_momentum_v2_scope_completion_columns(connection)
         _ensure_research_replay_calibration_columns(connection)
+        _ensure_research_archive_cursors_table(connection)
         _record_schema_versions(connection)
 
 
@@ -341,6 +343,67 @@ def _ensure_research_replay_calibration_columns(connection: Connection) -> None:
         index_name="ix_research_candidates_architecture_state",
         column_names=("architecture_version", "lifecycle_state"),
     )
+
+
+def _ensure_research_archive_cursors_table(connection: Connection) -> None:
+    """Create only the small durable cursor table for append-only research sources."""
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS research_archive_cursors (
+                source_table VARCHAR(128) PRIMARY KEY,
+                selector_mode VARCHAR(32) NOT NULL,
+                source_cursor INTEGER NOT NULL,
+                frozen_bootstrap_target INTEGER,
+                verification_window_start INTEGER,
+                verification_window_end INTEGER,
+                schema_version VARCHAR(64) NOT NULL,
+                bootstrap_complete BOOLEAN NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL
+            )
+            """
+        )
+    )
+    sources = (
+        "reference_ticks",
+        "orderbook_snapshots",
+        "public_trades",
+        "strategy_feature_snapshots",
+        "strategy_trade_intents",
+        "strategy_position_outcomes",
+    )
+    value_rows = ", ".join(
+        f"(:source_{index}, 'UNINITIALIZED', 0, 'research_archive_cursor_v1', 0, "
+        "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        for index in range(len(sources))
+    )
+    parameters = {f"source_{index}": source_table for index, source_table in enumerate(sources)}
+    insert = "INSERT OR IGNORE" if connection.dialect.name == "sqlite" else "INSERT"
+    conflict = (
+        " ON CONFLICT (source_table) DO NOTHING"
+        if connection.dialect.name == "postgresql"
+        else ""
+    )
+    connection.execute(
+        text(
+            f"""
+            {insert} INTO research_archive_cursors (
+                source_table,
+                selector_mode,
+                source_cursor,
+                schema_version,
+                bootstrap_complete,
+                created_at,
+                updated_at
+            )
+            VALUES {value_rows}{conflict}
+            """
+        ),
+        parameters,
+    )
+
+
 def _add_column_statement(
     connection: Connection,
     table_name: str,

@@ -15,7 +15,7 @@ from tests.test_research_helpers import at_base, feature_event, orderbook_event,
 import ape.worker.main as worker_main
 from ape.api.main import create_app
 from ape.config import load_config
-from ape.db.migrations import CURRENT_SCHEMA_VERSION, run_migrations
+from ape.db.migrations import CURRENT_SCHEMA_VERSION, SCHEMA_VERSIONS, run_migrations
 from ape.db.models import (
     Base,
     Market,
@@ -82,7 +82,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_r1_single_research_migration_and_schema_contract(tmp_path) -> None:
-    assert CURRENT_SCHEMA_VERSION == "0010_research_replay_calibration"
+    assert "0010_research_replay_calibration" in SCHEMA_VERSIONS
+    assert CURRENT_SCHEMA_VERSION == "0011_research_archive_cursors"
     required_tables = {
         "research_replay_events",
         "research_market_outcomes",
