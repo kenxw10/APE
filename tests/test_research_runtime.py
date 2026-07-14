@@ -295,6 +295,7 @@ def test_research_archive_timeout_preserves_committed_batch_progress_and_resumes
     ("stage", "calibration_enabled"),
     [
         ("association_labels", False),
+        ("coverage", False),
         ("baseline_replay", False),
         ("calibration", True),
     ],
@@ -320,8 +321,17 @@ def test_research_worker_heartbeats_stay_fresh_during_long_stages(
                 return original(session)
 
             monkeypatch.setattr(research_service, "refresh_research_archive_labels", pause_labels)
+        elif stage == "coverage":
+            original = research_service.archive_research_coverage
+
+            def pause_coverage(*args, **kwargs):
+                entered.set()
+                assert release.wait(timeout=5)
+                return original(*args, **kwargs)
+
+            monkeypatch.setattr(research_service, "archive_research_coverage", pause_coverage)
         elif stage == "baseline_replay":
-            original = research_service.DeterministicReplayEngine.replay
+            original = research_service.DeterministicReplayEngine.replay_ordered_pages
 
             def pause_replay(instance, *args, **kwargs):
                 entered.set()
@@ -330,7 +340,7 @@ def test_research_worker_heartbeats_stay_fresh_during_long_stages(
 
             monkeypatch.setattr(
                 research_service.DeterministicReplayEngine,
-                "replay",
+                "replay_ordered_pages",
                 pause_replay,
             )
         else:

@@ -54,6 +54,7 @@ LOGGER = logging.getLogger(__name__)
 RESEARCH_HEARTBEAT_INTERVAL_SECONDS = 30.0
 ARCHIVE_DUPLICATE_RETRY_LIMIT = 3
 ARCHIVE_DUPLICATE_RETRY_DELAY_SECONDS = 0.05
+CALIBRATION_MATERIALIZE_EVENT_LIMIT = 20_000
 
 
 class ResearchWorker:
@@ -176,10 +177,37 @@ class ResearchWorker:
             self._start_stage_heartbeat_ticker()
             try:
                 with self.session_factory() as session:
-                    refresh_research_archive_labels(session)
+                    label_result = refresh_research_archive_labels(session)
                     session.commit()
             finally:
                 self._stop_stage_heartbeat_ticker()
+            if label_result.remaining_markets > 0:
+                result = _cycle_progress(
+                    previous=result,
+                    state="partial",
+                    stage="association_labels",
+                    cycle_started_at=cycle_started_at,
+                    last_successful_stage="association_labels",
+                    archive=archive,
+                    labels_processed=label_result.processed_markets,
+                    labels_remaining=label_result.remaining_markets,
+                    warnings=["research_label_batch_budget_exhausted"],
+                    status="partial",
+                )
+                self._publish_progress(result)
+                LOGGER.info("Research labels remain; coverage and replay deferred.")
+                return result
+            result = _cycle_progress(
+                previous=result,
+                state="running",
+                stage="association_labels",
+                cycle_started_at=cycle_started_at,
+                last_successful_stage="association_labels",
+                archive=archive,
+                labels_processed=label_result.processed_markets,
+                labels_remaining=label_result.remaining_markets,
+            )
+            self._publish_progress(result)
 
             result = _cycle_progress(
                 previous=result,
@@ -190,15 +218,34 @@ class ResearchWorker:
                 archive=archive,
             )
             self._publish_progress(result)
-            with self.session_factory() as session:
-                coverage = archive_research_coverage(session, now=checked_at)
-                session.commit()
+            self._start_stage_heartbeat_ticker()
+            try:
+                with self.session_factory() as session:
+                    snapshot = ResearchRepository(session).replay_event_snapshot()
+                    coverage = archive_research_coverage(
+                        session, now=checked_at, snapshot=snapshot
+                    )
+                    session.commit()
+            finally:
+                self._stop_stage_heartbeat_ticker()
             archive = ArchiveResult(
                 archived_events=archive.archived_events,
                 archived_by_type=archive.archived_by_type,
                 outcomes_reconciled=archive.outcomes_reconciled,
                 coverage=coverage,
             )
+            frozen_coverage = coverage.get("frozen_snapshot", {})
+            result = _cycle_progress(
+                previous=result,
+                state="running",
+                stage="coverage",
+                cycle_started_at=cycle_started_at,
+                last_successful_stage="coverage",
+                archive=archive,
+                coverage_events_scanned=frozen_coverage.get("events_scanned"),
+                coverage_pages_completed=frozen_coverage.get("pages_completed"),
+            )
+            self._publish_progress(result)
 
             def report_replay_progress(stage: str, details: dict[str, Any]) -> None:
                 nonlocal result
@@ -233,6 +280,7 @@ class ResearchWorker:
                     session,
                     checked_at=checked_at,
                     archive_result=archive,
+                    replay_snapshot=snapshot,
                     progress_callback=report_replay_progress,
                 )
                 session.commit()
@@ -470,6 +518,7 @@ def run_research_cycle(
     *,
     checked_at: datetime | None = None,
     archive_result: ArchiveResult | None = None,
+    replay_snapshot=None,
     progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Execute archive -> labels -> baseline replay -> optional bounded calibration."""
@@ -478,7 +527,7 @@ def run_research_cycle(
     if progress_callback is not None:
         progress_callback("baseline_replay_started", {"last_successful_stage": "coverage"})
     repository = ResearchRepository(session)
-    events = repository.list_events(limit=None)
+    snapshot = replay_snapshot or repository.replay_event_snapshot()
     outcomes = repository.list_complete_outcomes()
     baseline = StrategyV2Repository(session).ensure_config_version(
         built_in_config_version("btc15_momentum_v2", V2_PARAMETERS)
@@ -487,7 +536,15 @@ def run_research_cycle(
         # Replay is CPU-only once its immutable inputs are loaded. End the read
         # transaction before the long computation so liveness uses a fresh writer.
         session.commit()
-    replay = DeterministicReplayEngine().replay(events, outcomes=outcomes)
+    reader = repository.frozen_replay_event_reader(snapshot)
+    replay = DeterministicReplayEngine().replay_ordered_pages(
+        reader.iter_pages(), outcomes=outcomes, retain_decisions=False
+    )
+    if reader.events_scanned != snapshot.event_count:
+        raise RuntimeError(
+            "Frozen replay scan was incomplete: "
+            f"expected {snapshot.event_count}, scanned {reader.events_scanned}."
+        )
     outcome_input_hash = _replay_outcome_input_hash(outcomes)
     run_id = (
         "replay-"
@@ -509,18 +566,23 @@ def run_research_cycle(
             "baseline_strategy_config_version_id": baseline.strategy_config_version_id,
             "dataset_hash": replay.dataset_hash,
             "data_cutoff": checked_at,
-            "start_at": events[0].event_time if events else None,
-            "end_at": events[-1].event_time if events else None,
-            "unique_market_count": len(
-                {event.market_ticker for event in events if event.market_ticker}
-            ),
+            "start_at": snapshot.min_event_time,
+            "end_at": snapshot.max_event_time,
+            "unique_market_count": replay.unique_market_count,
             "event_count": replay.event_count,
-            "partition_manifest": None,
+            "partition_manifest": {
+                "watermark_id": snapshot.watermark_id,
+                "total_events": snapshot.event_count,
+                "events_scanned": reader.events_scanned,
+                "pages_completed": reader.pages_scanned,
+                "partitions_completed": reader.partitions_completed,
+                "partitions_total": snapshot.partition_count,
+            },
             "cost_model": replay.cost_model,
             "zero_entry_report": replay.zero_entry_report,
             "blocker_funnel": replay.blocker_funnel,
             "raw_metrics": {
-                "decision_count": len(replay.decisions),
+                "decision_count": replay.decision_count,
                 "trade_count": len(replay.trades),
                 "archive_coverage": archive.coverage,
                 "outcome_input_hash": outcome_input_hash,
@@ -552,6 +614,11 @@ def run_research_cycle(
                 "last_successful_stage": "baseline_replay",
                 "replay_run_id": run_id,
                 "zero_entry_report": replay.zero_entry_report,
+                "replay_dataset_watermark": snapshot.watermark_id,
+                "replay_total_events": snapshot.event_count,
+                "replay_events_scanned": reader.events_scanned,
+                "replay_pages_completed": reader.pages_scanned,
+                "replay_partitions_completed": reader.partitions_completed,
             },
         )
     calibration_status = "DISABLED"
@@ -572,9 +639,46 @@ def run_research_cycle(
         existing_calibration = repository.get_calibration_run(calibration_run_id)
         if existing_calibration is not None and existing_calibration.holdout_used_at is not None:
             calibration_status = existing_calibration.status
+        elif snapshot.event_count > CALIBRATION_MATERIALIZE_EVENT_LIMIT:
+            calibration_status = "BLOCKED_REPLAY_EVENT_LIMIT"
+            calibration_run = repository.create_calibration_run(
+                {
+                    "calibration_run_id": calibration_run_id,
+                    "status": calibration_status,
+                    "calibration_schema_version": CALIBRATION_SCHEMA_VERSION,
+                    "replay_run_id": run_id,
+                    "dataset_hash": replay.dataset_hash,
+                    "code_commit_sha": resolve_code_version(),
+                    "random_seed": int(_hash(calibration_run_id)[:8], 16),
+                    "search_space_snapshot": None,
+                    "partition_manifest": {"event_limit": CALIBRATION_MATERIALIZE_EVENT_LIMIT},
+                    "frozen_holdout_hash": None,
+                    "evaluated_candidate_count": 0,
+                    "selected_candidate_id": None,
+                    "training_metrics": None,
+                    "validation_metrics": None,
+                    "test_metrics": None,
+                    "holdout_metrics": None,
+                    "bootstrap_metrics": None,
+                    "penalties": None,
+                    "warnings": [],
+                    "blockers": ["calibration_replay_event_limit_exceeded"],
+                    "started_at": checked_at,
+                    "finished_at": checked_at,
+                    "holdout_used_at": None,
+                }
+            )
+            del calibration_run
         else:
+            calibration_events = [
+                event
+                for page in repository.frozen_replay_event_reader(snapshot).iter_pages()
+                for event in page
+            ]
             calibration = run_bounded_calibration(
-                calibration_run_id=calibration_run_id, events=events, outcomes=outcomes
+                calibration_run_id=calibration_run_id,
+                events=calibration_events,
+                outcomes=outcomes,
             )
             calibration_status = calibration.status
             selected_metrics = calibration.candidate_metrics.get(
@@ -823,6 +927,17 @@ def _record_research_heartbeat(
                     "failed_stage": result.get("failed_stage"),
                     "last_archive_run": archive,
                     "last_archive_batch": result.get("last_archive_batch"),
+                    "labels_processed": result.get("labels_processed"),
+                    "labels_remaining": result.get("labels_remaining"),
+                    "replay_dataset_watermark": result.get("replay_dataset_watermark"),
+                    "replay_total_events": result.get("replay_total_events"),
+                    "replay_events_scanned": result.get("replay_events_scanned"),
+                    "replay_pages_completed": result.get("replay_pages_completed"),
+                    "replay_partitions_completed": result.get(
+                        "replay_partitions_completed"
+                    ),
+                    "coverage_events_scanned": result.get("coverage_events_scanned"),
+                    "coverage_pages_completed": result.get("coverage_pages_completed"),
                     "last_replay_run": result.get("replay_run_id"),
                     "last_calibration_run": result.get("calibration_run_id"),
                     "zero_entry_report": result.get("zero_entry_report"),

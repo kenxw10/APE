@@ -33,6 +33,23 @@ chronological partitions, deterministic bounded search, market-normalized
 metrics, governance, startup-only candidate pin resolution, read APIs, retention boundaries, and
 the event-time fixture corpus.
 
+## PR 11b Bounded Runtime Correction
+
+PR 11b preserves R1-R15 semantics while making the existing research runtime safe
+for a large archived event table. Replay and coverage capture one immutable
+event-ID watermark and scan that snapshot with 250-row keyset pages. Production
+does not use `list_events(limit=None)`. Small fixture replay remains available for
+parity tests, while production retains only lifecycle state, trades, exact counters,
+unique-market sets, and explicitly bounded distribution samples.
+
+Mature labels process 25 markets per cycle from the durable label-schema marker;
+they commit before coverage/replay and report a partial cycle when work remains.
+The same worker publishes fresh heartbeats during labels, coverage, replay, and
+calibration. Calibration remains disabled unless configured and fails closed above
+the fixed in-code 20,000-event materialization limit. PR 11b adds no migration,
+environment variable, service, deployment, strategy, fee, lifecycle, governance,
+paper, live, private-account, or execution capability.
+
 ## Governance Evidence
 
 Promotion evidence is derived from persisted source events, resolved official

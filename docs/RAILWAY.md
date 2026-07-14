@@ -772,3 +772,18 @@ After the PR is merged and the required GPT audit and exact unsharded PR CI are 
 
 Do not enable paper trading, live trading, private credentials, candidate pins, or
 additional services as part of this rollout.
+
+## PR 11b Bounded Research Runtime
+
+PR 11b changes the existing `ape-research-worker` only. Do not add a service,
+environment variable, migration, credential, or deployment setting for this change.
+Start with `CALIBRATION_ENABLED=false`, `APP_MODE=DRY_RUN`,
+`TRADING_ENABLED=false`, and `EXECUTE=false` as in the PR 11a rollout.
+
+Check `/research/status` during a populated archive. A normal cycle reports a frozen
+replay watermark with total/scanned events and completed pages. If label work remains,
+the worker reports a partial `association_labels` cycle and resumes next poll before
+coverage or replay. A calibration status of `BLOCKED_REPLAY_EVENT_LIMIT` is a
+fail-closed memory guard, not a reason to increase polling, batch sizes, or add a
+new setting. Keep calibration disabled until the archive/replay records progress
+normally.

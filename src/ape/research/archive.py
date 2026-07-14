@@ -26,10 +26,12 @@ from ape.kalshi.errors import KalshiError
 from ape.kalshi.reference_messages import BRTI_SOURCE
 from ape.research import REPLAY_SCHEMA_VERSION, RESEARCH_LABEL_SCHEMA_VERSION
 from ape.research.fees import verified_kalshi_taker_fee_model
-from ape.research.repository import ResearchRepository
+from ape.research.repository import ReplayEventSnapshot, ResearchRepository
 
 ARCHIVE_BATCH_SIZE = 250
 ARCHIVE_MAX_BATCHES_PER_CYCLE = 20
+LABEL_MARKETS_PER_CYCLE = 25
+LABEL_MAX_HORIZON_SECONDS = 65
 ARCHIVE_SOURCE_STAGES = (
     "markets",
     "reference_ticks",
@@ -83,6 +85,12 @@ class ArchiveBatchResult:
     archived_by_type: dict[str, int]
 
 
+@dataclass(frozen=True)
+class LabelRefreshResult:
+    processed_markets: int
+    remaining_markets: int
+
+
 def archive_research_events(session: Session, *, now: datetime | None = None) -> ArchiveResult:
     """Incrementally archive normalized, replayable source data without raw payload copies."""
     checked_at = _utc(now or datetime.now(UTC))
@@ -121,18 +129,25 @@ def archive_research_source_pending(session: Session, *, source_stage: str) -> b
     return bool(rows)
 
 
-def refresh_research_archive_labels(session: Session) -> None:
+def refresh_research_archive_labels(session: Session) -> LabelRefreshResult:
     """Persist reference association and mature labels independently of replay work."""
     repository = ResearchRepository(session)
     _associate_unassigned_reference_events(session)
-    _refresh_mature_labels(session, repository)
+    result = _refresh_mature_labels(session, repository)
     session.flush()
+    return result
 
 
-def archive_research_coverage(session: Session, *, now: datetime | None = None) -> dict[str, Any]:
+def archive_research_coverage(
+    session: Session,
+    *,
+    now: datetime | None = None,
+    snapshot: ReplayEventSnapshot | None = None,
+) -> dict[str, Any]:
     checked_at = _utc(now or datetime.now(UTC))
     repository = ResearchRepository(session)
-    coverage = _coverage(session, data_cutoff=checked_at)
+    frozen_snapshot = snapshot or repository.replay_event_snapshot()
+    coverage = _coverage(session, data_cutoff=checked_at, snapshot=frozen_snapshot)
     repository.archive_event(_coverage_event(coverage, checked_at))
     session.flush()
     return coverage
@@ -684,67 +699,50 @@ def _event(
     return event
 
 
-def _coverage(session: Session, *, data_cutoff: datetime) -> dict[str, Any]:
+def _coverage(
+    session: Session,
+    *,
+    data_cutoff: datetime,
+    snapshot: ReplayEventSnapshot | None = None,
+) -> dict[str, Any]:
     repository = ResearchRepository(session)
+    frozen_snapshot = snapshot or repository.replay_event_snapshot()
     outcomes = repository.list_complete_outcomes()
-    event_count = (
-        session.scalar(
-            select(func.count())
-            .select_from(ResearchReplayEvent)
-            .where(ResearchReplayEvent.event_type != "COVERAGE_REPORT")
-        )
-        or 0
-    )
-    by_type = dict(
-        session.execute(
-            select(ResearchReplayEvent.event_type, func.count())
-            .where(ResearchReplayEvent.event_type != "COVERAGE_REPORT")
-            .group_by(ResearchReplayEvent.event_type)
-        ).all()
-    )
-    earliest, latest = session.execute(
-        select(
-            func.min(ResearchReplayEvent.event_time),
-            func.max(ResearchReplayEvent.event_time),
-        ).where(ResearchReplayEvent.event_type != "COVERAGE_REPORT")
-    ).one()
-    readiness = dict(
-        session.execute(
-            select(ResearchReplayEvent.replay_readiness, func.count())
-            .where(ResearchReplayEvent.event_type == "FEATURE_SNAPSHOT")
-            .group_by(ResearchReplayEvent.replay_readiness)
-        ).all()
-    )
+    reader = repository.frozen_replay_event_reader(frozen_snapshot)
+    event_count = 0
+    by_type: dict[str, int] = {}
+    readiness: dict[str, int] = {}
     per_market: dict[str, dict[str, Any]] = {}
-    event_rows = session.execute(
-        select(
-            ResearchReplayEvent.market_ticker,
-            ResearchReplayEvent.event_type,
-            ResearchReplayEvent.event_time,
-        )
-        .where(
-            ResearchReplayEvent.market_ticker.is_not(None),
-            ResearchReplayEvent.event_type != "COVERAGE_REPORT",
-        )
-        .order_by(ResearchReplayEvent.market_ticker, ResearchReplayEvent.event_time)
-    ).all()
-    for market_ticker, event_type, event_time in event_rows:
-        if market_ticker is None:
-            continue
-        current = per_market.setdefault(
-            market_ticker,
-            {"event_count": 0, "event_counts_by_type": {}, "maximum_event_gap_seconds": 0},
-        )
-        current["event_count"] += 1
-        counts = current["event_counts_by_type"]
-        counts[str(event_type)] = int(counts.get(str(event_type), 0)) + 1
-        previous = current.get("last_event_time")
-        if previous is not None:
-            current["maximum_event_gap_seconds"] = max(
-                int(current["maximum_event_gap_seconds"]),
-                max(0, int((_utc(event_time) - _utc(previous)).total_seconds())),
+    for page in reader.iter_pages():
+        for event in page:
+            event_count += 1
+            by_type[event.event_type] = by_type.get(event.event_type, 0) + 1
+            if event.event_type == "FEATURE_SNAPSHOT":
+                readiness[event.replay_readiness] = readiness.get(event.replay_readiness, 0) + 1
+            market_ticker = event.market_ticker
+            event_type = event.event_type
+            event_time = event.event_time
+            if market_ticker is None:
+                continue
+            current = per_market.setdefault(
+                market_ticker,
+                {"event_count": 0, "event_counts_by_type": {}, "maximum_event_gap_seconds": 0},
             )
-        current["last_event_time"] = event_time
+            current["event_count"] += 1
+            counts = current["event_counts_by_type"]
+            counts[str(event_type)] = int(counts.get(str(event_type), 0)) + 1
+            previous = current.get("last_event_time")
+            if previous is not None:
+                current["maximum_event_gap_seconds"] = max(
+                    int(current["maximum_event_gap_seconds"]),
+                    max(0, int((_utc(event_time) - _utc(previous)).total_seconds())),
+                )
+            current["last_event_time"] = event_time
+    if event_count != frozen_snapshot.event_count:
+        raise RuntimeError(
+            "Frozen coverage scan was incomplete: "
+            f"expected {frozen_snapshot.event_count}, scanned {event_count}."
+        )
     for values in per_market.values():
         values.pop("last_event_time", None)
         source_types = set(values["event_counts_by_type"])
@@ -759,15 +757,13 @@ def _coverage(session: Session, *, data_cutoff: datetime) -> dict[str, Any]:
         "data_cutoff": _utc(data_cutoff).isoformat(),
         "complete_markets": len(outcomes),
         "event_count": int(event_count),
-        "earliest_event_time": _utc(earliest).isoformat() if earliest else None,
-        "latest_event_time": _utc(latest).isoformat() if latest else None,
-        "unique_markets": session.scalar(
-            select(func.count(func.distinct(ResearchReplayEvent.market_ticker))).where(
-                ResearchReplayEvent.market_ticker.is_not(None),
-                ResearchReplayEvent.event_type != "COVERAGE_REPORT",
-            )
-        )
-        or 0,
+        "earliest_event_time": _utc(frozen_snapshot.min_event_time).isoformat()
+        if frozen_snapshot.min_event_time
+        else None,
+        "latest_event_time": _utc(frozen_snapshot.max_event_time).isoformat()
+        if frozen_snapshot.max_event_time
+        else None,
+        "unique_markets": len(per_market),
         "event_counts_by_type": {str(key): int(value) for key, value in by_type.items()},
         "complete_frame_count": int(readiness.get("FULL", 0)),
         "partial_frame_count": int(readiness.get("PARTIAL", 0)),
@@ -786,6 +782,13 @@ def _coverage(session: Session, *, data_cutoff: datetime) -> dict[str, Any]:
             for market, values in sorted(per_market.items())
         },
         "per_market_coverage": per_market,
+        "frozen_snapshot": {
+            "watermark_id": frozen_snapshot.watermark_id,
+            "total_events": frozen_snapshot.event_count,
+            "events_scanned": reader.events_scanned,
+            "pages_completed": reader.pages_scanned,
+            "partitions_completed": reader.partitions_completed,
+        },
     }
 
 
@@ -812,35 +815,70 @@ def _coverage_event(coverage: dict[str, Any], checked_at: datetime) -> dict[str,
     }
 
 
-def _refresh_mature_labels(session: Session, repository: ResearchRepository) -> None:
-    outcomes = repository.list_complete_outcomes()
+def _refresh_mature_labels(
+    session: Session, repository: ResearchRepository
+) -> LabelRefreshResult:
+    label_schema = ResearchMarketOutcome.quality_flags["label_schema_version"].as_string()
+    pending_filter = (
+        ResearchMarketOutcome.outcome_status == "RESOLVED",
+        or_(
+            ResearchMarketOutcome.quality_flags.is_(None),
+            label_schema.is_(None),
+            label_schema != RESEARCH_LABEL_SCHEMA_VERSION,
+        ),
+    )
+    remaining_total = int(
+        session.scalar(
+            select(func.count()).select_from(ResearchMarketOutcome).where(*pending_filter)
+        )
+        or 0
+    )
+    outcomes = list(
+        session.scalars(
+            select(ResearchMarketOutcome)
+            .where(*pending_filter)
+            .order_by(ResearchMarketOutcome.updated_at.asc(), ResearchMarketOutcome.id.asc())
+            .limit(LABEL_MARKETS_PER_CYCLE)
+        )
+    )
     for outcome in outcomes:
         market = session.scalar(
             select(Market).where(Market.market_ticker == outcome.market_ticker)
         )
         if market is None:
             continue
+        start = _utc(
+            market.open_time
+            or outcome.market_open_at
+            or market.close_time
+            or outcome.market_close_at
+        )
+        end = _utc(
+            market.close_time
+            or outcome.market_close_at
+            or outcome.expiration_at
+            or start
+        ) + timedelta(seconds=LABEL_MAX_HORIZON_SECONDS)
         ticks = list(
             session.scalars(
                 select(ReferenceTick)
                 .where(
                     ReferenceTick.source == BRTI_SOURCE,
-                    ReferenceTick.received_at
-                    >= _utc(
-                        market.open_time
-                        or outcome.market_open_at
-                        or market.close_time
-                        or outcome.market_close_at
-                    ),
+                    ReferenceTick.received_at >= start,
+                    ReferenceTick.received_at <= end,
                 )
                 .order_by(ReferenceTick.received_at.asc(), ReferenceTick.id.asc())
             )
         )
         outcome.quality_flags = {
             **(outcome.quality_flags if isinstance(outcome.quality_flags, dict) else {}),
-            **_labels_for_market(session, market, ticks, outcome),
+            **_labels_for_market(session, market, ticks, outcome, start=start, end=end),
         }
     session.flush()
+    return LabelRefreshResult(
+        processed_markets=len(outcomes),
+        remaining_markets=max(0, remaining_total - len(outcomes)),
+    )
 
 
 def _labels_for_market(
@@ -848,19 +886,37 @@ def _labels_for_market(
     market: Market,
     ticks: list[ReferenceTick],
     outcome: ResearchMarketOutcome | None = None,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
 ) -> dict[str, Any]:
     """Generate labels only after archival; replay never consumes future values."""
+    book_filters = [OrderbookSnapshot.market_ticker == market.market_ticker]
+    feature_filters = [StrategyFeatureSnapshot.market_ticker == market.market_ticker]
+    if start is not None and end is not None:
+        book_filters.extend(
+            [
+                OrderbookSnapshot.received_at >= start,
+                OrderbookSnapshot.received_at <= end,
+            ]
+        )
+        feature_filters.extend(
+            [
+                StrategyFeatureSnapshot.evaluated_at >= start,
+                StrategyFeatureSnapshot.evaluated_at <= end,
+            ]
+        )
     books = list(
         session.scalars(
             select(OrderbookSnapshot)
-            .where(OrderbookSnapshot.market_ticker == market.market_ticker)
+            .where(*book_filters)
             .order_by(OrderbookSnapshot.received_at.asc(), OrderbookSnapshot.id.asc())
         )
     )
     labels: dict[str, Any] = {}
     for event in session.scalars(
         select(StrategyFeatureSnapshot)
-        .where(StrategyFeatureSnapshot.market_ticker == market.market_ticker)
+        .where(*feature_filters)
         .order_by(StrategyFeatureSnapshot.evaluated_at.asc(), StrategyFeatureSnapshot.id.asc())
     ):
         vector = _feature_vector_for_snapshot(session, event) or {}

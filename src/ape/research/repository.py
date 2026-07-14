@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import desc, func, select, text
+from sqlalchemy import Integer, and_, case, cast, desc, func, select, text, tuple_
 from sqlalchemy.orm import Session
 
 from ape.db.models import (
@@ -21,6 +23,103 @@ from ape.db.models import (
     StrategyConfigVersion,
 )
 from ape.research.fees import verified_kalshi_taker_fee_model
+
+REPLAY_EVENT_PAGE_SIZE = 250
+REPLAY_EVENT_PARTITION_SECONDS = 3_600
+
+
+@dataclass(frozen=True)
+class ReplayEventSnapshot:
+    """Immutable upper bound for one replay/coverage scan."""
+
+    watermark_id: int
+    event_count: int
+    min_event_time: datetime | None
+    max_event_time: datetime | None
+    partition_count: int
+
+
+@dataclass(frozen=True)
+class ReplayEventRecord:
+    event_id: str
+    market_ticker: str | None
+    event_type: str
+    event_time: datetime
+    received_at: datetime | None
+    source_table: str
+    source_row_id: str
+    source_hash: str | None
+    sequence_number: int | None
+    feature_snapshot_id: str | None
+    feature_schema_version: str | None
+    architecture_version: str | None
+    replay_schema_version: str
+    payload: Any
+    event_hash: str
+    replay_readiness: str
+    blockers: Any | None
+
+
+class FrozenReplayEventReader:
+    """Keyset reader that releases each event page before reading the next one."""
+
+    def __init__(
+        self,
+        repository: ResearchRepository,
+        snapshot: ReplayEventSnapshot,
+        *,
+        page_size: int = REPLAY_EVENT_PAGE_SIZE,
+    ) -> None:
+        self.repository = repository
+        self.snapshot = snapshot
+        self.page_size = page_size
+        self.pages_scanned = 0
+        self.events_scanned = 0
+        self.partitions_completed = 0
+        self.max_page_size = 0
+
+    def iter_pages(self) -> Iterator[list[ReplayEventRecord]]:
+        if self.snapshot.min_event_time is None or self.snapshot.max_event_time is None:
+            return
+        start = _utc(self.snapshot.min_event_time)
+        final_end = _utc(self.snapshot.max_event_time) + timedelta(microseconds=1)
+        while start < final_end:
+            end = min(start + timedelta(seconds=REPLAY_EVENT_PARTITION_SECONDS), final_end)
+            yield from self._iter_partition(start=start, end=end)
+            self.partitions_completed += 1
+            start = end
+
+    def _iter_partition(
+        self, *, start: datetime, end: datetime
+    ) -> Iterator[list[ReplayEventRecord]]:
+        last_key: tuple[Any, ...] | None = None
+        while True:
+            statement, order_columns = self.repository._replay_event_statement(
+                snapshot=self.snapshot,
+                start=start,
+                end=end,
+            )
+            if last_key is not None:
+                statement = statement.where(tuple_(*order_columns) > tuple_(*last_key))
+            rows = list(
+                self.repository.session.execute(
+                    statement.order_by(*order_columns).limit(self.page_size)
+                ).mappings()
+            )
+            if not rows:
+                return
+            page = [_replay_event_record(row) for row in rows]
+            self.pages_scanned += 1
+            self.events_scanned += len(page)
+            self.max_page_size = max(self.max_page_size, len(page))
+            last_row = rows[-1]
+            last_key = tuple(last_row[column.key] for column in order_columns)
+            yield page
+            # Mappings leave no ORM identity state behind; ending each read
+            # transaction also prevents long archive scans from holding a snapshot.
+            self.repository.session.commit()
+            if len(page) < self.page_size:
+                return
 
 
 class ResearchRepository:
@@ -567,6 +666,106 @@ class ResearchRepository:
             )
         )
 
+    def replay_event_snapshot(self) -> ReplayEventSnapshot:
+        """Freeze replay input before any bounded reader starts scanning it."""
+        watermark_id, event_count, min_event_time, max_event_time = self.session.execute(
+            select(
+                func.max(ResearchReplayEvent.id),
+                func.count(),
+                func.min(ResearchReplayEvent.event_time),
+                func.max(ResearchReplayEvent.event_time),
+            ).where(ResearchReplayEvent.event_type != "COVERAGE_REPORT")
+        ).one()
+        if watermark_id is None or min_event_time is None or max_event_time is None:
+            return ReplayEventSnapshot(0, 0, None, None, 0)
+        span_seconds = max(
+            0.0, (_utc(max_event_time) - _utc(min_event_time)).total_seconds()
+        )
+        return ReplayEventSnapshot(
+            watermark_id=int(watermark_id),
+            event_count=int(event_count or 0),
+            min_event_time=_utc(min_event_time),
+            max_event_time=_utc(max_event_time),
+            partition_count=int(span_seconds // REPLAY_EVENT_PARTITION_SECONDS) + 1,
+        )
+
+    def frozen_replay_event_reader(
+        self,
+        snapshot: ReplayEventSnapshot,
+        *,
+        page_size: int = REPLAY_EVENT_PAGE_SIZE,
+    ) -> FrozenReplayEventReader:
+        return FrozenReplayEventReader(self, snapshot, page_size=page_size)
+
+    def _replay_event_statement(
+        self,
+        *,
+        snapshot: ReplayEventSnapshot,
+        start: datetime,
+        end: datetime,
+    ) -> tuple[Any, tuple[Any, ...]]:
+        source_row_id = ResearchReplayEvent.source_row_id
+        if self.session.get_bind().dialect.name == "postgresql":
+            numeric_source = source_row_id.op("~")(r"^-?[0-9]+$")
+        else:
+            unsigned = func.ltrim(source_row_id, "-")
+            numeric_source = and_(
+                func.length(unsigned) > 0,
+                unsigned.op("GLOB")("[0-9]*"),
+                ~unsigned.op("GLOB")("*[^0-9]*"),
+            )
+        received_sort = func.coalesce(
+            ResearchReplayEvent.received_at, ResearchReplayEvent.event_time
+        ).label("received_sort")
+        sequence_sort = func.coalesce(ResearchReplayEvent.sequence_number, 0).label(
+            "sequence_sort"
+        )
+        numeric_group = case((numeric_source, 0), else_=1).label("numeric_group")
+        numeric_value = case(
+            (numeric_source, cast(source_row_id, Integer)), else_=0
+        ).label("numeric_value")
+        id_sort = ResearchReplayEvent.id.label("id_sort")
+        order_columns = (
+            ResearchReplayEvent.event_time,
+            received_sort,
+            sequence_sort,
+            numeric_group,
+            numeric_value,
+            source_row_id,
+            ResearchReplayEvent.event_id,
+            id_sort,
+        )
+        statement = select(
+            ResearchReplayEvent.event_id,
+            ResearchReplayEvent.market_ticker,
+            ResearchReplayEvent.event_type,
+            ResearchReplayEvent.event_time,
+            ResearchReplayEvent.received_at,
+            ResearchReplayEvent.source_table,
+            ResearchReplayEvent.source_row_id,
+            ResearchReplayEvent.source_hash,
+            ResearchReplayEvent.sequence_number,
+            ResearchReplayEvent.feature_snapshot_id,
+            ResearchReplayEvent.feature_schema_version,
+            ResearchReplayEvent.architecture_version,
+            ResearchReplayEvent.replay_schema_version,
+            ResearchReplayEvent.payload,
+            ResearchReplayEvent.event_hash,
+            ResearchReplayEvent.replay_readiness,
+            ResearchReplayEvent.blockers,
+            received_sort,
+            sequence_sort,
+            numeric_group,
+            numeric_value,
+            id_sort,
+        ).where(
+            ResearchReplayEvent.event_type != "COVERAGE_REPORT",
+            ResearchReplayEvent.id <= snapshot.watermark_id,
+            ResearchReplayEvent.event_time >= start,
+            ResearchReplayEvent.event_time < end,
+        )
+        return statement, order_columns
+
     def list_events(
         self, *, market_ticker: str | None = None, limit: int | None = 500
     ) -> list[ResearchReplayEvent]:
@@ -761,6 +960,32 @@ def _values(values: dict[str, Any]) -> dict[str, Any]:
         if isinstance(value, datetime) and value.tzinfo is None:
             copied[key] = value.replace(tzinfo=UTC)
     return copied
+
+
+def _replay_event_record(row: Any) -> ReplayEventRecord:
+    return ReplayEventRecord(
+        event_id=row["event_id"],
+        market_ticker=row["market_ticker"],
+        event_type=row["event_type"],
+        event_time=_utc(row["event_time"]),
+        received_at=_utc(row["received_at"]) if row["received_at"] is not None else None,
+        source_table=row["source_table"],
+        source_row_id=row["source_row_id"],
+        source_hash=row["source_hash"],
+        sequence_number=row["sequence_number"],
+        feature_snapshot_id=row["feature_snapshot_id"],
+        feature_schema_version=row["feature_schema_version"],
+        architecture_version=row["architecture_version"],
+        replay_schema_version=row["replay_schema_version"],
+        payload=row["payload"],
+        event_hash=row["event_hash"],
+        replay_readiness=row["replay_readiness"],
+        blockers=row["blockers"],
+    )
+
+
+def _utc(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def _decimal_or_zero(value: Any) -> Decimal:
