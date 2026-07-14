@@ -210,6 +210,7 @@ def archive_bootstrap_required(session: Session) -> bool:
         cursor = session.get(ResearchArchiveCursor, source_stage)
         if (
             cursor is None
+            or cursor.schema_version != ARCHIVE_CURSOR_SCHEMA_VERSION
             or cursor.selector_mode != "TAIL"
             or cursor.bootstrap_complete is not True
             or cursor.source_cursor is None
