@@ -6,6 +6,22 @@ on:
 jobs:
   validation:
     runs-on: ubuntu-latest
+    env:
+      TEST_POSTGRES_URL: postgresql+psycopg://ape_test:ape_test_password@localhost:5432/ape_test
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ape_test
+          POSTGRES_PASSWORD: ape_test_password
+          POSTGRES_DB: ape_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ape_test -d ape_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
