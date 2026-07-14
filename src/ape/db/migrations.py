@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import inspect, select, text
+from sqlalchemy import Boolean, bindparam, inspect, select, text
 from sqlalchemy.engine import Connection, Engine
 
 from ape.config import ConfigError, load_config
@@ -374,11 +374,15 @@ def _ensure_research_archive_cursors_table(connection: Connection) -> None:
         "strategy_position_outcomes",
     )
     value_rows = ", ".join(
-        f"(:source_{index}, 'UNINITIALIZED', 0, 'research_archive_cursor_v1', 0, "
+        f"(:source_{index}, 'UNINITIALIZED', 0, 'research_archive_cursor_v1', "
+        ":bootstrap_complete, "
         "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
         for index in range(len(sources))
     )
-    parameters = {f"source_{index}": source_table for index, source_table in enumerate(sources)}
+    parameters = {
+        **{f"source_{index}": source_table for index, source_table in enumerate(sources)},
+        "bootstrap_complete": False,
+    }
     insert = "INSERT OR IGNORE" if connection.dialect.name == "sqlite" else "INSERT"
     conflict = (
         " ON CONFLICT (source_table) DO NOTHING"
@@ -399,7 +403,7 @@ def _ensure_research_archive_cursors_table(connection: Connection) -> None:
             )
             VALUES {value_rows}{conflict}
             """
-        ),
+        ).bindparams(bindparam("bootstrap_complete", type_=Boolean)),
         parameters,
     )
 

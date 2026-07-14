@@ -80,3 +80,11 @@ before final reporting.
 - R8 PASS: rollout documentation, status visibility, migration confirmation, unchanged safety boundary, and validation evidence are included; no new environment variable or service is introduced.
 
 R1-R8 were not reduced, deferred, substituted, or relabeled.
+
+## PR 11d Follow-up
+
+PR 11d is a separate emergency fix-forward for a PostgreSQL portability defect
+in the existing 0011 cursor seed: the original seed used integer `0` for the
+`BOOLEAN` `bootstrap_complete` column. PR 11d binds Python `False` with the
+SQLAlchemy Boolean type and adds real PostgreSQL 16 migration coverage. No PR
+11c cursor-runtime behavior is changed.
