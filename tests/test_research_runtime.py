@@ -495,26 +495,36 @@ def test_research_scan_heartbeats_publish_advancing_page_progress(
 
         observed_counters: list[int] = []
         for expected in (REPLAY_EVENT_PAGE_SIZE, REPLAY_EVENT_PAGE_SIZE * 2):
-            assert page_ready.wait(timeout=5)
-            time.sleep(0.07)
-            with factory() as session:
-                heartbeats = list(
-                    session.scalars(
-                        select(WorkerHeartbeat)
-                        .where(WorkerHeartbeat.service_name == WORKER_SERVICE_RESEARCH)
-                        .order_by(WorkerHeartbeat.id.asc())
+            page_deadline = time.monotonic() + 5
+            while not (
+                page_ready.wait(timeout=0.05)
+                and paused_pages
+                and paused_pages[-1] == expected
+            ):
+                assert time.monotonic() < page_deadline
+            current_values: list[int] = []
+            heartbeat_deadline = time.monotonic() + 5
+            while time.monotonic() < heartbeat_deadline:
+                with factory() as session:
+                    heartbeats = list(
+                        session.scalars(
+                            select(WorkerHeartbeat)
+                            .where(WorkerHeartbeat.service_name == WORKER_SERVICE_RESEARCH)
+                            .order_by(WorkerHeartbeat.id.asc())
+                        )
                     )
-                )
-            current_values = [
-                heartbeat.metadata_["research"].get(counter_key)
-                for heartbeat in heartbeats
-                if heartbeat.metadata_["research"].get("worker_state") == "running"
-                and heartbeat.metadata_["research"].get("current_stage") == stage
-                and heartbeat.metadata_["research"].get(counter_key) is not None
-            ]
-            assert current_values
+                current_values = [
+                    heartbeat.metadata_["research"].get(counter_key)
+                    for heartbeat in heartbeats
+                    if heartbeat.metadata_["research"].get("worker_state") == "running"
+                    and heartbeat.metadata_["research"].get("current_stage") == stage
+                    and heartbeat.metadata_["research"].get(counter_key) is not None
+                ]
+                if current_values and max(current_values) >= expected:
+                    break
+                time.sleep(0.02)
+            assert current_values and max(current_values) >= expected
             observed_counters.append(max(current_values))
-            assert observed_counters[-1] >= expected
             status = build_research_status(config)
             assert status[counter_key] >= expected
             assert status["heartbeat_fresh"] is True
