@@ -17,7 +17,11 @@ from ape.repositories.inputs import WorkerHeartbeatInput
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
 from ape.research import service as research_service
 from ape.research.archive import ARCHIVE_BATCH_SIZE, archive_research_batch
-from ape.research.repository import ResearchRepository
+from ape.research.repository import (
+    REPLAY_EVENT_PAGE_SIZE,
+    FrozenReplayEventReader,
+    ResearchRepository,
+)
 from ape.research.status import build_research_status
 from ape.safety import assess_startup_safety
 from ape.worker.services import WORKER_SERVICE_RESEARCH
@@ -295,6 +299,7 @@ def test_research_archive_timeout_preserves_committed_batch_progress_and_resumes
     ("stage", "calibration_enabled"),
     [
         ("association_labels", False),
+        ("coverage", False),
         ("baseline_replay", False),
         ("calibration", True),
     ],
@@ -320,8 +325,17 @@ def test_research_worker_heartbeats_stay_fresh_during_long_stages(
                 return original(session)
 
             monkeypatch.setattr(research_service, "refresh_research_archive_labels", pause_labels)
+        elif stage == "coverage":
+            original = research_service.archive_research_coverage
+
+            def pause_coverage(*args, **kwargs):
+                entered.set()
+                assert release.wait(timeout=5)
+                return original(*args, **kwargs)
+
+            monkeypatch.setattr(research_service, "archive_research_coverage", pause_coverage)
         elif stage == "baseline_replay":
-            original = research_service.DeterministicReplayEngine.replay
+            original = research_service.DeterministicReplayEngine.replay_ordered_pages
 
             def pause_replay(instance, *args, **kwargs):
                 entered.set()
@@ -330,7 +344,7 @@ def test_research_worker_heartbeats_stay_fresh_during_long_stages(
 
             monkeypatch.setattr(
                 research_service.DeterministicReplayEngine,
-                "replay",
+                "replay_ordered_pages",
                 pause_replay,
             )
         else:
@@ -398,6 +412,139 @@ def test_research_worker_heartbeats_stay_fresh_during_long_stages(
             )
     finally:
         release.set()
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("reader_index", "stage", "counter_key"),
+    [
+        (0, "coverage", "coverage_events_scanned"),
+        (1, "baseline_replay", "replay_events_scanned"),
+    ],
+)
+def test_research_scan_heartbeats_publish_advancing_page_progress(
+    tmp_path, monkeypatch, reader_index, stage, counter_key
+) -> None:
+    config = _runtime_config(tmp_path)
+    engine = create_engine_from_config(config)
+    run_migrations(engine)
+    factory = create_session_factory(engine)
+    at = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+    page_ready = Event()
+    release_page = Event()
+    outcome: dict[str, object] = {}
+    readers: list[FrozenReplayEventReader] = []
+    paused_pages: list[int] = []
+    try:
+        with factory() as session:
+            session.add_all(
+                [
+                    ResearchReplayEvent(
+                        event_id=f"progress-{index}",
+                        market_ticker="KXBTC15M-PROGRESS",
+                        event_type="MARKET",
+                        event_time=at + timedelta(microseconds=index),
+                        received_at=at + timedelta(microseconds=index),
+                        source_table="progress-fixture",
+                        source_row_id=str(index),
+                        source_hash=str(index),
+                        replay_schema_version="momentum_v2_replay_v1",
+                        payload={},
+                        event_hash=f"progress-hash-{index}",
+                        replay_readiness="FULL",
+                        blockers=[],
+                    )
+                    for index in range(REPLAY_EVENT_PAGE_SIZE * 2 + 1)
+                ]
+            )
+            session.commit()
+
+        original_reader = ResearchRepository.frozen_replay_event_reader
+        original_report = FrozenReplayEventReader._report_progress
+
+        def track_reader(self, snapshot, *, page_size=REPLAY_EVENT_PAGE_SIZE):
+            reader = original_reader(self, snapshot, page_size=page_size)
+            readers.append(reader)
+            return reader
+
+        def pause_after_page(self, callback, *, phase):
+            original_report(self, callback, phase=phase)
+            if (
+                phase == "page"
+                and len(readers) > reader_index
+                and self is readers[reader_index]
+                and self.pages_scanned <= 2
+            ):
+                paused_pages.append(self.events_scanned)
+                page_ready.set()
+                assert release_page.wait(timeout=5)
+                release_page.clear()
+                page_ready.clear()
+
+        monkeypatch.setattr(ResearchRepository, "frozen_replay_event_reader", track_reader)
+        monkeypatch.setattr(FrozenReplayEventReader, "_report_progress", pause_after_page)
+        worker = research_service.ResearchWorker(
+            config=config,
+            safety=assess_startup_safety(config),
+            session_factory=factory,
+            started_at=at,
+            heartbeat_interval_seconds=0.02,
+        )
+        thread = Thread(target=lambda: outcome.setdefault("result", worker.run_once()))
+        thread.start()
+
+        observed_counters: list[int] = []
+        for expected in (REPLAY_EVENT_PAGE_SIZE, REPLAY_EVENT_PAGE_SIZE * 2):
+            page_deadline = time.monotonic() + 5
+            while not (
+                page_ready.wait(timeout=0.05)
+                and paused_pages
+                and paused_pages[-1] == expected
+            ):
+                assert time.monotonic() < page_deadline
+            current_values: list[int] = []
+            heartbeat_deadline = time.monotonic() + 5
+            while time.monotonic() < heartbeat_deadline:
+                with factory() as session:
+                    heartbeats = list(
+                        session.scalars(
+                            select(WorkerHeartbeat)
+                            .where(WorkerHeartbeat.service_name == WORKER_SERVICE_RESEARCH)
+                            .order_by(WorkerHeartbeat.id.asc())
+                        )
+                    )
+                current_values = [
+                    heartbeat.metadata_["research"].get(counter_key)
+                    for heartbeat in heartbeats
+                    if heartbeat.metadata_["research"].get("worker_state") == "running"
+                    and heartbeat.metadata_["research"].get("current_stage") == stage
+                    and heartbeat.metadata_["research"].get(counter_key) is not None
+                ]
+                if current_values and max(current_values) >= expected:
+                    break
+                time.sleep(0.02)
+            assert current_values and max(current_values) >= expected
+            observed_counters.append(max(current_values))
+            status = build_research_status(config)
+            assert status[counter_key] >= expected
+            assert status["heartbeat_fresh"] is True
+            release_page.set()
+
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+        assert outcome["result"]["status"] == "completed"
+        assert paused_pages == [REPLAY_EVENT_PAGE_SIZE, REPLAY_EVENT_PAGE_SIZE * 2]
+        assert observed_counters[0] < observed_counters[1]
+        with factory() as session:
+            terminal_count = session.scalar(select(func.count()).select_from(WorkerHeartbeat))
+        time.sleep(0.06)
+        with factory() as session:
+            assert (
+                session.scalar(select(func.count()).select_from(WorkerHeartbeat))
+                == terminal_count
+            )
+    finally:
+        release_page.set()
         engine.dispose()
 
 

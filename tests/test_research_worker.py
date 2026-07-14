@@ -165,7 +165,9 @@ def test_research_cycle_archives_and_records_isolated_heartbeat(tmp_path) -> Non
         engine.dispose()
 
 
-def test_research_cycle_loads_the_complete_archive(tmp_path, monkeypatch) -> None:
+def test_research_cycle_uses_the_frozen_complete_archive_reader(
+    tmp_path, monkeypatch
+) -> None:
     config = load_config(
         {"DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'complete-archive.sqlite'}"}
     )
@@ -173,11 +175,9 @@ def test_research_cycle_loads_the_complete_archive(tmp_path, monkeypatch) -> Non
     run_migrations(engine)
     factory = create_session_factory(engine)
     captured_limits: list[int | None] = []
-    original_list_events = ResearchRepository.list_events
-
     def list_events(self, *, market_ticker=None, limit=500):
         captured_limits.append(limit)
-        return original_list_events(self, market_ticker=market_ticker, limit=limit)
+        raise AssertionError("research replay must use the frozen event reader")
 
     monkeypatch.setattr(ResearchRepository, "list_events", list_events)
     try:
@@ -185,7 +185,7 @@ def test_research_cycle_loads_the_complete_archive(tmp_path, monkeypatch) -> Non
             run_research_cycle(config, session)
             session.commit()
 
-        assert captured_limits == [None]
+        assert captured_limits == []
     finally:
         engine.dispose()
 

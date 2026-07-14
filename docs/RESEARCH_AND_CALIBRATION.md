@@ -52,6 +52,23 @@ persisted candidate state: stale pending ENTRY intents are cancelled, stale open
 positions are force-managed, and a replacement candidate cannot enter until stale
 state drains. The control variants remain unchanged.
 
+## Bounded Runtime (PR 11b)
+
+The research worker freezes replay input after the archive and label stages by
+recording the highest archived event ID, its count, and time bounds. Coverage and
+baseline replay scan exactly that snapshot through 250-row keyset pages, so rows
+written after the watermark wait for the next cycle. The worker reports the
+watermark, scan count, completed pages, partitions, and label progress in its
+heartbeat and `/research/status`.
+
+Mature outcome labels process at most 25 current-schema markets per cycle. Each
+market reads only its own interval plus the 65-second label horizon. A remaining
+label backlog is reported as a partial cycle and coverage/replay are deferred rather
+than reported complete. Calibration stays disabled by default. When enabled, it is
+allowed to materialize a frozen input only up to the fixed 20,000-event runtime
+limit; a larger input records a durable blocked calibration result rather than
+loading the full archive into memory.
+
 ## Calibration Evidence
 
 Every bounded calibration run stores the complete immutable search-space snapshot:

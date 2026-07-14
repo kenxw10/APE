@@ -30,6 +30,7 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
         "worker_state": "waiting_for_worker",
         "cycle_state": "waiting_for_worker",
         "current_stage": None,
+        "post_archive_substage": None,
         "last_successful_stage": None,
         "cycle_id": None,
         "cycle_running": False,
@@ -44,6 +45,27 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
         "last_progress_at": None,
         "failed_stage": None,
         "last_archive_batch": None,
+        "labels_processed": None,
+        "labels_remaining": None,
+        "association_rows_processed": None,
+        "association_rows_remaining": None,
+        "label_markets_processed": None,
+        "label_markets_remaining": None,
+        "label_markets_blocked_missing_market": None,
+        "replay_dataset_watermark": None,
+        "replay_total_events": None,
+        "replay_events_scanned": None,
+        "replay_pages_completed": None,
+        "replay_partitions_completed": None,
+        "replay_partitions_total": None,
+        "replay_max_page_size": None,
+        "coverage_dataset_watermark": None,
+        "coverage_total_events": None,
+        "coverage_events_scanned": None,
+        "coverage_pages_completed": None,
+        "coverage_partitions_completed": None,
+        "coverage_partitions_total": None,
+        "coverage_max_page_size": None,
         "worker_role": "research",
         "worker_heartbeat": None,
         "last_archive_run": None,
@@ -116,9 +138,35 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
                 else None,
                 last_archive_run=details.get("last_archive_run"),
                 last_archive_batch=details.get("last_archive_batch"),
+                labels_processed=details.get("labels_processed"),
+                labels_remaining=details.get("labels_remaining"),
+                association_rows_processed=details.get("association_rows_processed"),
+                association_rows_remaining=details.get("association_rows_remaining"),
+                label_markets_processed=details.get("label_markets_processed"),
+                label_markets_remaining=details.get("label_markets_remaining"),
+                label_markets_blocked_missing_market=details.get(
+                    "label_markets_blocked_missing_market"
+                ),
+                replay_dataset_watermark=details.get("replay_dataset_watermark"),
+                replay_total_events=details.get("replay_total_events"),
+                replay_events_scanned=details.get("replay_events_scanned"),
+                replay_pages_completed=details.get("replay_pages_completed"),
+                replay_partitions_completed=details.get("replay_partitions_completed"),
+                replay_partitions_total=details.get("replay_partitions_total"),
+                replay_max_page_size=details.get("replay_max_page_size"),
+                coverage_dataset_watermark=details.get("coverage_dataset_watermark"),
+                coverage_total_events=details.get("coverage_total_events"),
+                coverage_events_scanned=details.get("coverage_events_scanned"),
+                coverage_pages_completed=details.get("coverage_pages_completed"),
+                coverage_partitions_completed=details.get(
+                    "coverage_partitions_completed"
+                ),
+                coverage_partitions_total=details.get("coverage_partitions_total"),
+                coverage_max_page_size=details.get("coverage_max_page_size"),
                 worker_state=worker_state,
                 cycle_state=str(details.get("cycle_state") or worker_state),
                 current_stage=details.get("current_stage"),
+                post_archive_substage=details.get("post_archive_substage"),
                 last_successful_stage=details.get("last_successful_stage"),
                 cycle_id=details.get("cycle_id"),
                 cycle_running=bool(details.get("cycle_running")),
@@ -154,6 +202,12 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
                 base["warnings"].append("research_worker_heartbeat_stale")
             if not base["effective_enabled"] and config.research_enabled:
                 base["warnings"].append("research_worker_waiting_for_heartbeat")
+            for warning in _bounded_strings(details.get("warnings")):
+                if warning not in base["warnings"]:
+                    base["warnings"].append(warning)
+            for blocker in _bounded_strings(details.get("blockers")):
+                if blocker not in base["blockers"]:
+                    base["blockers"].append(blocker)
     except SQLAlchemyError:
         base["blockers"].append("research_database_error")
     finally:
@@ -266,6 +320,7 @@ def _safe_worker_metadata(details: dict[str, Any]) -> dict[str, Any]:
         "worker_state": details.get("worker_state"),
         "cycle_state": details.get("cycle_state"),
         "current_stage": details.get("current_stage"),
+        "post_archive_substage": details.get("post_archive_substage"),
         "last_successful_stage": details.get("last_successful_stage"),
         "cycle_id": details.get("cycle_id"),
         "cycle_running": bool(details.get("cycle_running")),
@@ -280,6 +335,25 @@ def _safe_worker_metadata(details: dict[str, Any]) -> dict[str, Any]:
         "last_progress_at": details.get("last_progress_at"),
         "failed_stage": details.get("failed_stage"),
         "last_archive_batch": details.get("last_archive_batch"),
+        "association_rows_processed": details.get("association_rows_processed"),
+        "association_rows_remaining": details.get("association_rows_remaining"),
+        "label_markets_processed": details.get("label_markets_processed"),
+        "label_markets_remaining": details.get("label_markets_remaining"),
+        "label_markets_blocked_missing_market": details.get(
+            "label_markets_blocked_missing_market"
+        ),
+        "replay_dataset_watermark": details.get("replay_dataset_watermark"),
+        "replay_total_events": details.get("replay_total_events"),
+        "replay_events_scanned": details.get("replay_events_scanned"),
+        "replay_pages_completed": details.get("replay_pages_completed"),
+        "replay_partitions_completed": details.get("replay_partitions_completed"),
+        "replay_partitions_total": details.get("replay_partitions_total"),
+        "coverage_dataset_watermark": details.get("coverage_dataset_watermark"),
+        "coverage_total_events": details.get("coverage_total_events"),
+        "coverage_events_scanned": details.get("coverage_events_scanned"),
+        "coverage_pages_completed": details.get("coverage_pages_completed"),
+        "coverage_partitions_completed": details.get("coverage_partitions_completed"),
+        "coverage_partitions_total": details.get("coverage_partitions_total"),
         "last_error": _safe_error(details.get("last_error")),
         "statement_timeout_detected": bool(details.get("statement_timeout_detected")),
         "warnings": _bounded_strings(details.get("warnings")),

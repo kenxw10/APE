@@ -32,6 +32,7 @@ from ape.research.archive import (
     archive_research_source_pending,
     reconcile_market_outcomes,
     refresh_research_archive_labels,
+    refresh_research_reference_associations,
 )
 from ape.research.calibration import (
     LIFECYCLE_DRAFT,
@@ -39,7 +40,7 @@ from ape.research.calibration import (
     run_bounded_calibration,
 )
 from ape.research.replay import DeterministicReplayEngine, ReplayTrade
-from ape.research.repository import ResearchRepository
+from ape.research.repository import FrozenReplayProgress, ResearchRepository
 from ape.strategy.momentum_v2 import (
     V2_ARCHITECTURE_VERSION,
     V2_FEATURE_SCHEMA_VERSION,
@@ -54,6 +55,7 @@ LOGGER = logging.getLogger(__name__)
 RESEARCH_HEARTBEAT_INTERVAL_SECONDS = 30.0
 ARCHIVE_DUPLICATE_RETRY_LIMIT = 3
 ARCHIVE_DUPLICATE_RETRY_DELAY_SECONDS = 0.05
+CALIBRATION_MATERIALIZE_EVENT_LIMIT = 20_000
 
 
 class ResearchWorker:
@@ -171,34 +173,184 @@ class ResearchWorker:
                 cycle_started_at=cycle_started_at,
                 last_successful_stage="archive",
                 archive=archive,
+                post_archive_substage="reference_association",
             )
             self._publish_progress(result)
             self._start_stage_heartbeat_ticker()
             try:
                 with self.session_factory() as session:
-                    refresh_research_archive_labels(session)
-                    session.commit()
+                    association_result = refresh_research_reference_associations(session)
             finally:
                 self._stop_stage_heartbeat_ticker()
+            result = _cycle_progress(
+                previous=result,
+                state="running",
+                stage="association_labels",
+                cycle_started_at=cycle_started_at,
+                last_successful_stage="reference_association",
+                archive=archive,
+                post_archive_substage="reference_association",
+                association_rows_processed=association_result.processed_rows,
+                association_rows_remaining=association_result.remaining_rows,
+            )
+            self._publish_progress(result)
+            if association_result.remaining_rows > 0:
+                result = _cycle_progress(
+                    previous=result,
+                    state="partial",
+                    stage="association_labels",
+                    cycle_started_at=cycle_started_at,
+                    last_successful_stage="reference_association",
+                    archive=archive,
+                    post_archive_substage="reference_association",
+                    association_rows_processed=association_result.processed_rows,
+                    association_rows_remaining=association_result.remaining_rows,
+                    warnings=["research_reference_association_batch_remaining"],
+                    status="partial",
+                )
+                self._publish_progress(result)
+                LOGGER.info("Reference association remains; labels, coverage, and replay deferred.")
+                return result
 
             result = _cycle_progress(
                 previous=result,
                 state="running",
-                stage="coverage",
+                stage="association_labels",
+                cycle_started_at=cycle_started_at,
+                last_successful_stage="reference_association",
+                archive=archive,
+                post_archive_substage="labels",
+                association_rows_processed=association_result.processed_rows,
+                association_rows_remaining=association_result.remaining_rows,
+            )
+            self._publish_progress(result)
+            self._start_stage_heartbeat_ticker()
+            try:
+                with self.session_factory() as session:
+                    label_result = refresh_research_archive_labels(session)
+                    session.commit()
+            finally:
+                self._stop_stage_heartbeat_ticker()
+            if label_result.remaining_markets > 0:
+                label_warnings = ["research_label_batch_budget_exhausted"]
+                label_blockers: list[str] = []
+                if label_result.blocked_missing_market_count > 0:
+                    label_warnings.append("research_label_markets_blocked_missing_market")
+                    label_blockers.append("research_label_market_missing")
+                result = _cycle_progress(
+                    previous=result,
+                    state="partial",
+                    stage="association_labels",
+                    cycle_started_at=cycle_started_at,
+                    last_successful_stage="reference_association",
+                    archive=archive,
+                    post_archive_substage="labels",
+                    association_rows_processed=association_result.processed_rows,
+                    association_rows_remaining=association_result.remaining_rows,
+                    label_markets_processed=label_result.processed_markets,
+                    label_markets_remaining=label_result.remaining_markets,
+                    label_markets_blocked_missing_market=label_result.blocked_missing_market_count,
+                    labels_processed=label_result.processed_markets,
+                    labels_remaining=label_result.remaining_markets,
+                    warnings=label_warnings,
+                    blockers=label_blockers,
+                    status="partial",
+                )
+                self._publish_progress(result)
+                LOGGER.info("Research labels remain; coverage and replay deferred.")
+                return result
+            result = _cycle_progress(
+                previous=result,
+                state="running",
+                stage="association_labels",
                 cycle_started_at=cycle_started_at,
                 last_successful_stage="association_labels",
                 archive=archive,
+                post_archive_substage="labels",
+                association_rows_processed=association_result.processed_rows,
+                association_rows_remaining=association_result.remaining_rows,
+                label_markets_processed=label_result.processed_markets,
+                label_markets_remaining=label_result.remaining_markets,
+                label_markets_blocked_missing_market=label_result.blocked_missing_market_count,
+                labels_processed=label_result.processed_markets,
+                labels_remaining=label_result.remaining_markets,
             )
             self._publish_progress(result)
+
+            def report_coverage_progress(progress: FrozenReplayProgress) -> None:
+                nonlocal result
+                result = _cycle_progress(
+                    previous=result,
+                    state="running",
+                    stage="coverage",
+                    cycle_started_at=cycle_started_at,
+                    last_successful_stage="association_labels",
+                    archive=archive,
+                    post_archive_substage="coverage_scan",
+                    coverage_dataset_watermark=progress.watermark_id,
+                    coverage_total_events=progress.total_events,
+                    coverage_events_scanned=progress.events_scanned,
+                    coverage_pages_completed=progress.pages_completed,
+                    coverage_partitions_completed=progress.partitions_completed,
+                    coverage_partitions_total=progress.partitions_total,
+                    coverage_max_page_size=progress.max_page_size,
+                )
+                self._update_progress(result)
+
             with self.session_factory() as session:
-                coverage = archive_research_coverage(session, now=checked_at)
-                session.commit()
+                snapshot = ResearchRepository(session).replay_event_snapshot()
+                result = _cycle_progress(
+                    previous=result,
+                    state="running",
+                    stage="coverage",
+                    cycle_started_at=cycle_started_at,
+                    last_successful_stage="association_labels",
+                    archive=archive,
+                    post_archive_substage="coverage_scan",
+                    coverage_dataset_watermark=snapshot.watermark_id,
+                    coverage_total_events=snapshot.event_count,
+                    coverage_events_scanned=0,
+                    coverage_pages_completed=0,
+                    coverage_partitions_completed=0,
+                    coverage_partitions_total=snapshot.partition_count,
+                    coverage_max_page_size=0,
+                )
+                self._publish_progress(result)
+                self._start_stage_heartbeat_ticker()
+                try:
+                    coverage = archive_research_coverage(
+                        session,
+                        now=checked_at,
+                        snapshot=snapshot,
+                        progress_callback=report_coverage_progress,
+                    )
+                    session.commit()
+                finally:
+                    self._stop_stage_heartbeat_ticker()
             archive = ArchiveResult(
                 archived_events=archive.archived_events,
                 archived_by_type=archive.archived_by_type,
                 outcomes_reconciled=archive.outcomes_reconciled,
                 coverage=coverage,
             )
+            frozen_coverage = coverage.get("frozen_snapshot", {})
+            result = _cycle_progress(
+                previous=result,
+                state="running",
+                stage="coverage",
+                cycle_started_at=cycle_started_at,
+                last_successful_stage="coverage",
+                archive=archive,
+                post_archive_substage="coverage",
+                coverage_dataset_watermark=frozen_coverage.get("watermark_id"),
+                coverage_total_events=frozen_coverage.get("total_events"),
+                coverage_events_scanned=frozen_coverage.get("events_scanned"),
+                coverage_pages_completed=frozen_coverage.get("pages_completed"),
+                coverage_partitions_completed=frozen_coverage.get("partitions_completed"),
+                coverage_partitions_total=frozen_coverage.get("partitions_total"),
+                coverage_max_page_size=frozen_coverage.get("max_page_size"),
+            )
+            self._publish_progress(result)
 
             def report_replay_progress(stage: str, details: dict[str, Any]) -> None:
                 nonlocal result
@@ -210,6 +362,11 @@ class ResearchWorker:
                     current_stage = stage.removesuffix("_started")
                 elif stage.endswith("_completed"):
                     current_stage = stage.removesuffix("_completed")
+                elif stage == "baseline_replay_progress":
+                    # Page updates are part of the same bounded replay stage;
+                    # keeping a stable stage name lets status consumers observe
+                    # the counters advancing before completion.
+                    current_stage = "baseline_replay"
                 else:
                     current_stage = stage
                 result = _cycle_progress(
@@ -221,6 +378,11 @@ class ResearchWorker:
                     archive=archive,
                     **progress_details,
                 )
+                if stage == "baseline_replay_progress":
+                    # The capped ticker owns persistence while the bounded
+                    # reader advances counters page by page.
+                    self._update_progress(result)
+                    return
                 self._publish_progress(result)
                 if stage.endswith("_started"):
                     self._start_stage_heartbeat_ticker()
@@ -233,6 +395,7 @@ class ResearchWorker:
                     session,
                     checked_at=checked_at,
                     archive_result=archive,
+                    replay_snapshot=snapshot,
                     progress_callback=report_replay_progress,
                 )
                 session.commit()
@@ -368,6 +531,11 @@ class ResearchWorker:
             self._current_progress = dict(result)
         self._write_heartbeat(heartbeat_at or datetime.now(UTC), self._progress_snapshot())
 
+    def _update_progress(self, result: dict[str, Any]) -> None:
+        """Update bounded scan counters without adding a heartbeat write per page."""
+        with self._progress_lock:
+            self._current_progress = dict(result)
+
     def _progress_snapshot(self) -> dict[str, Any]:
         with self._progress_lock:
             snapshot = dict(self._current_progress)
@@ -470,24 +638,66 @@ def run_research_cycle(
     *,
     checked_at: datetime | None = None,
     archive_result: ArchiveResult | None = None,
+    replay_snapshot=None,
     progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Execute archive -> labels -> baseline replay -> optional bounded calibration."""
     checked_at = checked_at or datetime.now(UTC)
     archive = archive_result or archive_research_events(session, now=checked_at)
-    if progress_callback is not None:
-        progress_callback("baseline_replay_started", {"last_successful_stage": "coverage"})
     repository = ResearchRepository(session)
-    events = repository.list_events(limit=None)
+    snapshot = replay_snapshot or repository.replay_event_snapshot()
     outcomes = repository.list_complete_outcomes()
     baseline = StrategyV2Repository(session).ensure_config_version(
         built_in_config_version("btc15_momentum_v2", V2_PARAMETERS)
     )
     if progress_callback is not None:
-        # Replay is CPU-only once its immutable inputs are loaded. End the read
-        # transaction before the long computation so liveness uses a fresh writer.
+        # Release the config-version write before the fresh-session heartbeat
+        # ticker starts, especially for SQLite-backed local validation.
         session.commit()
-    replay = DeterministicReplayEngine().replay(events, outcomes=outcomes)
+        progress_callback(
+            "baseline_replay_started",
+            {
+                "last_successful_stage": "coverage",
+                "post_archive_substage": "baseline_replay_scan",
+                "replay_dataset_watermark": snapshot.watermark_id,
+                "replay_total_events": snapshot.event_count,
+                "replay_events_scanned": 0,
+                "replay_pages_completed": 0,
+                "replay_partitions_completed": 0,
+                "replay_partitions_total": snapshot.partition_count,
+                "replay_max_page_size": 0,
+            },
+        )
+    reader = repository.frozen_replay_event_reader(snapshot)
+
+    def report_replay_page(progress: FrozenReplayProgress) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            "baseline_replay_progress",
+            {
+                "last_successful_stage": "coverage",
+                "post_archive_substage": "baseline_replay_scan",
+                "replay_dataset_watermark": progress.watermark_id,
+                "replay_total_events": progress.total_events,
+                "replay_events_scanned": progress.events_scanned,
+                "replay_pages_completed": progress.pages_completed,
+                "replay_partitions_completed": progress.partitions_completed,
+                "replay_partitions_total": progress.partitions_total,
+                "replay_max_page_size": progress.max_page_size,
+            },
+        )
+
+    replay = DeterministicReplayEngine().replay_ordered_pages(
+        reader.iter_pages(progress_callback=report_replay_page),
+        outcomes=outcomes,
+        retain_decisions=False,
+    )
+    if reader.events_scanned != snapshot.event_count:
+        raise RuntimeError(
+            "Frozen replay scan was incomplete: "
+            f"expected {snapshot.event_count}, scanned {reader.events_scanned}."
+        )
     outcome_input_hash = _replay_outcome_input_hash(outcomes)
     run_id = (
         "replay-"
@@ -509,18 +719,23 @@ def run_research_cycle(
             "baseline_strategy_config_version_id": baseline.strategy_config_version_id,
             "dataset_hash": replay.dataset_hash,
             "data_cutoff": checked_at,
-            "start_at": events[0].event_time if events else None,
-            "end_at": events[-1].event_time if events else None,
-            "unique_market_count": len(
-                {event.market_ticker for event in events if event.market_ticker}
-            ),
+            "start_at": snapshot.min_event_time,
+            "end_at": snapshot.max_event_time,
+            "unique_market_count": replay.unique_market_count,
             "event_count": replay.event_count,
-            "partition_manifest": None,
+            "partition_manifest": {
+                "watermark_id": snapshot.watermark_id,
+                "total_events": snapshot.event_count,
+                "events_scanned": reader.events_scanned,
+                "pages_completed": reader.pages_scanned,
+                "partitions_completed": reader.partitions_completed,
+                "partitions_total": snapshot.partition_count,
+            },
             "cost_model": replay.cost_model,
             "zero_entry_report": replay.zero_entry_report,
             "blocker_funnel": replay.blocker_funnel,
             "raw_metrics": {
-                "decision_count": len(replay.decisions),
+                "decision_count": replay.decision_count,
                 "trade_count": len(replay.trades),
                 "archive_coverage": archive.coverage,
                 "outcome_input_hash": outcome_input_hash,
@@ -550,8 +765,16 @@ def run_research_cycle(
             "baseline_replay_completed",
             {
                 "last_successful_stage": "baseline_replay",
+                "post_archive_substage": "baseline_replay",
                 "replay_run_id": run_id,
                 "zero_entry_report": replay.zero_entry_report,
+                "replay_dataset_watermark": snapshot.watermark_id,
+                "replay_total_events": snapshot.event_count,
+                "replay_events_scanned": reader.events_scanned,
+                "replay_pages_completed": reader.pages_scanned,
+                "replay_partitions_completed": reader.partitions_completed,
+                "replay_partitions_total": snapshot.partition_count,
+                "replay_max_page_size": reader.max_page_size,
             },
         )
     calibration_status = "DISABLED"
@@ -562,6 +785,7 @@ def run_research_cycle(
                 "calibration_started",
                 {
                     "last_successful_stage": "baseline_replay",
+                    "post_archive_substage": "calibration",
                     "replay_run_id": run_id,
                     "zero_entry_report": replay.zero_entry_report,
                 },
@@ -572,9 +796,46 @@ def run_research_cycle(
         existing_calibration = repository.get_calibration_run(calibration_run_id)
         if existing_calibration is not None and existing_calibration.holdout_used_at is not None:
             calibration_status = existing_calibration.status
+        elif snapshot.event_count > CALIBRATION_MATERIALIZE_EVENT_LIMIT:
+            calibration_status = "BLOCKED_REPLAY_EVENT_LIMIT"
+            calibration_run = repository.create_calibration_run(
+                {
+                    "calibration_run_id": calibration_run_id,
+                    "status": calibration_status,
+                    "calibration_schema_version": CALIBRATION_SCHEMA_VERSION,
+                    "replay_run_id": run_id,
+                    "dataset_hash": replay.dataset_hash,
+                    "code_commit_sha": resolve_code_version(),
+                    "random_seed": int(_hash(calibration_run_id)[:8], 16),
+                    "search_space_snapshot": None,
+                    "partition_manifest": {"event_limit": CALIBRATION_MATERIALIZE_EVENT_LIMIT},
+                    "frozen_holdout_hash": None,
+                    "evaluated_candidate_count": 0,
+                    "selected_candidate_id": None,
+                    "training_metrics": None,
+                    "validation_metrics": None,
+                    "test_metrics": None,
+                    "holdout_metrics": None,
+                    "bootstrap_metrics": None,
+                    "penalties": None,
+                    "warnings": [],
+                    "blockers": ["calibration_replay_event_limit_exceeded"],
+                    "started_at": checked_at,
+                    "finished_at": checked_at,
+                    "holdout_used_at": None,
+                }
+            )
+            del calibration_run
         else:
+            calibration_events = [
+                event
+                for page in repository.frozen_replay_event_reader(snapshot).iter_pages()
+                for event in page
+            ]
             calibration = run_bounded_calibration(
-                calibration_run_id=calibration_run_id, events=events, outcomes=outcomes
+                calibration_run_id=calibration_run_id,
+                events=calibration_events,
+                outcomes=outcomes,
             )
             calibration_status = calibration.status
             selected_metrics = calibration.candidate_metrics.get(
@@ -810,6 +1071,7 @@ def _record_research_heartbeat(
                     "worker_state": result.get("worker_state", "healthy"),
                     "cycle_state": result.get("cycle_state", "healthy"),
                     "current_stage": result.get("current_stage"),
+                    "post_archive_substage": result.get("post_archive_substage"),
                     "last_successful_stage": result.get("last_successful_stage"),
                     "cycle_id": result.get("cycle_id"),
                     "cycle_running": result.get("worker_state") == "running",
@@ -823,6 +1085,33 @@ def _record_research_heartbeat(
                     "failed_stage": result.get("failed_stage"),
                     "last_archive_run": archive,
                     "last_archive_batch": result.get("last_archive_batch"),
+                    "labels_processed": result.get("labels_processed"),
+                    "labels_remaining": result.get("labels_remaining"),
+                    "association_rows_processed": result.get("association_rows_processed"),
+                    "association_rows_remaining": result.get("association_rows_remaining"),
+                    "label_markets_processed": result.get("label_markets_processed"),
+                    "label_markets_remaining": result.get("label_markets_remaining"),
+                    "label_markets_blocked_missing_market": result.get(
+                        "label_markets_blocked_missing_market"
+                    ),
+                    "replay_dataset_watermark": result.get("replay_dataset_watermark"),
+                    "replay_total_events": result.get("replay_total_events"),
+                    "replay_events_scanned": result.get("replay_events_scanned"),
+                    "replay_pages_completed": result.get("replay_pages_completed"),
+                    "replay_partitions_completed": result.get(
+                        "replay_partitions_completed"
+                    ),
+                    "replay_partitions_total": result.get("replay_partitions_total"),
+                    "replay_max_page_size": result.get("replay_max_page_size"),
+                    "coverage_dataset_watermark": result.get("coverage_dataset_watermark"),
+                    "coverage_total_events": result.get("coverage_total_events"),
+                    "coverage_events_scanned": result.get("coverage_events_scanned"),
+                    "coverage_pages_completed": result.get("coverage_pages_completed"),
+                    "coverage_partitions_completed": result.get(
+                        "coverage_partitions_completed"
+                    ),
+                    "coverage_partitions_total": result.get("coverage_partitions_total"),
+                    "coverage_max_page_size": result.get("coverage_max_page_size"),
                     "last_replay_run": result.get("replay_run_id"),
                     "last_calibration_run": result.get("calibration_run_id"),
                     "zero_entry_report": result.get("zero_entry_report"),

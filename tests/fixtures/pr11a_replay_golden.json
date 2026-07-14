@@ -1,0 +1,52 @@
+{
+  "captured_from_commit": "9c358297c457be54f9683dc13187dd70bab033ab",
+  "fixture_event_ids": [
+    "nofill-feature",
+    "nofill-book",
+    "normal-feature",
+    "book-only",
+    "normal-book",
+    "partial-feature",
+    "missing-feature"
+  ],
+  "expected": {
+    "event_count": 7,
+    "unique_market_count": 5,
+    "decision_states": [
+      "DRY_RUN_ENTRY_SIGNAL",
+      "DRY_RUN_ENTRY_SIGNAL"
+    ],
+    "trades": [
+      ["M-NOFILL", "ENTRY_NO_FILL", null, null],
+      ["M-NORMAL", "CLOSED", "0.60", "1"]
+    ],
+    "pipeline": {
+      "all_samples": 4,
+      "prerequisites_ready": 2,
+      "timing": 2,
+      "side": 2,
+      "continuation": 2,
+      "hard_gates": 2,
+      "score": 2,
+      "edge": 2,
+      "signal": 2,
+      "intent": 2,
+      "fill": 1,
+      "opened": 1,
+      "exit_intent": 1,
+      "exit_fill": 1,
+      "exit": 1,
+      "closed": 1
+    },
+    "market_count": 5,
+    "markets_without_eligible_continuation": [],
+    "markets_with_signal_but_no_fill": ["M-NOFILL"],
+    "unique_market_rates_per_100": {
+      "qualified_setups": "40.00",
+      "entry_signals": "40.00",
+      "entry_intents": "40.00",
+      "executable_fills": "20.00",
+      "closed_positions": "20.00"
+    }
+  }
+}
