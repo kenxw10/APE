@@ -43,6 +43,10 @@ Local validation completed on the non-PostgreSQL workstation:
 - `python -m ruff check .`: passed.
 - `python -m compileall src scripts`: passed.
 - `python -m pip check`: passed with no broken requirements.
+
+The documentation-only head `02c1ff4e40b30b4c5b69c8833ba3734cf4cdeb21`
+also passed the same PostgreSQL 16 workflow in run `29308326949` with
+`584 passed, 284 warnings` and no skips.
 - `git diff --check`: passed.
 - `python scripts/research_smoke.py`: passed all existing archive, label, coverage, governance, read-API, and no-execution invariants.
 
@@ -67,5 +71,5 @@ Final hosted validation for implementation head `4379d19066fc55f69ab345dcd7de887
 ## F1-F3 Audit
 
 - F1 PASS: the checked-in compliance document records the exact F1/F2 test names and hosted PostgreSQL 16 evidence.
-- F2 PASS: the implementation head passed the exact unsharded workflow with PostgreSQL 16, `584 passed`, and no skips; the documentation-only follow-up is being validated by the same workflow.
+- F2 PASS: implementation head `4379d19066fc55f69ab345dcd7de88753f6a6fdd` passed the exact unsharded workflow with PostgreSQL 16, `584 passed`, and no skips; documentation-only head `02c1ff4e40b30b4c5b69c8833ba3734cf4cdeb21` passed the same workflow in run `29308326949`.
 - F3 PASS: the final PR body will record the documentation-only head, final workflow run and job, exact test totals, and R1-R6/F1-F3 status.
