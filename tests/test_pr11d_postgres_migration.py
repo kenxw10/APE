@@ -158,24 +158,12 @@ def test_postgres_migration_transaction_and_seed_recovery(
         connection.execute(
             text(
                 """
-                INSERT INTO research_archive_cursors (
-                    source_table,
-                    selector_mode,
-                    source_cursor,
-                    schema_version,
-                    bootstrap_complete,
-                    created_at,
-                    updated_at
-                )
-                VALUES (
-                    'reference_ticks',
-                    'TAIL',
-                    42,
-                    'research_archive_cursor_v1',
-                    TRUE,
-                    CURRENT_TIMESTAMP,
-                    CURRENT_TIMESTAMP
-                )
+                UPDATE research_archive_cursors
+                SET selector_mode = 'TAIL',
+                    source_cursor = 42,
+                    bootstrap_complete = TRUE,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE source_table = 'reference_ticks'
                 """
             )
         )
