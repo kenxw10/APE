@@ -57,6 +57,7 @@ _ARCHIVE_SOURCE_DETAILS = {
     "strategy_trade_intents": (StrategyTradeIntent, "MARKET_LIFECYCLE"),
     "strategy_position_outcomes": (StrategyPositionOutcome, "MARKET_LIFECYCLE"),
 }
+APPEND_ONLY_ARCHIVE_SOURCE_STAGES = tuple(_ARCHIVE_SOURCE_DETAILS)
 _REPLAY_EVENT_HASH_FIELDS = (
     "event_id",
     "market_ticker",
@@ -201,6 +202,21 @@ def archive_research_source_pending(session: Session, *, source_stage: str) -> b
         )
         is not None
     )
+
+
+def archive_bootstrap_required(session: Session) -> bool:
+    """Return whether strict historical bootstrap gating is still required."""
+    for source_stage in APPEND_ONLY_ARCHIVE_SOURCE_STAGES:
+        cursor = session.get(ResearchArchiveCursor, source_stage)
+        if (
+            cursor is None
+            or cursor.selector_mode != "TAIL"
+            or cursor.bootstrap_complete is not True
+            or cursor.source_cursor is None
+            or int(cursor.source_cursor) < 0
+        ):
+            return True
+    return False
 
 
 def refresh_research_archive_labels(session: Session) -> LabelRefreshResult:
