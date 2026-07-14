@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Integer, and_, case, cast, desc, func, select, text, tuple_
+from sqlalchemy import BigInteger, and_, case, cast, desc, func, select, text, tuple_
 from sqlalchemy.orm import Session
 
 from ape.db.models import (
@@ -60,6 +60,20 @@ class ReplayEventRecord:
     blockers: Any | None
 
 
+@dataclass(frozen=True)
+class FrozenReplayProgress:
+    """Monotonic bounded-reader progress suitable for worker heartbeats."""
+
+    watermark_id: int
+    total_events: int
+    events_scanned: int
+    pages_completed: int
+    partitions_completed: int
+    partitions_total: int
+    max_page_size: int
+    phase: str
+
+
 class FrozenReplayEventReader:
     """Keyset reader that releases each event page before reading the next one."""
 
@@ -78,19 +92,32 @@ class FrozenReplayEventReader:
         self.partitions_completed = 0
         self.max_page_size = 0
 
-    def iter_pages(self) -> Iterator[list[ReplayEventRecord]]:
+    def iter_pages(
+        self,
+        *,
+        progress_callback: Callable[[FrozenReplayProgress], None] | None = None,
+    ) -> Iterator[list[ReplayEventRecord]]:
         if self.snapshot.min_event_time is None or self.snapshot.max_event_time is None:
             return
         start = _utc(self.snapshot.min_event_time)
         final_end = _utc(self.snapshot.max_event_time) + timedelta(microseconds=1)
         while start < final_end:
             end = min(start + timedelta(seconds=REPLAY_EVENT_PARTITION_SECONDS), final_end)
-            yield from self._iter_partition(start=start, end=end)
+            yield from self._iter_partition(
+                start=start,
+                end=end,
+                progress_callback=progress_callback,
+            )
             self.partitions_completed += 1
+            self._report_progress(progress_callback, phase="partition")
             start = end
 
     def _iter_partition(
-        self, *, start: datetime, end: datetime
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        progress_callback: Callable[[FrozenReplayProgress], None] | None,
     ) -> Iterator[list[ReplayEventRecord]]:
         last_key: tuple[Any, ...] | None = None
         while True:
@@ -118,8 +145,30 @@ class FrozenReplayEventReader:
             # Mappings leave no ORM identity state behind; ending each read
             # transaction also prevents long archive scans from holding a snapshot.
             self.repository.session.commit()
+            self._report_progress(progress_callback, phase="page")
             if len(page) < self.page_size:
                 return
+
+    def _report_progress(
+        self,
+        callback: Callable[[FrozenReplayProgress], None] | None,
+        *,
+        phase: str,
+    ) -> None:
+        if callback is None:
+            return
+        callback(
+            FrozenReplayProgress(
+                watermark_id=self.snapshot.watermark_id,
+                total_events=self.snapshot.event_count,
+                events_scanned=self.events_scanned,
+                pages_completed=self.pages_scanned,
+                partitions_completed=self.partitions_completed,
+                partitions_total=self.snapshot.partition_count,
+                max_page_size=self.max_page_size,
+                phase=phase,
+            )
+        )
 
 
 class ResearchRepository:
@@ -722,7 +771,9 @@ class ResearchRepository:
         )
         numeric_group = case((numeric_source, 0), else_=1).label("numeric_group")
         numeric_value = case(
-            (numeric_source, cast(source_row_id, Integer)), else_=0
+            # Source identifiers come from database primary keys. Keep the
+            # comparator wide enough for PostgreSQL/SQLite bigint values.
+            (numeric_source, cast(source_row_id, BigInteger)), else_=0
         ).label("numeric_value")
         id_sort = ResearchReplayEvent.id.label("id_sort")
         order_columns = (

@@ -1,61 +1,62 @@
 # PR 11b Compliance Matrix
 
 PR 11b is a bounded-runtime correction for the existing database-only research
-worker. It adds no migration, environment variable, Railway service, dependency,
-strategy threshold, fee change, lifecycle change, governance change, paper path,
-live path, order path, private account path, or dashboard change.
+worker. It preserves the existing DRY_RUN-only research boundary. It adds no
+migration, required environment variable, Railway service, dependency, strategy
+threshold, feature, lifecycle, fee, governance, paper-trading, live-trading,
+order, private-channel, account, or dashboard behavior.
+
+## Remediation Matrix
+
+| Finding | Corrected implementation | Direct evidence |
+| --- | --- | --- |
+| F1 reference association | `src/ape/research/archive.py` returns bounded processed/remaining counts and commits every association batch. `src/ape/research/service.py` makes association a durable `association_labels` substage that gates labels, coverage, and replay. `src/ape/research/status.py` exposes association and label counters. | `test_f1_association_batches_commit_resume_and_gate_labels_coverage_and_replay`; `test_f1_committed_association_progress_survives_a_later_label_failure`. |
+| F2 full-dataset replay denominator | `src/ape/research/replay.py` records every non-null market ticker consumed by the frozen dataset, including non-feature rows and incomplete feature rows, and uses that set for market counts, rates, and continuation gaps. | `tests/fixtures/pr11a_replay_golden.json`; `test_f2_pr11a_golden_replay_semantics_match_small_and_database_bounded_paths`. The test compares all unchanged fields to the captured PR 11a output and separately proves the audit-required full-dataset continuation correction. |
+| F3 advancing scan progress | `src/ape/research/repository.py` emits bounded page/partition callbacks after each completed page. `src/ape/research/service.py` starts coverage/replay with frozen totals, updates in-memory counters monotonically, and lets the capped ticker persist them. `src/ape/research/status.py` exposes the progress fields and `post_archive_substage`. | `test_research_scan_heartbeats_publish_advancing_page_progress` pauses two coverage and two replay pages and proves fresh persisted/status counters rise before completion and stop after terminal state. |
+| F4 unmatched outcomes | `src/ape/research/archive.py` distinguishes persisted labels from unresolved missing-market outcomes. `src/ape/research/service.py` reports a partial cycle with an explicit blocker and defers downstream work until the source market appears. | `test_f4_unmatched_outcomes_block_downstream_work_and_resume_when_market_arrives`. |
+| F5 zero-entry schema and sampling | `src/ape/research/replay.py` adds a report schema version plus per-distribution total observations, sample limit, deterministic method, method version, and truncation flag. Below the cap arrays retain input order exactly; above it stable-hash top-k is independent of page and partition boundaries. | `test_f5_zero_entry_sampling_is_exact_below_cap_and_deterministic_across_pages`; `test_f2_pr11a_golden_replay_semantics_match_small_and_database_bounded_paths`. |
+| F6 missing behavioral proof | The scoped tests directly exercise database-backed page/partition parity, complete tie ordering, bigint source IDs, watermark exclusion, bounded identity map and decisions, association/label gating, interval-bounded label queries, frozen coverage payload, bounded coverage page size, scan-heartbeat progress, calibration limit blocking, committed-stage failures, and the PR 11a golden fixture. | `tests/test_pr11b_scope_contract.py`; `tests/test_research_runtime.py`; `tests/test_research_archive.py`; `tests/test_replay_engine.py`. |
+| F7 truthful documentation | This matrix and the existing draft PR body map the corrective work and the original R1-R9 requirements to implementation and direct tests. | `docs/PR11B_COMPLIANCE.md`; PR 39 body. |
+
+## Original R1-R9 Mapping
 
 | Requirement | Implementation | Direct evidence |
 | --- | --- | --- |
-| R1 frozen replay input | `FrozenReplayEventReader` captures an event-ID watermark, count, time range, and page metrics before a keyset scan. It excludes `COVERAGE_REPORT` rows and orders by the exact replay key. | `test_r1_frozen_reader_uses_watermark_keyset_pages_and_never_list_events_none` proves later rows are excluded and production never calls `list_events(limit=None)`. |
-| R2 incremental replay parity | The public `replay()` remains a small-fixture API; production uses `replay_ordered_pages()` and retains only active lifecycle state, trades, bounded samples, and optional decisions. | `test_r2_incremental_replay_matches_small_fixture_api_for_pages_and_ties` compares every result field at page sizes 1, 2, 17, and 250. |
-| R3 bounded replay evidence | Production does not retain decision objects. Exact counters and unique-market state are retained; distributions are exact through 2,000 values and then expose deterministic sampled evidence with schema metadata. | `test_r3_large_incremental_replay_keeps_decisions_and_distributions_bounded`. |
-| R4 bounded labels | At most 25 current-schema markets are labeled per cycle. Labels query only the market interval plus the 65-second label horizon and commit before later stages. | `test_r4_labels_are_bounded_resumable_and_mark_current_schema`; `test_r6_error_after_a_label_commit_preserves_the_resumable_label_progress`. |
-| R5 bounded coverage | Coverage consumes the same frozen reader and persists its report only after its complete scan. It keeps the existing coverage payload and records scan metrics. | `test_r5_coverage_uses_the_same_frozen_snapshot_and_excludes_later_rows`. |
-| R6 truthful worker stages | Worker order is archive, labels, full frozen coverage, full frozen baseline replay, and optional calibration. Label backlog returns `partial`; coverage, labels, and replay publish fresh running heartbeats. | `tests/test_research_runtime.py`, including long association-label, coverage, baseline-replay, and calibration stages. |
-| R7 calibration guard | Disabled calibration does nothing. Enabled calibration only materializes a second bounded frozen scan when the dataset is at or below the fixed 20,000-event safety limit; otherwise it persists `BLOCKED_REPLAY_EVENT_LIMIT`. | `test_r7_disabled_calibration_cannot_run_or_materialize_replay_events`. |
-| R8 acceptance coverage | The PR-specific contract checks reader, parity, page boundaries, later inserts, bounded state, label resumption, coverage, errors after committed progress, and the disabled-calibration boundary. | `tests/test_pr11b_scope_contract.py`. |
-| R9 documentation and boundaries | This document, `PR11_COMPLIANCE.md`, research documentation, and Railway notes describe only the bounded runtime correction. | Static scope assertions in `test_r8_and_r9_keep_calibration_disabled_and_scope_boundaries_static`. |
+| R1 frozen input | `FrozenReplayEventReader` captures an event-ID watermark and scans it with deterministic keyset pages. | `test_r1_frozen_reader_uses_watermark_keyset_pages_and_never_list_events_none`; F6 database reader checks. |
+| R2 incremental parity | The small-fixture `replay()` API remains, while production uses `replay_ordered_pages()` with bounded retained state. | `test_r2_incremental_replay_matches_small_fixture_api_for_pages_and_ties`; F2 golden fixture across page sizes 1, 2, 17, and 250 and two partition widths. |
+| R3 bounded evidence | Decisions are optional, active lifecycle state/trades are bounded, and zero-entry distributions have explicit bounded sampling metadata. | `test_r3_large_incremental_replay_keeps_decisions_and_distributions_bounded`; F5 sampling tests. |
+| R4 bounded labels | Label work is bounded to the existing 25-market limit, durable, resumable, and now blocks correctly on unmatched markets. | `test_r4_labels_are_bounded_resumable_and_mark_current_schema`; F1, F4, and F6 label-bound tests. |
+| R5 bounded coverage | Coverage reads the same frozen snapshot and is complete only after its full bounded scan. | `test_r5_coverage_uses_the_same_frozen_snapshot_and_excludes_later_rows`; F3 progress and F6 frozen-payload tests. |
+| R6 truthful stages | Stages expose archive, association/labels, coverage, replay, and calibration progress without per-event heartbeats. | `tests/test_research_runtime.py`, including the F3 threaded scan-progress test. |
+| R7 calibration guard | Disabled calibration remains inactive; enabled calibration persists a fail-closed result before oversized event materialization. | `test_r7_disabled_calibration_cannot_run_or_materialize_replay_events`; `test_f6_enabled_oversized_calibration_persists_a_fail_closed_run_without_materializing`. |
+| R8 acceptance coverage | The PR-specific contract proves ordering, resumption, bounded memory, frozen compatibility, and failure preservation directly against database-backed paths. | `tests/test_pr11b_scope_contract.py`. |
+| R9 boundaries and documentation | No migration, environment, deployment, service, trading, execution, or strategy behavior changed. | `test_r8_and_r9_keep_calibration_disabled_and_scope_boundaries_static`; this document and PR 39 body. |
 
 ## Runtime Facts
 
 - Archive batches remain 250 rows with the existing 20-batch runtime budget.
-- Label work is bounded to 25 markets per cycle and resumes from the durable
+- Reference association uses that same 250-row code-level batch bound, commits
+  each batch, and reports exact associable rows remaining.
+- Labels remain limited to 25 markets per cycle and use the durable
   `quality_flags.label_schema_version` marker.
-- Replay and coverage share one post-label frozen event snapshot. A later insert
-  cannot enter either run.
-- Existing small-fixture replay keeps the exact SHA-256 input hash:
-  `sha256("|".join(event_hashes))`.
-- A worker never reports coverage or replay complete until the corresponding full
-  frozen scan is complete.
+- Coverage and replay start only after association and label remaining counts are
+  both zero. A missing market keeps the cycle partial and visible until it can be
+  labeled.
+- Coverage and replay publish a frozen watermark and total at stage start and
+  only reach terminal state after their scanned count equals that frozen total.
+- Existing small-fixture replay retains the original SHA-256 input hash shape.
 
-## Validation
+## Safety and Boundaries
 
-`python -m pytest --collect-only -q -o addopts=` collected 549 tests. All 549
-completed locally in deterministic test-file shards; the 63-node collector file
-ran in four non-overlapping 16/16/16/15 node shards and the 76-node observer file
-ran in four non-overlapping 19-node shards. The desktop sandbox stopped the exact
-unsharded `python -m pytest` process at roughly 26 percent without a failure or
-exit result, so the existing pull-request workflow remains the authoritative exact
-unsharded gate. That workflow runs:
-
-```text
-python -m pytest
-python -m ruff check .
-python -m compileall src scripts
-python -m pip check
-```
-
-Local focused suites, all local shards, Ruff, `compileall`, `pip check`,
-`git diff --check`, and `python scripts/research_smoke.py` passed. The smoke test
-confirmed archived labels, replay/calibration evidence, read APIs, and the absence
-of paper/live/order/private/account capability.
+The application remains DRY_RUN-only for research validation with
+`TRADING_ENABLED=false` and `EXECUTE=false`. PR 11b has no paper trading, live
+trading, order, cancel, private WebSocket, account, balance, fill, credential,
+or execution capability. It introduces no migration, required environment
+variable, Railway service, dependency, or deployment change.
 
 ## Literal Self-Audit
 
-R1-R9 were implemented without reducing, deferring, substituting, or relabeling
-their required behavior. This PR contains no migration, environment variable,
-service, deployment, strategy-frequency, threshold, or safety-policy change.
-The application remains DRY_RUN-only with `TRADING_ENABLED=false` and
-`EXECUTE=false`; it has no paper trading, live trading, order, cancel, private
-channel, account, or credential capability.
+F1-F7 and R1-R9 are implemented as documented above. No requirement was
+reduced, deferred, substituted, or relabeled. The final validation commands,
+their exact results, the final head SHA, and the exact unsharded GitHub Actions
+result are recorded in the existing draft PR before it is marked compliant.

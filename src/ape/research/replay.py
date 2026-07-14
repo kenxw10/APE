@@ -100,7 +100,9 @@ class _PendingExit:
 
 
 ZERO_ENTRY_DISTRIBUTION_CAP = 2_000
-ZERO_ENTRY_SAMPLE_SCHEMA_VERSION = "pr11b-v1"
+ZERO_ENTRY_REPORT_SCHEMA_VERSION = "zero_entry_report_v1"
+ZERO_ENTRY_SAMPLE_SCHEMA_VERSION = "pr11b-v2"
+ZERO_ENTRY_SAMPLING_METHOD = "stable_hash_top_k"
 
 
 class _ZeroEntryAccumulator:
@@ -108,7 +110,6 @@ class _ZeroEntryAccumulator:
 
     def __init__(self) -> None:
         self.sample_count = 0
-        self.observed_markets: set[str] = set()
         self.continuation_markets: set[str] = set()
         self.qualified_markets: set[str] = set()
         self.signal_markets: set[str] = set()
@@ -130,7 +131,6 @@ class _ZeroEntryAccumulator:
 
     def add(self, market: str, evaluation: V2FeatureEvaluation) -> None:
         self.sample_count += 1
-        self.observed_markets.add(market)
         self.decision_states[evaluation.state] = self.decision_states.get(evaluation.state, 0) + 1
         features = evaluation.measurements.get("features") or {}
         mode = str(evaluation.candidate_mode or "missing")
@@ -207,8 +207,16 @@ class _ZeroEntryAccumulator:
                 }
             )
 
-    def report(self, funnel: dict[str, int], trades: Iterable[ReplayTrade]) -> dict[str, Any]:
-        market_count = len(self.observed_markets)
+    def report(
+        self,
+        funnel: dict[str, int],
+        trades: Iterable[ReplayTrade],
+        *,
+        dataset_markets: set[str],
+    ) -> dict[str, Any]:
+        # The pre-PR11 replay denominator was every non-null market ticker in
+        # the ordered input, not only markets that yielded a valid feature row.
+        market_count = len(dataset_markets)
         fills_per_100 = (
             Decimal("0")
             if market_count == 0
@@ -222,6 +230,7 @@ class _ZeroEntryAccumulator:
             if trade.status in {"ENTRY_NO_FILL", "ENTRY_EXPIRED"}
         }
         report = {
+            "zero_entry_report_schema_version": ZERO_ENTRY_REPORT_SCHEMA_VERSION,
             "pipeline": dict(funnel),
             "pipeline_percentages": {
                 stage: str((Decimal(count) * 100 / Decimal(denominator)).quantize(Decimal("0.01")))
@@ -239,7 +248,7 @@ class _ZeroEntryAccumulator:
             "top_near_miss_samples": self.near_misses,
             "markets_with_signal_but_no_fill": sorted(no_fill_markets),
             "markets_without_eligible_continuation": sorted(
-                self.observed_markets - self.continuation_markets
+                dataset_markets - self.continuation_markets
             ),
             "market_count": market_count,
             "unique_market_rates_per_100": {
@@ -265,7 +274,10 @@ class _ZeroEntryAccumulator:
             distribution_metadata[key] = distribution.metadata()
         report["distribution_sampling"] = {
             "schema_version": ZERO_ENTRY_SAMPLE_SCHEMA_VERSION,
+            # Retain the old key for existing read-only consumers while the
+            # explicit per-distribution metadata is the canonical contract.
             "cap": ZERO_ENTRY_DISTRIBUTION_CAP,
+            "sample_limit": ZERO_ENTRY_DISTRIBUTION_CAP,
             "distributions": distribution_metadata,
         }
         return report
@@ -285,7 +297,7 @@ class _BoundedDistribution:
         if self._all:
             self._sample = [
                 (_stable_sample_key(item, index), item)
-                for index, item in enumerate(self._all)
+                for index, item in enumerate(self._all, start=1)
             ]
             self._all = []
         candidate = (_stable_sample_key(value, self.count), value)
@@ -300,8 +312,15 @@ class _BoundedDistribution:
 
     def metadata(self) -> dict[str, Any]:
         return {
-            "observed_count": self.count,
-            "sampled": self.count > ZERO_ENTRY_DISTRIBUTION_CAP,
+            "total_observation_count": self.count,
+            "sample_limit": ZERO_ENTRY_DISTRIBUTION_CAP,
+            "sampling_method": (
+                "input_order_exact"
+                if self.count <= ZERO_ENTRY_DISTRIBUTION_CAP
+                else ZERO_ENTRY_SAMPLING_METHOD
+            ),
+            "sampling_method_version": ZERO_ENTRY_SAMPLE_SCHEMA_VERSION,
+            "truncated": self.count > ZERO_ENTRY_DISTRIBUTION_CAP,
         }
 
 
@@ -604,7 +623,11 @@ class _IncrementalReplayState:
         return ReplayResult(
             decisions=tuple(self.decisions),
             trades=tuple(self.trades),
-            zero_entry_report=self.audit.report(self.funnel, self.trades),
+            zero_entry_report=self.audit.report(
+                self.funnel,
+                self.trades,
+                dataset_markets=self.market_tickers,
+            ),
             blocker_funnel=self.blockers,
             event_count=self.event_count,
             decision_count=self.decision_count,
@@ -722,6 +745,7 @@ def zero_entry_audit(
                 }
             )
     return {
+        "zero_entry_report_schema_version": ZERO_ENTRY_REPORT_SCHEMA_VERSION,
         "pipeline": dict(funnel),
         "pipeline_percentages": {
             stage: str(

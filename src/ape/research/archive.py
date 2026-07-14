@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -26,7 +27,11 @@ from ape.kalshi.errors import KalshiError
 from ape.kalshi.reference_messages import BRTI_SOURCE
 from ape.research import REPLAY_SCHEMA_VERSION, RESEARCH_LABEL_SCHEMA_VERSION
 from ape.research.fees import verified_kalshi_taker_fee_model
-from ape.research.repository import ReplayEventSnapshot, ResearchRepository
+from ape.research.repository import (
+    FrozenReplayProgress,
+    ReplayEventSnapshot,
+    ResearchRepository,
+)
 
 ARCHIVE_BATCH_SIZE = 250
 ARCHIVE_MAX_BATCHES_PER_CYCLE = 20
@@ -89,6 +94,13 @@ class ArchiveBatchResult:
 class LabelRefreshResult:
     processed_markets: int
     remaining_markets: int
+    blocked_missing_market_count: int
+
+
+@dataclass(frozen=True)
+class ReferenceAssociationResult:
+    processed_rows: int
+    remaining_rows: int
 
 
 def archive_research_events(session: Session, *, now: datetime | None = None) -> ArchiveResult:
@@ -101,7 +113,12 @@ def archive_research_events(session: Session, *, now: datetime | None = None) ->
             _merge_archive_counts(counts, batch.archived_by_type)
             if batch.source_rows == 0:
                 break
-    refresh_research_archive_labels(session)
+    association = refresh_research_reference_associations(session)
+    if association.remaining_rows:
+        return ArchiveResult(sum(counts.values()), counts, 0, {})
+    labels = refresh_research_archive_labels(session)
+    if labels.remaining_markets:
+        return ArchiveResult(sum(counts.values()), counts, 0, {})
     coverage = archive_research_coverage(session, now=checked_at)
     return ArchiveResult(sum(counts.values()), counts, 0, coverage)
 
@@ -130,11 +147,19 @@ def archive_research_source_pending(session: Session, *, source_stage: str) -> b
 
 
 def refresh_research_archive_labels(session: Session) -> LabelRefreshResult:
-    """Persist reference association and mature labels independently of replay work."""
+    """Persist one bounded batch of mature labels independently of replay work."""
     repository = ResearchRepository(session)
-    _associate_unassigned_reference_events(session)
     result = _refresh_mature_labels(session, repository)
     session.flush()
+    return result
+
+
+def refresh_research_reference_associations(session: Session) -> ReferenceAssociationResult:
+    """Commit one bounded, idempotent reference-to-market association batch."""
+    result = _associate_unassigned_reference_events(session)
+    # Association progress is intentionally durable before the later label,
+    # coverage, and replay stages begin.
+    session.commit()
     return result
 
 
@@ -143,11 +168,17 @@ def archive_research_coverage(
     *,
     now: datetime | None = None,
     snapshot: ReplayEventSnapshot | None = None,
+    progress_callback: Callable[[FrozenReplayProgress], None] | None = None,
 ) -> dict[str, Any]:
     checked_at = _utc(now or datetime.now(UTC))
     repository = ResearchRepository(session)
     frozen_snapshot = snapshot or repository.replay_event_snapshot()
-    coverage = _coverage(session, data_cutoff=checked_at, snapshot=frozen_snapshot)
+    coverage = _coverage(
+        session,
+        data_cutoff=checked_at,
+        snapshot=frozen_snapshot,
+        progress_callback=progress_callback,
+    )
     repository.archive_event(_coverage_event(coverage, checked_at))
     session.flush()
     return coverage
@@ -471,8 +502,8 @@ def _active_btc15_market_ticker(session: Session, event_time: datetime) -> str |
     )
 
 
-def _associate_unassigned_reference_events(session: Session) -> None:
-    """Backfill legacy global reference events when their BTC15 window is known."""
+def _associate_unassigned_reference_events(session: Session) -> ReferenceAssociationResult:
+    """Backfill one bounded batch of legacy global reference events."""
     active_market_exists = exists(
         select(1).where(
             Market.open_time.is_not(None),
@@ -485,19 +516,43 @@ def _associate_unassigned_reference_events(session: Session) -> None:
             ),
         )
     )
-    rows = session.scalars(
-        select(ResearchReplayEvent)
-        .where(
-            ResearchReplayEvent.event_type == "REFERENCE",
-            ResearchReplayEvent.market_ticker.is_(None),
-            active_market_exists,
+    rows = list(
+        session.scalars(
+            select(ResearchReplayEvent)
+            .where(
+                ResearchReplayEvent.event_type == "REFERENCE",
+                ResearchReplayEvent.market_ticker.is_(None),
+                active_market_exists,
+            )
+            .order_by(ResearchReplayEvent.id.asc())
+            .limit(ARCHIVE_BATCH_SIZE)
         )
-        .order_by(ResearchReplayEvent.id.asc())
-        .limit(ARCHIVE_BATCH_SIZE)
     )
+    processed_rows = 0
     for event in rows:
-        event.market_ticker = _active_btc15_market_ticker(session, _utc(event.event_time))
+        market_ticker = _active_btc15_market_ticker(session, _utc(event.event_time))
+        if market_ticker is None:
+            continue
+        event.market_ticker = market_ticker
         event.event_hash = _normalized_event_hash(event)
+        processed_rows += 1
+    session.flush()
+    remaining_rows = int(
+        session.scalar(
+            select(func.count())
+            .select_from(ResearchReplayEvent)
+            .where(
+                ResearchReplayEvent.event_type == "REFERENCE",
+                ResearchReplayEvent.market_ticker.is_(None),
+                active_market_exists,
+            )
+        )
+        or 0
+    )
+    return ReferenceAssociationResult(
+        processed_rows=processed_rows,
+        remaining_rows=remaining_rows,
+    )
 
 
 def _orderbook_event(row: OrderbookSnapshot) -> dict[str, Any]:
@@ -704,6 +759,7 @@ def _coverage(
     *,
     data_cutoff: datetime,
     snapshot: ReplayEventSnapshot | None = None,
+    progress_callback: Callable[[FrozenReplayProgress], None] | None = None,
 ) -> dict[str, Any]:
     repository = ResearchRepository(session)
     frozen_snapshot = snapshot or repository.replay_event_snapshot()
@@ -713,7 +769,7 @@ def _coverage(
     by_type: dict[str, int] = {}
     readiness: dict[str, int] = {}
     per_market: dict[str, dict[str, Any]] = {}
-    for page in reader.iter_pages():
+    for page in reader.iter_pages(progress_callback=progress_callback):
         for event in page:
             event_count += 1
             by_type[event.event_type] = by_type.get(event.event_type, 0) + 1
@@ -788,6 +844,8 @@ def _coverage(
             "events_scanned": reader.events_scanned,
             "pages_completed": reader.pages_scanned,
             "partitions_completed": reader.partitions_completed,
+            "partitions_total": frozen_snapshot.partition_count,
+            "max_page_size": reader.max_page_size,
         },
     }
 
@@ -827,25 +885,30 @@ def _refresh_mature_labels(
             label_schema != RESEARCH_LABEL_SCHEMA_VERSION,
         ),
     )
-    remaining_total = int(
-        session.scalar(
-            select(func.count()).select_from(ResearchMarketOutcome).where(*pending_filter)
+    valid_market_exists = exists(
+        select(1).where(
+            Market.market_ticker == ResearchMarketOutcome.market_ticker,
+            Market.open_time.is_not(None),
+            Market.close_time.is_not(None),
         )
-        or 0
     )
     outcomes = list(
         session.scalars(
             select(ResearchMarketOutcome)
-            .where(*pending_filter)
+            .where(*pending_filter, valid_market_exists)
             .order_by(ResearchMarketOutcome.updated_at.asc(), ResearchMarketOutcome.id.asc())
             .limit(LABEL_MARKETS_PER_CYCLE)
         )
     )
+    processed_markets = 0
     for outcome in outcomes:
         market = session.scalar(
             select(Market).where(Market.market_ticker == outcome.market_ticker)
         )
-        if market is None:
+        if market is None or market.open_time is None or market.close_time is None:
+            # The correlated query above excludes this path in normal operation.
+            # Keep it defensive so a concurrent source deletion never marks an
+            # unmatched outcome as processed.
             continue
         start = _utc(
             market.open_time
@@ -874,10 +937,26 @@ def _refresh_mature_labels(
             **(outcome.quality_flags if isinstance(outcome.quality_flags, dict) else {}),
             **_labels_for_market(session, market, ticks, outcome, start=start, end=end),
         }
+        processed_markets += 1
     session.flush()
+    remaining_markets = int(
+        session.scalar(
+            select(func.count()).select_from(ResearchMarketOutcome).where(*pending_filter)
+        )
+        or 0
+    )
+    blocked_missing_market_count = int(
+        session.scalar(
+            select(func.count())
+            .select_from(ResearchMarketOutcome)
+            .where(*pending_filter, ~valid_market_exists)
+        )
+        or 0
+    )
     return LabelRefreshResult(
-        processed_markets=len(outcomes),
-        remaining_markets=max(0, remaining_total - len(outcomes)),
+        processed_markets=processed_markets,
+        remaining_markets=remaining_markets,
+        blocked_missing_market_count=blocked_missing_market_count,
     )
 
 
