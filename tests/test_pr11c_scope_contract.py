@@ -267,9 +267,36 @@ def test_empty_bootstrap_window_is_durable_work_and_counts_against_budget(
     config, engine, factory = _factory(tmp_path)
     monkeypatch.setattr(archive_module, "ARCHIVE_BOOTSTRAP_WINDOW_SPAN", 2)
     monkeypatch.setattr(research_service, "ARCHIVE_MAX_BATCHES_PER_CYCLE", 1)
+    forbidden_calls: list[str] = []
+
+    def forbidden(name):
+        def fail(*_args, **_kwargs):
+            forbidden_calls.append(name)
+            raise AssertionError(f"{name} must not run before archive bootstrap resumes")
+
+        return fail
+
+    monkeypatch.setattr(
+        research_service,
+        "refresh_research_reference_associations",
+        forbidden("association"),
+    )
+    monkeypatch.setattr(
+        research_service,
+        "refresh_research_archive_labels",
+        forbidden("labels"),
+    )
+    monkeypatch.setattr(
+        research_service,
+        "archive_research_coverage",
+        forbidden("coverage"),
+    )
+    monkeypatch.setattr(research_service, "run_research_cycle", forbidden("replay"))
     try:
         with factory() as session:
-            session.add_all([_reference(row_id=1), _reference(row_id=3)])
+            first = _reference(row_id=1)
+            later = _reference(row_id=3)
+            session.add_all([first, later, _archive_event_for_reference(first)])
             session.commit()
         worker = ResearchWorker(
             config=config,
@@ -280,8 +307,101 @@ def test_empty_bootstrap_window_is_durable_work_and_counts_against_budget(
         first = worker.run_once()
         assert first["status"] == "partial"
         assert first["completed_archive_batches"] == 1
+        assert first["archive_event_count"] == 0
+        assert first["last_archive_batch"] == {
+            "source_stage": "reference_ticks",
+            "source_rows": 0,
+            "archived_events": 0,
+            "batch_count": 1,
+        }
         assert first["archive_selector_mode"] == "BOOTSTRAP_VERIFY"
+        assert first["archive_source_cursor"] == 2
+        assert first["archive_bootstrap_target"] == 3
+        assert first["archive_verification_window_start"] == 3
+        assert first["archive_verification_window_end"] == 3
+        assert first["archive_missing_rows_archived"] == 0
         assert first["archive_bootstrap_complete"] is False
+        assert forbidden_calls == []
+
+        resumed_worker = ResearchWorker(
+            config=config,
+            safety=assess_startup_safety(config),
+            session_factory=factory,
+            started_at=AT + timedelta(seconds=1),
+        )
+        assert resumed_worker is not worker
+        with factory() as session:
+            cursor = session.get(ResearchArchiveCursor, "reference_ticks")
+            assert cursor is not None
+            assert cursor.selector_mode == "BOOTSTRAP_VERIFY"
+            assert cursor.source_cursor == 2
+            assert cursor.frozen_bootstrap_target == 3
+            assert cursor.verification_window_start == 3
+            assert cursor.verification_window_end == 3
+            assert cursor.bootstrap_complete is False
+            assert session.scalar(select(ResearchReplayEvent.id)) is not None
+    finally:
+        engine.dispose()
+
+
+def test_source_retention_below_committed_cursor_does_not_regress_tail(
+    tmp_path,
+):
+    _config, engine, factory = _factory(tmp_path)
+    try:
+        with factory() as session:
+            session.add(_reference(row_id=1))
+            session.commit()
+
+            first = archive_research_batch(session, source_stage="reference_ticks")
+            session.commit()
+            assert first.source_cursor == 1
+            completed = archive_research_batch(session, source_stage="reference_ticks")
+            session.commit()
+            assert completed.operation_performed is True
+            cursor = session.get(ResearchArchiveCursor, "reference_ticks")
+            assert cursor is not None
+            assert cursor.selector_mode == "TAIL"
+            assert cursor.source_cursor == 1
+
+            session.delete(session.get(ReferenceTick, 1))
+            session.commit()
+
+        with factory() as session:
+            cursor = session.get(ResearchArchiveCursor, "reference_ticks")
+            assert cursor is not None
+            assert cursor.selector_mode == "TAIL"
+            assert cursor.source_cursor == 1
+            assert archive_research_source_pending(
+                session, source_stage="reference_ticks"
+            ) is False
+
+            session.add(_reference(row_id=2, received_at=AT + timedelta(seconds=1)))
+            session.commit()
+
+        with factory() as session:
+            assert archive_research_source_pending(
+                session, source_stage="reference_ticks"
+            ) is True
+            tail = archive_research_batch(session, source_stage="reference_ticks")
+            session.commit()
+            assert tail.source_rows == 1
+            assert tail.selector_mode == "TAIL"
+            assert tail.source_cursor == 2
+            assert session.scalars(
+                select(ResearchReplayEvent.source_row_id).where(
+                    ResearchReplayEvent.source_table == "reference_ticks"
+                )
+            ).all() == ["1", "2"]
+
+        with factory() as session:
+            cursor = session.get(ResearchArchiveCursor, "reference_ticks")
+            assert cursor is not None
+            assert cursor.selector_mode == "TAIL"
+            assert cursor.source_cursor == 2
+            assert archive_research_source_pending(
+                session, source_stage="reference_ticks"
+            ) is False
     finally:
         engine.dispose()
 
@@ -319,28 +439,54 @@ def test_rollback_keeps_archive_rows_and_cursor_atomic_then_restart_resumes(tmp_
         engine.dispose()
 
 
-def test_duplicate_retry_does_not_double_advance_cursor(tmp_path, monkeypatch):
+def test_duplicate_retry_rolls_back_mutated_cursor_and_archive_then_retries(
+    tmp_path, monkeypatch
+):
     config, engine, factory = _factory(tmp_path)
-    original = research_service.archive_research_batch
-    attempts = 0
+    original_archive_events_batch = research_service.ResearchRepository.archive_events_batch
+    sessions = []
+    first_mutation: dict[str, int] = {}
+    after_rollback: dict[str, object] = {}
     try:
         with factory() as session:
             session.add(_reference(row_id=1))
             session.commit()
 
-        def duplicate_once(session, *, source_stage: str):
-            nonlocal attempts
-            attempts += 1
-            if attempts == 1:
+        def duplicate_after_flush(repository, values):
+            sessions.append(repository.session)
+            changed = original_archive_events_batch(repository, values)
+            if len(sessions) == 1:
+                first_mutation["cursor"] = repository.session.get(
+                    ResearchArchiveCursor, "reference_ticks"
+                ).source_cursor
+                first_mutation["event_count"] = len(
+                    repository.session.scalars(select(ResearchReplayEvent.id)).all()
+                )
                 raise IntegrityError(
                     "INSERT research_replay_events",
                     {},
-                    Exception("UNIQUE constraint failed: research_replay_events.source_table"),
+                    Exception(
+                        "UNIQUE constraint failed: research_replay_events.source_table, "
+                        "research_replay_events.source_row_id"
+                    ),
                 )
-            return original(session, source_stage=source_stage)
+            return changed
 
-        monkeypatch.setattr(research_service, "archive_research_batch", duplicate_once)
-        monkeypatch.setattr(research_service.time, "sleep", lambda _seconds: None)
+        def inspect_rollback(_seconds):
+            with factory() as session:
+                cursor = session.get(ResearchArchiveCursor, "reference_ticks")
+                after_rollback["cursor_mode"] = cursor.selector_mode
+                after_rollback["cursor"] = cursor.source_cursor
+                after_rollback["event_count"] = len(
+                    session.scalars(select(ResearchReplayEvent.id)).all()
+                )
+
+        monkeypatch.setattr(
+            research_service.ResearchRepository,
+            "archive_events_batch",
+            duplicate_after_flush,
+        )
+        monkeypatch.setattr(research_service.time, "sleep", inspect_rollback)
         worker = ResearchWorker(
             config=config,
             safety=assess_startup_safety(config),
@@ -350,12 +496,25 @@ def test_duplicate_retry_does_not_double_advance_cursor(tmp_path, monkeypatch):
         batch = worker._archive_batch_with_retry("reference_ticks")
         with factory() as session:
             cursor = session.get(ResearchArchiveCursor, "reference_ticks")
-            event_count = session.scalar(select(ResearchReplayEvent.id))
-        assert attempts == 2
+            event_ids = session.scalars(select(ResearchReplayEvent.id)).all()
+            source_ids = session.scalars(
+                select(ResearchReplayEvent.source_row_id).where(
+                    ResearchReplayEvent.source_table == "reference_ticks"
+                )
+            ).all()
+        assert first_mutation == {"cursor": 1, "event_count": 1}
+        assert after_rollback == {
+            "cursor_mode": "UNINITIALIZED",
+            "cursor": 0,
+            "event_count": 0,
+        }
+        assert len(sessions) == 2
+        assert sessions[0] is not sessions[1]
         assert batch.source_rows == 1
         assert cursor is not None
         assert cursor.source_cursor == 1
-        assert event_count is not None
+        assert len(event_ids) == 1
+        assert source_ids == ["1"]
     finally:
         engine.dispose()
 
