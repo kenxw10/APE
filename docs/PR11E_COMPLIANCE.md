@@ -68,7 +68,14 @@ git diff --check
 python scripts/research_smoke.py
 ```
 
-The final PR body will record the exact final head, unsharded workflow run/job,
-pytest totals and skips, static checks, and the literal R1-R9 audit. The PR remains
-draft until review and hosted validation complete. It will not be merged or deployed
-by this change.
+## Hosted Validation Evidence
+
+The initial implementation head `b5a8d802d62b3da1354453f1e5fedb41b8c3cd9f` passed
+the exact PostgreSQL-backed unsharded GitHub Actions workflow run `29347977652`,
+job `validation`. The workflow recorded `591 passed, 0 skipped, 284 warnings`.
+`python -m ruff check .`, `python -m compileall src scripts`, and `python -m pip check`
+also passed. The final documentation-only head is revalidated by the same exact
+workflow before this PR is considered complete.
+
+The PR remains draft until review and hosted validation complete. It will not be
+merged or deployed by this change.
