@@ -70,10 +70,15 @@ python scripts/research_smoke.py
 
 ## Hosted Validation Evidence
 
-The pre-remediation implementation head `b5a8d802d62b3da1354453f1e5fedb41b8c3cd9f`
-passed the exact PostgreSQL-backed unsharded workflow `29347977652`, but that run
-does not cover the direct fix-forward proofs above. The final remediation head is
-revalidated by the same exact workflow before this PR is considered complete.
+The implementation and direct acceptance-test head
+`f6801d0b57f35a12fe2144c777a8abda2b2a4a2b` passed the exact PostgreSQL-backed
+unsharded GitHub Actions workflow run `29354456795`, job `validation`
+(`87158479555`). PostgreSQL 16 initialized successfully and the workflow recorded
+`596 passed, 0 skipped, 284 warnings in 104.16s (0:01:44)`. The same workflow also
+passed `python -m ruff check .`, `python -m compileall src scripts`, and
+`python -m pip check`.
 
-The PR remains draft until review and hosted validation complete. It will not be
-merged or deployed by this change.
+The current PR head adds only this compliance-document update; its exact final-head
+workflow result is recorded in the PR body after hosted validation completes.
+
+The PR remains draft. It will not be merged or deployed by this change.
