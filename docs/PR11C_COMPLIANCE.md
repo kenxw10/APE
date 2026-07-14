@@ -61,8 +61,12 @@ The final local validation completed before publication:
 
 The existing `.github/workflows/pr-validation.yml` runs the exact unsharded
 `python -m pytest` command on pull requests, followed by Ruff, compileall, and
-pip check. The final GitHub Actions result is recorded here after the draft PR
-is created.
+pip check. The implementation-head run passed:
+
+- `validation` passed in 2m14s on commit `dc98dfa`: [GitHub Actions run 29304346734](https://github.com/kenxw10/APE/actions/runs/29304346734).
+
+The documentation-only follow-up commit is also validated by the same workflow
+before final reporting.
 
 ## Literal Prompt-to-Diff Self-Audit
 
