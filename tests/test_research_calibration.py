@@ -769,6 +769,89 @@ def test_finalist_evidence_recovers_after_fault_without_duplicate_evaluation_or_
         engine.dispose()
 
 
+def test_failed_calibration_retry_resets_state_and_reuses_run_replay_id(tmp_path, monkeypatch):
+    at = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+    candidates = (
+        _candidate("candidate-baseline-v2", baseline=True),
+        _candidate("candidate-retry"),
+    )
+    engine, factory = _factory(tmp_path, "calibration-retry-reset.sqlite")
+    try:
+        with factory() as session:
+            for index in range(50):
+                seed_clean_market(
+                    session, index=index, at=at + timedelta(minutes=15 * index)
+                )
+            session.commit()
+
+            def incomplete_evaluator(**kwargs):
+                result = fake_candidate_evaluator(**kwargs)
+                return CalibrationResult(
+                    "INCOMPLETE",
+                    result.partition_manifest,
+                    result.candidates,
+                    result.candidate_metrics,
+                    result.selected_candidate_id,
+                    result.warnings,
+                    result.blockers,
+                    result.candidate_replay_trades,
+                    result.candidate_partition_replay_trades,
+                )
+
+            first = run_governed_calibration(
+                session,
+                snapshot=ResearchRepository(session).replay_event_snapshot(),
+                replay_run_id="retry-original-replay",
+                baseline_config_version_id="baseline",
+                code_commit_sha="code",
+                checked_at=at,
+                candidate_evaluator=incomplete_evaluator,
+                candidate_specs=candidates,
+            )
+            assert first.status == "CALIBRATION_BLOCKED"
+            failed = ResearchRepository(session).get_calibration_run(first.run_id)
+            assert failed is not None
+            failed.evaluated_candidate_count = len(candidates)
+            failed.validation_metrics = {"stale": {"status": "EVALUATED"}}
+            failed.holdout_used_at = at
+            session.commit()
+
+            replay_ids: list[str] = []
+            original_persist = governed_calibration._persist_partition_trades
+
+            def capture_persist(*args, **kwargs):
+                replay_ids.append(kwargs["replay_run_id"])
+                return original_persist(*args, **kwargs)
+
+            monkeypatch.setattr(
+                governed_calibration,
+                "_persist_partition_trades",
+                capture_persist,
+            )
+            retried = run_governed_calibration(
+                session,
+                snapshot=ResearchRepository(session).replay_event_snapshot(),
+                replay_run_id="retry-new-caller-replay",
+                baseline_config_version_id="baseline",
+                code_commit_sha="code",
+                checked_at=at + timedelta(hours=1),
+                candidate_evaluator=fake_candidate_evaluator,
+                candidate_specs=candidates,
+            )
+            recovered = ResearchRepository(session).get_calibration_run(retried.run_id)
+            assert recovered is not None
+
+        assert retried.status == "POSITIVE_RESEARCH_CANDIDATE"
+        assert recovered.replay_run_id == "retry-original-replay"
+        assert recovered.evaluated_candidate_count == len(candidates)
+        assert recovered.holdout_used_at is not None
+        assert recovered.validation_metrics != {"stale": {"status": "EVALUATED"}}
+        assert replay_ids
+        assert set(replay_ids) == {"retry-original-replay"}
+    finally:
+        engine.dispose()
+
+
 def test_result_classification_and_frontier_are_deterministic_and_bounded() -> None:
     baseline = {
         "status": "EVALUATED",

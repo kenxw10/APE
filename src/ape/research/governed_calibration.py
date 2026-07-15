@@ -350,6 +350,33 @@ def run_governed_calibration(
             "holdout_used_at": None,
         }
     )
+    if (
+        existing is not None
+        and existing.finished_at is not None
+        and existing.status in _NON_COMPLETED_STATUSES
+    ):
+        run.status = "RUNNING"
+        run.started_at = checked_at
+        run.finished_at = None
+        run.evaluated_candidate_count = 0
+        run.selected_candidate_id = None
+        run.frozen_holdout_hash = None
+        run.holdout_used_at = None
+        run.training_metrics = {
+            "current_candidate_id": None,
+            "current_fold": None,
+            "current_partition": "retry_reset",
+        }
+        run.validation_metrics = {}
+        run.test_metrics = None
+        run.holdout_metrics = None
+        run.bootstrap_metrics = None
+        run.penalties = None
+        run.warnings = []
+        run.blockers = []
+        manifest = deepcopy(run.partition_manifest or {})
+        manifest["reader_progress"] = {}
+        run.partition_manifest = manifest
     if existing is not None and existing.finished_at is None:
         recovery = _recover_finalist_state(
             session,
@@ -460,7 +487,7 @@ def run_governed_calibration(
             )
             _persist_partition_trades(
                 repository,
-                replay_run_id=replay_run_id,
+                replay_run_id=str(run.replay_run_id),
                 candidate=evaluated,
                 baseline_config_version_id=baseline_config_version_id,
                 trades=batch_result.candidate_partition_replay_trades.get(
@@ -522,7 +549,7 @@ def run_governed_calibration(
         run.frozen_holdout_hash = finalist_result.partition_manifest.get("holdout_hash")
         _persist_partition_trades(
             repository,
-            replay_run_id=replay_run_id,
+            replay_run_id=str(run.replay_run_id),
             candidate=selected,
             baseline_config_version_id=baseline_config_version_id,
             trades=finalist_result.candidate_partition_replay_trades.get(
