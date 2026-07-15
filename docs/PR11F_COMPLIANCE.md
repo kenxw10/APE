@@ -115,5 +115,5 @@ full-history diagnostic baseline or any production safety/deployment boundary.
 - `python -m pip check`: PASS, no broken requirements.
 - `git diff --check`: PASS.
 - `python scripts/research_smoke.py`: PASS; all reported invariants true.
-- PostgreSQL 16 exact unsharded PR workflow on fix-forward head `fc84680`: PASS,
-  run `29385455950`, job `87257636021`; 625 passed, 0 skipped, 0 failed.
+- PostgreSQL 16 exact unsharded PR workflow on final head `21fe7cb`: PASS,
+  run `29385677643`, job `87258296436`; 625 passed, 0 skipped, 0 failed.
