@@ -14,7 +14,7 @@ full-history diagnostic baseline or any production safety/deployment boundary.
 | R5 Existing governed search | PASS | `src/ape/research/calibration.py` | `test_r5_search_space_and_protected_gate_contract_are_unchanged`, `test_r5_partitions_are_chronological_purged_and_holdout_isolated`, `test_existing_search_contract_remains_exactly_256_candidates` |
 | R6 Material evidence | PASS | `src/ape/research/calibration.py`, `src/ape/research/governed_calibration.py` | `test_r6_fee_and_economic_evidence_fields_are_persisted`, `test_candidate_trades_are_partitioned_and_idempotent_across_reuse`, `test_finalist_evidence_recovers_after_fault_without_duplicate_evaluation_or_trades` |
 | R7 Frontier/classification | PASS | `src/ape/research/governed_calibration.py` | `test_r7_economic_classifications_are_persisted_from_governed_runs`, `test_result_classification_and_frontier_are_deterministic_and_bounded` |
-| R8 Recoverable always-on runner | PASS | `src/ape/research/service.py`, `src/ape/research/governed_calibration.py` | `test_governed_epochs_resume_batches_and_consume_holdout_once`, `test_r8_calibration_failure_cannot_roll_back_completed_baseline`, `test_r8_disabled_calibration_preserves_worker_behavior` |
+| R8 Recoverable always-on runner | PASS | `src/ape/research/service.py`, `src/ape/research/governed_calibration.py` | `test_governed_epochs_resume_batches_and_consume_holdout_once`, `test_r8_calibration_failure_cannot_roll_back_completed_baseline`, `test_r8_disabled_calibration_preserves_worker_behavior`, `test_failed_calibration_retry_resets_state_and_reuses_run_replay_id` |
 | R9 No automatic promotion | PASS | `src/ape/research/service.py`, `src/ape/research/governed_calibration.py` | `test_r9_candidates_remain_research_only_and_no_promotion_call_exists`, `test_research_cycle_never_auto_advances_a_candidate` |
 | R10 Read-only APIs | PASS | `src/ape/api/main.py`, `src/ape/research/status.py` | `test_r10_research_api_is_read_only_bounded_and_omits_raw_payloads`, `tests/test_research_api.py` |
 | R11 Direct acceptance tests | PASS | `tests/test_pr11f_scope_contract.py`, `tests/test_research_calibration.py` | Numbered crosswalk below and required focused suite |
@@ -69,6 +69,7 @@ full-history diagnostic baseline or any production safety/deployment boundary.
 45. No raw response artifacts: `test_r10_research_api_is_read_only_bounded_and_omits_raw_payloads`.
 46. Durable bounded batch: `test_governed_epochs_resume_batches_and_consume_holdout_once`.
 47. Restart resume/no duplicate trades: same resume test and `test_candidate_trades_are_partitioned_and_idempotent_across_reuse`.
+47a. Failed/blocked retry resets stale state and preserves durable replay lineage: `test_failed_calibration_retry_resets_state_and_reuses_run_replay_id`.
 48. Baseline survives failure: `test_r8_calibration_failure_cannot_roll_back_completed_baseline`.
 49. Disabled behavior: `test_r8_disabled_calibration_preserves_worker_behavior`.
 50. No promotion/activation: `test_r9_candidates_remain_research_only_and_no_promotion_call_exists`.
@@ -107,12 +108,12 @@ full-history diagnostic baseline or any production safety/deployment boundary.
 
 ## Validation Evidence
 
-- Required focused suite: PASS, 101 tests collected/executed, 101 passed, 0 failed, 0 skipped.
-- Full local suite: PASS, 620 passed, 4 PostgreSQL-only skips, 0 failed in 354.52s.
+- Required focused suite: PASS, 102 tests collected/executed, 102 passed, 0 failed, 0 skipped.
+- Full local suite: PASS, 621 passed, 4 PostgreSQL-only skips, 0 failed in 345.89s.
 - `python -m ruff check .`: PASS.
 - `python -m compileall src scripts`: PASS.
 - `python -m pip check`: PASS, no broken requirements.
 - `git diff --check`: PASS.
 - `python scripts/research_smoke.py`: PASS; all reported invariants true.
-- PostgreSQL 16 exact unsharded PR workflow: required on the final pushed head with
-  no PostgreSQL-test skips; the exact run/job is recorded in the PR body after CI.
+- PostgreSQL 16 exact unsharded PR workflow on fix-forward head `fc84680`: PASS,
+  run `29385455950`, job `87257636021`; 625 passed, 0 skipped, 0 failed.
