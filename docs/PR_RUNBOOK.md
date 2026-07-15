@@ -606,7 +606,18 @@ Invoke-RestMethod https://ape-api-production.up.railway.app/research/coverage/la
 Invoke-RestMethod https://ape-api-production.up.railway.app/research/zero-entry/latest
 Invoke-RestMethod "https://ape-api-production.up.railway.app/research/replay/runs/recent?limit=100"
 Invoke-RestMethod "https://ape-api-production.up.railway.app/research/calibration/runs/recent?limit=100"
+Invoke-RestMethod https://ape-api-production.up.railway.app/research/cohorts/latest
+Invoke-RestMethod "https://ape-api-production.up.railway.app/research/calibration/frontier/latest?limit=20"
 ```
 
 Do not enable paper or live modes, do not give the research worker private Kalshi
 credentials, and do not set a candidate pin until a later explicit operator decision.
+
+PR 11f keeps the all-history baseline as mixed-cohort diagnostic evidence and uses
+only the strict current-version clean cohort for governed calibration. Confirm fewer
+than 50 eligible markets reports `INSUFFICIENT_CLEAN_DATA`; completed immutable
+epochs advance only at 50-market boundaries; and candidates remain `DRAFT` /
+`RESEARCH_ONLY` with no automatic governance transition. Keep calibration disabled
+after merge pending explicit production-validation instructions. No migration,
+service, required environment variable, timeout, polling, archive page-size,
+20-operation archive budget, strategy-control, or safety setting changes.

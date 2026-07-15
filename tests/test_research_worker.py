@@ -150,7 +150,7 @@ def test_research_cycle_archives_and_records_isolated_heartbeat(tmp_path) -> Non
             result = run_research_cycle(config, session)
             session.commit()
             assert result["status"] == "completed"
-            assert result["calibration_status"] == "INSUFFICIENT_DATA"
+            assert result["calibration_status"] == "INSUFFICIENT_CLEAN_DATA"
         run_worker(config, worker_role=WORKER_ROLE_RESEARCH, max_iterations=1)
         with factory() as session:
             assert session.scalar(select(ResearchReplayRun)) is not None
@@ -265,7 +265,9 @@ def test_market_outcome_reconciler_offloads_blocking_cycle(monkeypatch) -> None:
     assert session.commits == 1
 
 
-def test_research_cycle_does_not_reuse_a_frozen_holdout(tmp_path, monkeypatch) -> None:
+def test_research_cycle_does_not_consume_holdout_without_a_clean_epoch(
+    tmp_path, monkeypatch
+) -> None:
     config = load_config(
         {
             "DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'holdout.sqlite'}",
@@ -301,7 +303,7 @@ def test_research_cycle_does_not_reuse_a_frozen_holdout(tmp_path, monkeypatch) -
         with factory() as session:
             run_research_cycle(config, session)
             session.commit()
-        assert calls == 1
+        assert calls == 0
     finally:
         engine.dispose()
 
@@ -350,7 +352,7 @@ def test_research_cycle_replays_again_when_resolved_outcome_changes(tmp_path) ->
             second = run_research_cycle(config, session, checked_at=at + timedelta(minutes=17))
             session.commit()
             assert second["replay_run_id"] != first["replay_run_id"]
-            assert second["calibration_run_id"] != first["calibration_run_id"]
+            assert second["calibration_run_id"] == first["calibration_run_id"]
 
         with factory() as session:
             runs = list(session.scalars(select(ResearchReplayRun)))
@@ -360,7 +362,7 @@ def test_research_cycle_replays_again_when_resolved_outcome_changes(tmp_path) ->
         engine.dispose()
 
 
-def test_research_cycle_persists_calibration_candidate_replay_trades(
+def test_research_cycle_does_not_materialize_candidates_without_a_clean_epoch(
     tmp_path, monkeypatch
 ) -> None:
     config = load_config(
@@ -435,27 +437,12 @@ def test_research_cycle_persists_calibration_candidate_replay_trades(
                     ResearchReplayTrade.candidate_id == candidate.candidate_id
                 )
             )
-            assert stored is not None
-            assert stored.trade_id.endswith(
-                "candidate-fixture-search_development-candidate-trade"
-            )
-            assert stored.measurements["evidence_partition"] == "search_development"
-            assert stored.strategy_config_version_id == "research-candidate-fixture"
-            assert stored.market_ticker == trade.market_ticker
-            assert stored.net_pnl_cents == Decimal("4")
-            assert stored.exit_trigger_at is not None
-            assert stored.exit_trigger_at.replace(tzinfo=UTC) == trade.exit_trigger_at
-            assert stored.exit_intent_at is not None
-            assert stored.exit_intent_at.replace(tzinfo=UTC) == trade.exit_intent_at
-            assert stored.exit_limit == trade.exit_limit
-            assert stored.exit_fill_at is not None
-            assert stored.exit_fill_at.replace(tzinfo=UTC) == trade.exit_fill_at
-            assert stored.exit_fill_price == trade.exit_fill_price
+            assert stored is None
     finally:
         engine.dispose()
 
 
-def test_research_cycle_advances_only_the_selected_candidate(tmp_path, monkeypatch) -> None:
+def test_research_cycle_never_auto_advances_a_candidate(tmp_path, monkeypatch) -> None:
     config = load_config(
         {
             "DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'selected-candidate.sqlite'}",
@@ -515,10 +502,10 @@ def test_research_cycle_advances_only_the_selected_candidate(tmp_path, monkeypat
             session.commit()
         with factory() as session:
             repository = ResearchRepository(session)
-            assert repository.get_candidate(selected.candidate_id) is not None
-            assert repository.get_candidate(unselected.candidate_id) is not None
+            assert repository.get_candidate(selected.candidate_id) is None
+            assert repository.get_candidate(unselected.candidate_id) is None
 
-        assert advanced == [(selected.candidate_id, "ape-research-worker")]
+        assert advanced == []
     finally:
         engine.dispose()
 

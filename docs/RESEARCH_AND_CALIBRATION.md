@@ -15,16 +15,24 @@ window, and attempts exactly the first in-window book for both entry and exit.
 Later books cannot rescue an ineligible first attempt. The replay fee model records
 the verified general Kalshi taker schedule source and calculation metadata.
 
-Calibration partitions whole BTC15 markets chronologically. The final 20 percent is
-one frozen holdout; the development set has five chronological folds with adjacent
-market purge. Fewer than 50 complete markets produces `INSUFFICIENT_DATA` and no
-candidate can move beyond `DRAFT`.
+Governed calibration uses a strict current-version clean cohort rather than the
+mixed all-history baseline denominator. Eligible markets require resolved outcomes,
+archived MARKET/REFERENCE/ORDERBOOK/FEATURE evidence, FULL current-version candidate
+features, mature net 30-second labels, and the causal first executable book between
+500 ms and 2.5 seconds after the feature. Every exclusion is counted explicitly.
+
+Calibration partitions whole eligible BTC15 markets chronologically. The final 20
+percent is one frozen holdout; the development set has five chronological folds with
+adjacent market purge. Fewer than 50 eligible markets produces
+`INSUFFICIENT_CLEAN_DATA`. Completed immutable epochs use the first 50, 100, 150,
+and subsequent groups of 50 eligible markets. Tail growth between boundaries reuses
+the completed result, while code or search identity changes create a new run.
 
 The bounded search includes candidate zero, deterministic weighted-heuristic
 variants, and NumPy-only L2 logistic candidates. Model selection uses market-level
-2,000-resample bootstrap intervals. Governance may only advance database state from
-`DRAFT` to `BACKTESTED`, `SHADOW`, and then `DRY_RUN_CHALLENGER`; paper and live
-transitions raise errors.
+2,000-resample bootstrap intervals. PR 11f generates candidates only as `DRAFT` /
+`RESEARCH_ONLY`. It does not call governance advancement, activate a candidate, or
+alter the control strategy. Paper and live transitions remain prohibited.
 
 `STRATEGY_V2_CANDIDATE_CONFIG_VERSION_ID` is optional and unset by default. When
 an operator pins an immutable approved candidate, the strategy worker evaluates it
@@ -64,10 +72,47 @@ heartbeat and `/research/status`.
 Mature outcome labels process at most 25 current-schema markets per cycle. Each
 market reads only its own interval plus the 65-second label horizon. A remaining
 label backlog is reported as a partial cycle and coverage/replay are deferred rather
-than reported complete. Calibration stays disabled by default. When enabled, it is
-allowed to materialize a frozen input only up to the fixed 20,000-event runtime
-limit; a larger input records a durable blocked calibration result rather than
-loading the full archive into memory.
+than reported complete. Calibration stays disabled by default. PR 11f replaces
+the former 20,000-event full-archive materialization gate with a strict-cohort keyset
+reader. Database pages remain capped at 250 and are released between pages. Candidate
+replay receives only compact FEATURE_SNAPSHOT and ORDERBOOK evidence for the immutable
+epoch under the frozen watermark. Candidate states run in fixed batches of eight; L2
+logistic fitting has a fixed 100,000-row compact feature-matrix cap and fails closed
+above it.
+
+## Clean-Cohort Governed Calibration (PR 11f)
+
+The all-history baseline remains unchanged and diagnostic. It retains deterministic
+event ordering, the frozen watermark, the current feature evaluator, 500 ms latency,
+the two-second intent window, first-book-only entry/exit semantics, the verified fee
+model, and zero-entry blocker evidence. It is not the governed strategy-frequency
+denominator.
+
+The clean-cohort manifest records the frozen watermark and cohort hash, ordered
+eligible markets, source/version distributions, explicit feature and market
+exclusions, source completeness, event gaps and time bounds, resolved-outcome hash,
+baseline config version, and code commit. Each 50-market epoch has its own immutable
+epoch hash and complete 256-candidate search-space snapshot/hash.
+
+Candidate batches commit durable progress and partition-attributed replay trades.
+An interrupted worker resumes after completed candidates without repeating the
+holdout. Only the selected finalist receives development-test and frozen-holdout
+evaluation. Results use one exact deterministic classification:
+`INSUFFICIENT_CLEAN_DATA`, `NO_CANDIDATE_SIGNALS`,
+`SIGNALS_WITHOUT_EXECUTABLE_FILLS`, `FILLS_WITHOUT_CLOSED_TRADES`,
+`CLOSED_TRADES_WITHOUT_POSITIVE_HOLDOUT`, `POSITIVE_RESEARCH_CANDIDATE`,
+`CALIBRATION_BLOCKED`, or `CALIBRATION_FAILED`.
+
+`/research/cohorts/latest`, `/research/calibration/frontier/latest?limit=20`, and
+`/research/status` are bounded and read-only. They expose compact identities,
+progress, source/exclusion counts, frontier evidence, economic summaries, and the
+next-experiment marker without raw payloads or unbounded distributions.
+
+PR 11f adds no migration, service, required environment variable, timeout, polling,
+archive batch-size, archive operation-budget, retention, strategy-control, or safety
+change. Keep `APP_MODE=DRY_RUN`, `CALIBRATION_ENABLED=false`,
+`TRADING_ENABLED=false`, and `EXECUTE=false` until separate production-validation
+instructions explicitly enable calibration.
 
 ## Post-Bootstrap Fair Scheduling (PR 11e)
 

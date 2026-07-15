@@ -842,10 +842,15 @@ def test_r13_research_api_surface_is_read_only_and_bounded(tmp_path) -> None:
         routes = [
             route for route in app.routes if getattr(route, "path", "").startswith("/research/")
         ]
-        assert len(routes) == 8
+        assert len(routes) == 10
         assert all(route.methods == {"GET"} for route in routes)
         with TestClient(app) as client:
             assert client.get("/research/status").status_code == 200
+            assert client.get("/research/cohorts/latest").status_code == 200
+            assert (
+                client.get("/research/calibration/frontier/latest?limit=21").status_code
+                == 422
+            )
             assert client.get("/research/replay/runs/recent?limit=501").status_code == 422
             assert (
                 client.get("/research/replay/trades/recent?candidate_id=bad%20id").status_code

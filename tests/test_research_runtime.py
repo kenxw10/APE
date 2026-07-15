@@ -358,14 +358,16 @@ def test_research_worker_heartbeats_stay_fresh_during_long_stages(
                 pause_replay,
             )
         else:
-            original = research_service.run_bounded_calibration
+            original = research_service.run_governed_calibration
 
-            def pause_calibration(**kwargs):
+            def pause_calibration(*args, **kwargs):
                 entered.set()
                 assert release.wait(timeout=5)
-                return original(**kwargs)
+                return original(*args, **kwargs)
 
-            monkeypatch.setattr(research_service, "run_bounded_calibration", pause_calibration)
+            monkeypatch.setattr(
+                research_service, "run_governed_calibration", pause_calibration
+            )
 
         worker = research_service.ResearchWorker(
             config=config,
@@ -704,10 +706,12 @@ def test_replay_evidence_survives_a_calibration_failure(tmp_path, monkeypatch) -
     factory = create_session_factory(engine)
     at = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
     try:
-        def fail_calibration(**_kwargs):
+        def fail_calibration(*_args, **_kwargs):
             raise RuntimeError("calibration fixture failure")
 
-        monkeypatch.setattr(research_service, "run_bounded_calibration", fail_calibration)
+        monkeypatch.setattr(
+            research_service, "run_governed_calibration", fail_calibration
+        )
         worker = research_service.ResearchWorker(
             config=config,
             safety=assess_startup_safety(config),

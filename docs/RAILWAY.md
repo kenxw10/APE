@@ -831,3 +831,36 @@ Use the existing safe rollout settings: `APP_MODE=DRY_RUN`,
 `archive_operations_by_source`, `post_archive_allowed`, and the tail/bootstrap budget
 flags in `/research/status` while the worker catches up. No production environment,
 service, migration, timeout, polling, batch-size, or budget change is required.
+
+## PR 11f Clean-Cohort Calibration Rollout
+
+PR 11f changes only the existing database research path. It adds no migration,
+Railway service, required environment variable, credential, timeout, polling,
+archive batch-size, operation-budget, retention, strategy, or execution behavior.
+Migration remains `0011_research_archive_cursors`; archive pages remain capped at
+250 rows and each archive cycle remains capped at 20 operations.
+
+After merge, keep the existing research worker on:
+
+```text
+APP_MODE=DRY_RUN
+CALIBRATION_ENABLED=false
+TRADING_ENABLED=false
+EXECUTE=false
+```
+
+Do not enable calibration as part of this PR rollout. Validate the existing
+all-history baseline, then inspect the new bounded read-only endpoints:
+
+```powershell
+Invoke-RestMethod https://ape-api-production.up.railway.app/research/status
+Invoke-RestMethod https://ape-api-production.up.railway.app/research/cohorts/latest
+Invoke-RestMethod "https://ape-api-production.up.railway.app/research/calibration/frontier/latest?limit=20"
+```
+
+The cohort endpoint should report strict current-version eligibility, explicit
+exclusions, the frozen watermark, completed 50-market epoch, and next threshold.
+The frontier endpoint should remain empty until an audited calibration exists, or
+show at most the requested top 20 plus required baseline/finalist records. Do not add
+private credentials, candidate pins, paper/live modes, orders, or account access.
+`DB_STATEMENT_TIMEOUT_MS` remains 5000 and `RESEARCH_POLL_SECONDS` remains 60.

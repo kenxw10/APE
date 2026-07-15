@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -15,7 +15,11 @@ import numpy as np
 from ape.db.models import ResearchMarketOutcome, ResearchReplayEvent
 from ape.research import REPLAY_SCHEMA_VERSION
 from ape.research.replay import DeterministicReplayEngine, ReplayTrade
-from ape.research.repository import _CANDIDATE_TUNABLE_PATHS, _PROTECTED_GATE_PATHS
+from ape.research.repository import (
+    _CANDIDATE_TUNABLE_PATHS,
+    _PROTECTED_GATE_PATHS,
+    _config_diff_evidence,
+)
 from ape.strategy.momentum_v2 import (
     CALIBRATION_SCHEMA_VERSION,
     V2_FEATURE_SCHEMA_VERSION,
@@ -89,9 +93,14 @@ FREQUENCY_GOVERNANCE = {
     "hard_fill_max_for_challenger_per_100": "15",
 }
 CANDIDATE_GENERATION_ALGORITHM_VERSION = "bounded_v2_search_v1"
+LOGISTIC_COMPACT_MATRIX_ROW_LIMIT = 100_000
 
 
 class GovernanceError(ValueError):
+    pass
+
+
+class LogisticMatrixLimitError(ValueError):
     pass
 
 
@@ -565,6 +574,8 @@ def run_bounded_calibration(
     events: list[ResearchReplayEvent],
     outcomes: list[ResearchMarketOutcome],
     candidate_specs: Iterable[CandidateSpec] | None = None,
+    evaluate_finalist: bool = True,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> CalibrationResult:
     manifest = build_partition_manifest(outcomes)
     if len(manifest["ordered_market_tickers"]) < 50:
@@ -593,14 +604,50 @@ def run_bounded_calibration(
     development_outcomes = [
         outcome for outcome in outcomes if outcome.market_ticker in search_development_members
     ]
-    labeled_rows, labeled_targets = _labeled_feature_rows(development_events, development_outcomes)
+    logistic_matrix_blocked = False
+    labeled_rows: list[dict[str, Any]] = []
+    labeled_targets: list[int] = []
+    if any(candidate.model_type == "L2_LOGISTIC" for candidate in candidates):
+        try:
+            labeled_rows, labeled_targets = _labeled_feature_rows(
+                development_events, development_outcomes
+            )
+        except LogisticMatrixLimitError:
+            logistic_matrix_blocked = True
     for index, candidate in enumerate(candidates):
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "candidate_index": index,
+                    "candidate_count": len(candidates),
+                    "current_candidate_id": candidate.candidate_id,
+                    "current_partition": "search_walk_forward",
+                }
+            )
+        parameter_evidence = _candidate_parameter_evidence(candidate)
+        if parameter_evidence["forbidden_parameter_changed"] or parameter_evidence[
+            "safety_data_quality_gate_changed"
+        ]:
+            metrics[candidate.candidate_id] = {
+                "status": "BLOCKED",
+                "reason": "candidate_protected_or_forbidden_parameter_change",
+                **parameter_evidence,
+            }
+            continue
+        if candidate.model_type == "L2_LOGISTIC" and logistic_matrix_blocked:
+            metrics[candidate.candidate_id] = {
+                "status": "BLOCKED",
+                "reason": "logistic_compact_matrix_limit_exceeded",
+                "training_row_limit": LOGISTIC_COMPACT_MATRIX_ROW_LIMIT,
+            }
+            continue
         fold_metrics = _walk_forward_metrics(
             candidate,
             manifest,
             events,
             outcomes,
             calibration_run_id,
+            progress_callback=progress_callback,
         )
         if candidate.model_type == "L2_LOGISTIC":
             if not fold_metrics:
@@ -659,6 +706,8 @@ def run_bounded_calibration(
         metrics[candidate.candidate_id] = {
             "status": "EVALUATED",
             **values,
+            **_replay_funnel_metrics(result, len(search_development)),
+            **parameter_evidence,
             "training": values,
             "walk_forward_validation": _aggregate_fold_metrics(fold_metrics),
             "development_test": None,
@@ -692,7 +741,7 @@ def run_bounded_calibration(
             getattr(trade, "status", None) == "CLOSED"
             for trade in candidate_replay_trades.get(candidate_id, ())
         )
-    if selected is not None:
+    if evaluate_finalist and selected is not None:
         chosen = next(candidate for candidate in candidates if candidate.candidate_id == selected)
         development_test = list(manifest["development_test"])
         development_test_members = set(development_test)
@@ -768,7 +817,100 @@ def _labeled_feature_rows(
             targets.append(int(Decimal(str(net_markout)) > 0))
         except (ArithmeticError, ValueError):
             continue
+        if len(rows) > LOGISTIC_COMPACT_MATRIX_ROW_LIMIT:
+            raise LogisticMatrixLimitError(
+                "Compact logistic feature matrix exceeded its fixed row limit."
+            )
     return rows, targets
+
+
+def _replay_funnel_metrics(result: Any, market_count: int) -> dict[str, Any]:
+    report = result.zero_entry_report if isinstance(result.zero_entry_report, dict) else {}
+    funnel = report.get("pipeline") if isinstance(report.get("pipeline"), dict) else {}
+    trades = tuple(result.trades)
+    entry_no_fill_count = sum(
+        getattr(trade, "status", None) == "ENTRY_NO_FILL" for trade in trades
+    )
+    entry_expired_count = sum(
+        getattr(trade, "status", None) == "ENTRY_EXPIRED" for trade in trades
+    )
+    closed = [trade for trade in trades if getattr(trade, "status", None) == "CLOSED"]
+    signals = int(funnel.get("signal", 0))
+    fills = int(funnel.get("fill", 0))
+    denominator = Decimal(max(market_count, 1))
+    time_to_mfe = [
+        value
+        for trade in closed
+        if (value := getattr(trade, "time_to_mfe_ms", None)) is not None
+    ]
+    time_to_mae = [
+        value
+        for trade in closed
+        if (value := getattr(trade, "time_to_mae_ms", None)) is not None
+    ]
+    net = sum(
+        (getattr(trade, "net_pnl_cents", None) or Decimal("0") for trade in closed),
+        Decimal("0"),
+    )
+    return {
+        "eligible_market_count": market_count,
+        "feature_rows_evaluated": int(
+            funnel.get("all_samples", getattr(result, "decision_count", 0))
+        ),
+        "entry_signal_count": signals,
+        "entry_intent_count": int(funnel.get("intent", 0)),
+        "entry_no_fill_count": entry_no_fill_count,
+        "entry_expired_count": entry_expired_count,
+        "executable_entry_fill_count": fills,
+        "opened_position_count": int(funnel.get("opened", fills)),
+        "exit_intent_count": int(funnel.get("exit_intent", 0)),
+        "exit_no_fill_count": max(
+            0,
+            int(funnel.get("exit_intent", 0)) - int(funnel.get("exit_fill", 0)),
+        ),
+        "exit_fill_count": int(funnel.get("exit_fill", 0)),
+        "closed_position_count": int(funnel.get("closed", len(closed))),
+        "signals_per_100_eligible_markets": str(Decimal(signals) * 100 / denominator),
+        "fills_per_100_eligible_markets": str(Decimal(fills) * 100 / denominator),
+        "closed_positions_per_100_eligible_markets": str(
+            Decimal(len(closed)) * 100 / denominator
+        ),
+        "signal_to_fill_rate": str(Decimal(fills) / Decimal(max(signals, 1))),
+        "net_pnl_cents": str(net),
+        "average_time_to_mfe_ms": str(
+            Decimal(sum(time_to_mfe)) / Decimal(max(len(time_to_mfe), 1))
+        ),
+        "average_time_to_mae_ms": str(
+            Decimal(sum(time_to_mae)) / Decimal(max(len(time_to_mae), 1))
+        ),
+    }
+
+
+def _candidate_parameter_evidence(candidate: CandidateSpec) -> dict[str, Any]:
+    flattened = _flatten_parameters(candidate.parameters)
+    changed = {
+        ".".join(path): value
+        for path, value in flattened.items()
+        if value != _nested_value(V2_PARAMETERS, path)
+    }
+    diff_evidence = _config_diff_evidence(V2_PARAMETERS, candidate.parameters)
+    return {
+        "candidate_id": candidate.candidate_id,
+        "generated_strategy_id": candidate.generated_strategy_id,
+        "model_type": candidate.model_type,
+        "parameter_hash": _hash(candidate.parameters),
+        "changed_parameter_count": len(changed),
+        "parameter_diff_from_baseline": changed,
+        "protected_parameter_changed": bool(
+            diff_evidence["changed_protected_gate_paths"]
+        ),
+        "forbidden_parameter_changed": bool(
+            diff_evidence["forbidden_parameter_changed"]
+        ),
+        "safety_data_quality_gate_changed": bool(
+            diff_evidence["safety_or_data_quality_gate_changed"]
+        ),
+    }
 
 
 def _walk_forward_metrics(
@@ -777,9 +919,19 @@ def _walk_forward_metrics(
     events: list[ResearchReplayEvent],
     outcomes: list[ResearchMarketOutcome],
     calibration_run_id: str,
+    *,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
     metrics: list[dict[str, Any]] = []
     for fold in manifest["folds"]:
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "current_candidate_id": candidate.candidate_id,
+                    "current_fold": fold["fold"],
+                    "current_partition": "walk_forward_validation",
+                }
+            )
         train = list(fold["train"])
         validation = list(fold["validation"])
         if not train or not validation:
