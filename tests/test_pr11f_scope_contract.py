@@ -249,7 +249,8 @@ def test_r3_completed_epochs_only_advance_at_fifty_market_boundaries(tmp_path) -
                 candidate_specs=baseline,
             )
             assert changed_code.run_id != second.run_id
-            assert changed_code.epoch_hash == second.epoch_hash
+            assert changed_code.completed_epoch_size == 50
+            assert changed_code.next_epoch_market_count == 100
             changed_run = ResearchRepository(session).get_calibration_run(
                 changed_code.run_id
             )
@@ -328,6 +329,135 @@ def test_r4_more_than_twenty_thousand_archive_events_use_250_row_pages(tmp_path)
         }
         assert governed.status == "NO_CANDIDATE_SIGNALS"
         assert governed.candidates_completed == 1
+    finally:
+        engine.dispose()
+
+
+def test_r3_initial_100_market_cohort_starts_at_epoch_50(tmp_path) -> None:
+    engine, factory = _factory(tmp_path, "epoch-initial-100.sqlite")
+    at = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+    baseline = (_candidate("candidate-baseline-v2", baseline=True),)
+    try:
+        with factory() as session:
+            for index in range(100):
+                seed_clean_market(
+                    session, index=index, at=at + timedelta(minutes=15 * index)
+                )
+            session.commit()
+            result = run_governed_calibration(
+                session,
+                snapshot=ResearchRepository(session).replay_event_snapshot(),
+                replay_run_id="epoch-initial-100",
+                baseline_config_version_id="baseline",
+                code_commit_sha="code",
+                checked_at=at,
+                candidate_evaluator=fake_candidate_evaluator,
+                candidate_specs=baseline,
+            )
+        assert result.completed_epoch_size == 50
+        assert result.next_epoch_market_count == 100
+        assert result.calibration_due is False
+    finally:
+        engine.dispose()
+
+
+def test_r3_158_market_cohort_advances_one_epoch_per_cycle_and_reuses_latest(
+    tmp_path,
+) -> None:
+    engine, factory = _factory(tmp_path, "epoch-158.sqlite")
+    at = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+    baseline = (_candidate("candidate-baseline-v2", baseline=True),)
+    evaluated_market_counts: list[int] = []
+
+    def evaluator(**kwargs):
+        evaluated_market_counts.append(
+            len(
+                {
+                    event.market_ticker
+                    for event in kwargs["events"]
+                    if event.market_ticker is not None
+                }
+            )
+        )
+        return fake_candidate_evaluator(**kwargs)
+
+    try:
+        with factory() as session:
+            for index in range(158):
+                seed_clean_market(
+                    session, index=index, at=at + timedelta(minutes=15 * index)
+                )
+            session.commit()
+            results = []
+            for cycle in range(4):
+                results.append(
+                    run_governed_calibration(
+                        session,
+                        snapshot=ResearchRepository(session).replay_event_snapshot(),
+                        replay_run_id=f"epoch-158-cycle-{cycle}",
+                        baseline_config_version_id="baseline",
+                        code_commit_sha="code",
+                        checked_at=at + timedelta(days=cycle),
+                        candidate_evaluator=evaluator,
+                        candidate_specs=baseline,
+                    )
+                )
+        assert [result.completed_epoch_size for result in results] == [50, 100, 150, 150]
+        assert [result.next_epoch_market_count for result in results] == [100, 150, 200, 200]
+        assert [result.reused_existing_run for result in results] == [False, False, False, True]
+        assert evaluated_market_counts == [50, 100, 150]
+        assert len({result.run_id for result in results[:3]}) == 3
+        assert results[3].run_id == results[2].run_id
+    finally:
+        engine.dispose()
+
+
+def test_r3_in_progress_earliest_epoch_resumes_before_larger_due_epoch(tmp_path) -> None:
+    engine, factory = _factory(tmp_path, "epoch-resume-before-growth.sqlite")
+    at = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+    baseline = (_candidate("candidate-baseline-v2", baseline=True),)
+
+    def interrupted_evaluator(**kwargs):
+        raise RuntimeError("simulated epoch interruption")
+
+    try:
+        with factory() as session:
+            for index in range(50):
+                seed_clean_market(
+                    session, index=index, at=at + timedelta(minutes=15 * index)
+                )
+            session.commit()
+            with pytest.raises(RuntimeError, match="simulated epoch interruption"):
+                run_governed_calibration(
+                    session,
+                    snapshot=ResearchRepository(session).replay_event_snapshot(),
+                    replay_run_id="epoch-resume-before-growth",
+                    baseline_config_version_id="baseline",
+                    code_commit_sha="code",
+                    checked_at=at,
+                    candidate_evaluator=interrupted_evaluator,
+                    candidate_specs=baseline,
+                )
+
+        with factory() as session:
+            for index in range(50, 100):
+                seed_clean_market(
+                    session, index=index, at=at + timedelta(minutes=15 * index)
+                )
+            session.commit()
+            resumed = run_governed_calibration(
+                session,
+                snapshot=ResearchRepository(session).replay_event_snapshot(),
+                replay_run_id="epoch-resume-before-growth-retry",
+                baseline_config_version_id="baseline",
+                code_commit_sha="code",
+                checked_at=at + timedelta(hours=1),
+                candidate_evaluator=fake_candidate_evaluator,
+                candidate_specs=baseline,
+            )
+        assert resumed.completed_epoch_size == 50
+        assert resumed.next_epoch_market_count == 100
+        assert resumed.reused_existing_run is False
     finally:
         engine.dispose()
 

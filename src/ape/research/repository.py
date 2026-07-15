@@ -928,6 +928,17 @@ class ResearchRepository:
             .limit(1)
         )
 
+    def list_calibration_runs_for_code_commit(
+        self, code_commit_sha: str
+    ) -> list[CalibrationRun]:
+        return list(
+            self.session.scalars(
+                select(CalibrationRun)
+                .where(CalibrationRun.code_commit_sha == code_commit_sha)
+                .order_by(CalibrationRun.started_at.asc(), CalibrationRun.id.asc())
+            )
+        )
+
     def latest_zero_entry_report(self) -> dict[str, Any] | None:
         run = self.latest_replay_run()
         return deepcopy(run.zero_entry_report) if run and run.zero_entry_report else None

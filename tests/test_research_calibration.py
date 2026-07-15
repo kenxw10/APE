@@ -5,9 +5,11 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+import pytest
 from sqlalchemy import func, select
 from tests.test_research_helpers import json_vector, valid_vector
 
+import ape.research.governed_calibration as governed_calibration
 from ape.config import load_config
 from ape.db.migrations import run_migrations
 from ape.db.models import (
@@ -590,6 +592,179 @@ def test_candidate_trades_are_partitioned_and_idempotent_across_reuse(tmp_path) 
             "frozen_holdout",
         }
         assert all(row.fee_cents == Decimal("1") for row in rows)
+    finally:
+        engine.dispose()
+
+
+def test_finalist_evidence_recovers_after_fault_without_duplicate_evaluation_or_trades(
+    tmp_path, monkeypatch
+) -> None:
+    at = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+    candidates = (
+        _candidate("candidate-baseline-v2", baseline=True),
+        _candidate("candidate-finalist-recovery"),
+    )
+    trade = ReplayTrade(
+        trade_id="finalist-recovery-trade",
+        market_ticker="KXBTC15M-CLEAN-0000",
+        side="YES",
+        entry_decision_at=at,
+        entry_fill_at=at + timedelta(milliseconds=600),
+        entry_limit=Decimal("0.60"),
+        entry_fill_price=Decimal("0.60"),
+        entry_fill_event_id="entry-book",
+        exit_trigger_at=at + timedelta(seconds=10),
+        exit_intent_at=at + timedelta(seconds=10, milliseconds=500),
+        exit_limit=Decimal("0.64"),
+        exit_fill_at=at + timedelta(seconds=11),
+        exit_fill_price=Decimal("0.65"),
+        exit_fill_event_id="exit-book",
+        status="CLOSED",
+        gross_pnl_cents=Decimal("5"),
+        fee_cents=Decimal("1"),
+        net_pnl_cents=Decimal("4"),
+        holding_duration_ms=10400,
+        mfe_cents=Decimal("5"),
+        mae_cents=Decimal("0"),
+        time_to_mfe_ms=10400,
+        time_to_mae_ms=0,
+        entry_reason="fixture",
+        exit_reason="fixture",
+        timing_tier="normal",
+        measurements={"volatility_regime": "medium", "liquidity_regime": "deep"},
+    )
+    evaluator_modes: list[bool] = []
+
+    def evaluator(**kwargs):
+        evaluate_finalist = bool(kwargs.get("evaluate_finalist", True))
+        evaluator_modes.append(evaluate_finalist)
+        result = fake_candidate_evaluator(**kwargs)
+        retained = {}
+        partitioned = {}
+        for candidate in result.candidates:
+            rows = (trade,) if candidate.model_type != "BASELINE" else ()
+            retained[candidate.candidate_id] = rows
+            partitioned[candidate.candidate_id] = {"search_development": rows}
+            if evaluate_finalist and rows:
+                partitioned[candidate.candidate_id].update(
+                    {"development_test": rows, "frozen_holdout": rows}
+                )
+        return CalibrationResult(
+            result.status,
+            result.partition_manifest,
+            result.candidates,
+            result.candidate_metrics,
+            result.selected_candidate_id,
+            result.warnings,
+            result.blockers,
+            retained,
+            partitioned,
+        )
+
+    frontier_failure = True
+    original_frontier = governed_calibration.build_candidate_frontier
+
+    def fail_once(*args, **kwargs):
+        nonlocal frontier_failure
+        if frontier_failure:
+            frontier_failure = False
+            raise RuntimeError("simulated finalist finalization failure")
+        return original_frontier(*args, **kwargs)
+
+    monkeypatch.setattr(governed_calibration, "build_candidate_frontier", fail_once)
+
+    def seed_and_interrupt(factory, replay_run_id: str) -> None:
+        with factory() as session:
+            for index in range(50):
+                seed_clean_market(
+                    session, index=index, at=at + timedelta(minutes=15 * index)
+                )
+            session.commit()
+            with pytest.raises(RuntimeError, match="simulated finalist finalization failure"):
+                run_governed_calibration(
+                    session,
+                    snapshot=ResearchRepository(session).replay_event_snapshot(),
+                    replay_run_id=replay_run_id,
+                    baseline_config_version_id="baseline",
+                    code_commit_sha="code",
+                    checked_at=at,
+                    candidate_evaluator=evaluator,
+                    candidate_specs=candidates,
+                )
+
+    engine, factory = _factory(tmp_path, "finalist-recovery.sqlite")
+    try:
+        seed_and_interrupt(factory, "finalist-recovery")
+        frontier_failure = False
+        with factory() as session:
+            repository = ResearchRepository(session)
+            interrupted = repository.latest_calibration_run()
+            assert interrupted is not None
+            holdout_used_at = interrupted.holdout_used_at
+            frozen_holdout_hash = interrupted.frozen_holdout_hash
+            selected_candidate_id = interrupted.selected_candidate_id
+            validation_metrics = deepcopy(interrupted.validation_metrics)
+            trade_count_before = session.scalar(
+                select(func.count()).select_from(ResearchReplayTrade)
+            )
+
+        with factory() as session:
+            resumed = run_governed_calibration(
+                session,
+                snapshot=ResearchRepository(session).replay_event_snapshot(),
+                replay_run_id="finalist-recovery-retry",
+                baseline_config_version_id="baseline",
+                code_commit_sha="code",
+                checked_at=at + timedelta(hours=1),
+                candidate_evaluator=evaluator,
+                candidate_specs=candidates,
+            )
+            recovered = ResearchRepository(session).get_calibration_run(resumed.run_id)
+            assert recovered is not None
+            trade_count_after = session.scalar(
+                select(func.count()).select_from(ResearchReplayTrade)
+            )
+
+        assert resumed.reused_existing_run is True
+        assert recovered.status == "POSITIVE_RESEARCH_CANDIDATE"
+        assert recovered.finished_at is not None
+        assert recovered.holdout_used_at == holdout_used_at
+        assert recovered.frozen_holdout_hash == frozen_holdout_hash
+        assert recovered.selected_candidate_id == selected_candidate_id
+        assert recovered.validation_metrics == validation_metrics
+        assert trade_count_after == trade_count_before == 3
+        assert evaluator_modes == [False, True]
+    finally:
+        engine.dispose()
+
+    frontier_failure = True
+    engine, factory = _factory(tmp_path, "finalist-recovery-incomplete.sqlite")
+    try:
+        seed_and_interrupt(factory, "finalist-recovery-incomplete")
+        with factory() as session:
+            interrupted = ResearchRepository(session).latest_calibration_run()
+            assert interrupted is not None
+            interrupted.validation_metrics = {}
+            session.commit()
+        modes_before_recovery = len(evaluator_modes)
+        with factory() as session:
+            failed = run_governed_calibration(
+                session,
+                snapshot=ResearchRepository(session).replay_event_snapshot(),
+                replay_run_id="finalist-recovery-incomplete-retry",
+                baseline_config_version_id="baseline",
+                code_commit_sha="code",
+                checked_at=at + timedelta(hours=1),
+                candidate_evaluator=evaluator,
+                candidate_specs=candidates,
+            )
+            recovered = ResearchRepository(session).get_calibration_run(failed.run_id)
+            assert recovered is not None
+        assert failed.reused_existing_run is True
+        assert failed.status == "CALIBRATION_FAILED"
+        assert recovered.finished_at is not None
+        assert recovered.blockers == ["finalist_evidence_incomplete_after_holdout"]
+        assert len(evaluator_modes) == modes_before_recovery
     finally:
         engine.dispose()
 

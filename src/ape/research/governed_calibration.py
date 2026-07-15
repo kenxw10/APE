@@ -10,6 +10,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from ape.db.models import CalibrationRun, ResearchCandidate
 from ape.repositories.inputs import StrategyConfigVersionInput
@@ -24,6 +25,7 @@ from ape.research.calibration import (
     run_bounded_calibration,
 )
 from ape.research.cohort import (
+    CALIBRATION_EPOCH_MARKET_COUNT,
     CalibrationInputLimitError,
     CleanCalibrationCohort,
     build_clean_calibration_cohort,
@@ -61,6 +63,8 @@ _RAW_METRIC_KEYS = frozenset(
         "market_net_pnl",
     }
 )
+_FINALIST_EVIDENCE_PHASE = "FINALIST_EVIDENCE_COMMITTED"
+_NON_COMPLETED_STATUSES = frozenset({"CALIBRATION_BLOCKED", "CALIBRATION_FAILED"})
 
 
 @dataclass(frozen=True)
@@ -105,6 +109,78 @@ CalibrationEvaluator = Callable[..., CalibrationResult]
 ProgressCallback = Callable[[dict[str, Any]], None]
 
 
+def _lineage_runs(
+    repository: ResearchRepository,
+    *,
+    code_commit_sha: str,
+    search_space_lineage_hash: str,
+) -> list[CalibrationRun]:
+    return [
+        run
+        for run in repository.list_calibration_runs_for_code_commit(code_commit_sha)
+        if isinstance(run.partition_manifest, dict)
+        and run.partition_manifest.get("search_space_lineage_hash")
+        == search_space_lineage_hash
+        and isinstance(run.partition_manifest.get("epoch_size"), int)
+    ]
+
+
+def _select_due_epoch(
+    runs: list[CalibrationRun],
+    *,
+    eligible_market_count: int,
+) -> tuple[int, bool, CalibrationRun | None]:
+    capacity = completed_epoch_size(eligible_market_count)
+    if capacity < CALIBRATION_EPOCH_MARKET_COUNT:
+        return capacity, False, None
+    in_progress = sorted(
+        (
+            run
+            for run in runs
+            if run.finished_at is None
+            and int(run.partition_manifest["epoch_size"]) <= capacity
+        ),
+        key=lambda run: (
+            int(run.partition_manifest["epoch_size"]),
+            run.started_at,
+            run.id,
+        ),
+    )
+    if in_progress:
+        run = in_progress[0]
+        return int(run.partition_manifest["epoch_size"]), True, run
+
+    completed = {
+        int(run.partition_manifest["epoch_size"])
+        for run in runs
+        if run.finished_at is not None
+        and run.status not in _NON_COMPLETED_STATUSES
+        and int(run.partition_manifest["epoch_size"]) <= capacity
+    }
+    for epoch_size in range(
+        CALIBRATION_EPOCH_MARKET_COUNT,
+        capacity + 1,
+        CALIBRATION_EPOCH_MARKET_COUNT,
+    ):
+        if epoch_size not in completed:
+            return epoch_size, True, None
+
+    if not completed:
+        return CALIBRATION_EPOCH_MARKET_COUNT, True, None
+    latest_epoch_size = max(completed)
+    latest_run = max(
+        (
+            run
+            for run in runs
+            if run.finished_at is not None
+            and run.status not in _NON_COMPLETED_STATUSES
+            and int(run.partition_manifest["epoch_size"]) == latest_epoch_size
+        ),
+        key=lambda run: (run.finished_at, run.id),
+    )
+    return latest_epoch_size, False, latest_run
+
+
 def run_governed_calibration(
     session: Session,
     *,
@@ -139,9 +215,27 @@ def run_governed_calibration(
         progress_callback=report_reader,
     )
     eligible_count = int(cohort.manifest["eligible_market_count"])
-    epoch_size = completed_epoch_size(eligible_count)
-    next_count = next_epoch_market_count(eligible_count)
-    if epoch_size < 50:
+    supplied_specs = tuple(candidate_specs) if candidate_specs is not None else None
+    lineage_seed = f"calibration-lineage-{code_commit_sha}"
+    lineage_specs = supplied_specs or bounded_candidate_specs(lineage_seed)
+    lineage_snapshot = complete_search_space_snapshot(lineage_seed, lineage_specs)
+    search_space_lineage_hash = _hash(
+        {
+            "code_commit_sha": code_commit_sha,
+            "search_space_hash": lineage_snapshot["snapshot_sha256"],
+        }
+    )
+    lineage_runs = _lineage_runs(
+        repository,
+        code_commit_sha=code_commit_sha,
+        search_space_lineage_hash=search_space_lineage_hash,
+    )
+    target_epoch_size, calibration_due, lineage_run = _select_due_epoch(
+        lineage_runs,
+        eligible_market_count=eligible_count,
+    )
+    if target_epoch_size < CALIBRATION_EPOCH_MARKET_COUNT:
+        next_count = CALIBRATION_EPOCH_MARKET_COUNT
         run, reused = _persist_insufficient_run(
             repository,
             replay_run_id=replay_run_id,
@@ -169,7 +263,13 @@ def run_governed_calibration(
             _cohort_summary(cohort.manifest),
         )
 
-    epoch = cohort.epoch_manifest(epoch_size)
+    epoch = (
+        deepcopy(lineage_run.partition_manifest)
+        if lineage_run is not None
+        else cohort.epoch_manifest(target_epoch_size)
+    )
+    epoch_size = int(epoch["epoch_size"])
+    next_count = next_epoch_market_count(epoch_size)
     identity_seed = _hash(
         {
             "epoch_hash": epoch["epoch_hash"],
@@ -178,7 +278,7 @@ def run_governed_calibration(
         }
     )
     seed_run_id = f"calibration-{identity_seed[:24]}"
-    specs = candidate_specs or bounded_candidate_specs(seed_run_id)
+    specs = supplied_specs or bounded_candidate_specs(seed_run_id)
     search_snapshot = complete_search_space_snapshot(seed_run_id, specs)
     search_hash = str(search_snapshot["snapshot_sha256"])
     run_id = "calibration-" + _hash(
@@ -189,7 +289,7 @@ def run_governed_calibration(
         }
     )[:24]
     existing = repository.get_calibration_run(run_id)
-    if existing is not None and existing.finished_at is not None:
+    if not calibration_due and existing is not None and existing.finished_at is not None:
         frontier = _frontier_payload(existing)
         return GovernedCalibrationResult(
             run_id,
@@ -223,10 +323,11 @@ def run_governed_calibration(
                 **epoch,
                 "cohort_manifest": cohort.manifest,
                 "search_space_hash": search_hash,
+                "search_space_lineage_hash": search_space_lineage_hash,
                 "current_eligible_market_count": eligible_count,
                 "current_completed_epoch_size": epoch_size,
                 "next_epoch_market_count": next_count,
-                "calibration_due": True,
+                "calibration_due": calibration_due,
                 "reader_progress": {},
             },
             "frozen_holdout_hash": None,
@@ -249,7 +350,19 @@ def run_governed_calibration(
             "holdout_used_at": None,
         }
     )
-    if existing is not None:
+    if existing is not None and existing.finished_at is None:
+        recovery = _recover_finalist_state(
+            session,
+            repository,
+            run,
+            cohort=cohort,
+            epoch=epoch,
+            search_hash=search_hash,
+            candidate_count=len(specs),
+            checked_at=checked_at,
+        )
+        if recovery is not None:
+            return recovery
         run.status = "RUNNING"
         run.blockers = []
     session.commit()
@@ -378,7 +491,6 @@ def run_governed_calibration(
 
     selected_id = select_finalist(all_metrics)
     selected = _resolved_candidate_spec(repository, specs, selected_id)
-    finalist_result = None
     if selected is not None and run.holdout_used_at is None:
         try:
             finalist_result = candidate_evaluator(
@@ -422,41 +534,31 @@ def run_governed_calibration(
             candidate_row.validation_metrics = finalist_metrics
             candidate_row.test_metrics = finalist_metrics.get("development_test")
             candidate_row.holdout_metrics = finalist_metrics.get("holdout")
+        run.selected_candidate_id = selected_id
+        # The search JSON was mutated in place; force the finalist replacement to persist.
+        run.validation_metrics = deepcopy(all_metrics)
+        run.holdout_metrics = finalist_metrics.get("holdout")
+        run.bootstrap_metrics = finalist_metrics.get("bootstrap")
+        run.penalties = finalist_metrics.get("penalties")
+        run.training_metrics = {
+            "current_candidate_id": selected_id,
+            "current_partition": "finalist_evidence_committed",
+            "finalist_phase": _FINALIST_EVIDENCE_PHASE,
+            "last_progress_at": _iso(datetime.now(UTC)),
+        }
+        flag_modified(run, "validation_metrics")
         session.commit()
 
-    classification = classify_calibration_result(all_metrics, selected_id)
-    frontier = build_candidate_frontier(all_metrics, selected_id=selected_id)
-    next_experiment = (
-        "STRUCTURAL_TRIGGER_EXPERIMENT_REQUIRED"
-        if classification == "NO_CANDIDATE_SIGNALS"
-        else None
+    return _finalize_run(
+        session,
+        run,
+        cohort=cohort,
+        epoch=epoch,
+        search_hash=search_hash,
+        candidate_count=len(specs),
+        checked_at=checked_at,
+        reused=False,
     )
-    run.status = classification
-    run.selected_candidate_id = selected_id
-    run.validation_metrics = all_metrics
-    run.test_metrics = {
-        "frontier_schema_version": "calibration_frontier_v1",
-        "classification": classification,
-        "next_experiment": next_experiment,
-        "baseline_candidate_id": "candidate-baseline-v2",
-        "selected_finalist_id": selected_id,
-        "frontier": frontier,
-    }
-    selected_metrics = all_metrics.get(selected_id or "", {})
-    run.holdout_metrics = selected_metrics.get("holdout")
-    run.bootstrap_metrics = selected_metrics.get("bootstrap")
-    run.penalties = selected_metrics.get("penalties")
-    run.finished_at = checked_at
-    run.training_metrics = {
-        "current_candidate_id": selected_id,
-        "current_candidate_batch": (len(specs) - 1)
-        // CALIBRATION_CANDIDATE_BATCH_SIZE
-        + 1,
-        "current_partition": "completed",
-        "last_progress_at": _iso(datetime.now(UTC)),
-    }
-    session.commit()
-    return _result_from_run(run, cohort, epoch, search_hash, len(specs), False)
 
 
 def select_finalist(metrics: dict[str, dict[str, Any]]) -> str | None:
@@ -729,6 +831,154 @@ def _persist_partition_trades(
             )
 
 
+def _finalist_evidence_is_complete(
+    repository: ResearchRepository, run: CalibrationRun
+) -> bool:
+    training = run.training_metrics if isinstance(run.training_metrics, dict) else {}
+    if training.get("finalist_phase") != _FINALIST_EVIDENCE_PHASE:
+        return False
+    if run.holdout_used_at is None or not run.frozen_holdout_hash:
+        return False
+    selected_id = run.selected_candidate_id
+    metrics = run.validation_metrics if isinstance(run.validation_metrics, dict) else {}
+    selected_metrics = metrics.get(selected_id or "")
+    if not isinstance(selected_metrics, dict):
+        return False
+    if not isinstance(selected_metrics.get("development_test"), dict):
+        return False
+    holdout = selected_metrics.get("holdout")
+    if not isinstance(holdout, dict):
+        return False
+    if run.holdout_metrics != holdout:
+        return False
+    if run.bootstrap_metrics != selected_metrics.get("bootstrap"):
+        return False
+    if run.penalties != selected_metrics.get("penalties"):
+        return False
+    candidate = repository.get_candidate(selected_id or "")
+    if candidate is None:
+        return False
+    if candidate.validation_metrics != selected_metrics:
+        return False
+    if candidate.test_metrics != selected_metrics.get("development_test"):
+        return False
+    if candidate.holdout_metrics != holdout:
+        return False
+    trades = repository.list_recent_replay_trades(
+        limit=500_000,
+        candidate_id=selected_id,
+        replay_run_id=run.replay_run_id,
+    )
+    return all(
+        isinstance(trade.measurements, dict)
+        and trade.measurements.get("evidence_partition")
+        in {"search_development", "development_test", "frozen_holdout"}
+        for trade in trades
+    )
+
+
+def _finalize_run(
+    session: Session,
+    run: CalibrationRun,
+    *,
+    cohort: CleanCalibrationCohort,
+    epoch: dict[str, Any],
+    search_hash: str,
+    candidate_count: int,
+    checked_at: datetime,
+    reused: bool,
+) -> GovernedCalibrationResult:
+    all_metrics = deepcopy(run.validation_metrics or {})
+    selected_id = run.selected_candidate_id
+    classification = classify_calibration_result(all_metrics, selected_id)
+    frontier = build_candidate_frontier(all_metrics, selected_id=selected_id)
+    next_experiment = (
+        "STRUCTURAL_TRIGGER_EXPERIMENT_REQUIRED"
+        if classification == "NO_CANDIDATE_SIGNALS"
+        else None
+    )
+    run.status = classification
+    run.selected_candidate_id = selected_id
+    run.validation_metrics = all_metrics
+    run.test_metrics = {
+        "frontier_schema_version": "calibration_frontier_v1",
+        "classification": classification,
+        "next_experiment": next_experiment,
+        "baseline_candidate_id": "candidate-baseline-v2",
+        "selected_finalist_id": selected_id,
+        "frontier": frontier,
+    }
+    selected_metrics = all_metrics.get(selected_id or "", {})
+    run.holdout_metrics = selected_metrics.get("holdout")
+    run.bootstrap_metrics = selected_metrics.get("bootstrap")
+    run.penalties = selected_metrics.get("penalties")
+    run.finished_at = checked_at
+    run.training_metrics = {
+        "current_candidate_id": selected_id,
+        "current_candidate_batch": (candidate_count - 1) // CALIBRATION_CANDIDATE_BATCH_SIZE + 1,
+        "current_partition": "completed",
+        "last_progress_at": _iso(datetime.now(UTC)),
+    }
+    session.commit()
+    return _result_from_run(
+        run,
+        cohort,
+        epoch,
+        search_hash,
+        candidate_count,
+        reused,
+    )
+
+
+def _recover_finalist_state(
+    session: Session,
+    repository: ResearchRepository,
+    run: CalibrationRun,
+    *,
+    cohort: CleanCalibrationCohort,
+    epoch: dict[str, Any],
+    search_hash: str,
+    candidate_count: int,
+    checked_at: datetime,
+) -> GovernedCalibrationResult | None:
+    training = run.training_metrics if isinstance(run.training_metrics, dict) else {}
+    phase = training.get("finalist_phase")
+    if run.holdout_used_at is None and phase != _FINALIST_EVIDENCE_PHASE:
+        return None
+    if _finalist_evidence_is_complete(repository, run):
+        return _finalize_run(
+            session,
+            run,
+            cohort=cohort,
+            epoch=epoch,
+            search_hash=search_hash,
+            candidate_count=candidate_count,
+            checked_at=checked_at,
+            reused=True,
+        )
+    run.status = "CALIBRATION_FAILED"
+    run.blockers = ["finalist_evidence_incomplete_after_holdout"]
+    run.finished_at = checked_at
+    run.test_metrics = {
+        "classification": "CALIBRATION_FAILED",
+        "frontier": [],
+    }
+    run.training_metrics = {
+        **training,
+        "current_partition": "finalist_recovery_failed",
+        "last_progress_at": _iso(datetime.now(UTC)),
+    }
+    session.commit()
+    return _result_from_run(
+        run,
+        cohort,
+        epoch,
+        search_hash,
+        candidate_count,
+        True,
+    )
+
+
 def _trade_values(
     *,
     replay_run_id: str,
@@ -865,7 +1115,7 @@ def _result_from_run(
         run.status,
         int(cohort.manifest["eligible_market_count"]),
         int(epoch["epoch_size"]),
-        next_epoch_market_count(int(cohort.manifest["eligible_market_count"])),
+        next_epoch_market_count(int(epoch["epoch_size"])),
         run.finished_at is None,
         cohort.manifest["cohort_hash"],
         epoch["epoch_hash"],

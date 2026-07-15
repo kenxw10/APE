@@ -118,6 +118,10 @@ class CleanCalibrationCohort:
                 "current_baseline_config_version"
             ],
             "code_commit_sha": self.manifest["code_commit_sha"],
+            "eligible_feature_snapshot_ids_by_market": {
+                market_ticker: list(self.eligible_feature_ids_by_market[market_ticker])
+                for market_ticker in ordered
+            },
         }
 
 
@@ -343,10 +347,15 @@ def extract_compact_calibration_events(
     progress_callback: Callable[[FrozenReplayProgress], None] | None = None,
 ) -> tuple[list[ReplayEventRecord], dict[str, int]]:
     market_tickers = tuple(epoch_manifest["ordered_market_tickers"])
+    epoch_feature_ids = epoch_manifest.get("eligible_feature_snapshot_ids_by_market")
     feature_ids = frozenset(
         feature_id
         for market_ticker in market_tickers
-        for feature_id in cohort.eligible_feature_ids_by_market[market_ticker]
+        for feature_id in (
+            epoch_feature_ids.get(market_ticker, [])
+            if isinstance(epoch_feature_ids, dict)
+            else cohort.eligible_feature_ids_by_market[market_ticker]
+        )
     )
     repository = ResearchRepository(session)
     reader = repository.calibration_replay_event_reader(
