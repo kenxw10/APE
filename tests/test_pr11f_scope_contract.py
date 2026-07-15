@@ -140,6 +140,41 @@ def test_r2_and_r4_watermark_cohort_and_compact_reader_are_deterministic(tmp_pat
         engine.dispose()
 
 
+def test_r4_filtered_full_page_continues_to_later_compact_events(tmp_path) -> None:
+    engine, factory = _factory(tmp_path, "filtered-page.sqlite")
+    at = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+    try:
+        with factory() as session:
+            session.add_all(
+                [
+                    feature_event(at=at, event_id="excluded-feature"),
+                    orderbook_event(
+                        at=at + timedelta(milliseconds=1),
+                        event_id="first-book",
+                    ),
+                    orderbook_event(
+                        at=at + timedelta(milliseconds=2),
+                        event_id="later-book",
+                    ),
+                ]
+            )
+            session.commit()
+            repository = ResearchRepository(session)
+            reader = repository.calibration_replay_event_reader(
+                repository.replay_event_snapshot(),
+                market_tickers=("M1",),
+                feature_snapshot_ids=frozenset({"eligible-feature"}),
+                page_size=2,
+            )
+            events = [event for page in reader.iter_pages() for event in page]
+
+        assert [event.event_id for event in events] == ["first-book", "later-book"]
+        assert reader.pages_scanned == 2
+        assert reader.events_scanned == 3
+    finally:
+        engine.dispose()
+
+
 def test_r3_completed_epochs_only_advance_at_fifty_market_boundaries(tmp_path) -> None:
     engine, factory = _factory(tmp_path, "epoch-boundaries.sqlite")
     at = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)

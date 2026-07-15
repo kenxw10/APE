@@ -102,8 +102,8 @@ full-history diagnostic baseline or any production safety/deployment boundary.
 
 ## Validation Evidence
 
-- Required focused suite: PASS, 96 tests collected/executed, 0 failed, 0 skipped.
-- Full local suite: PASS, 615 passed, 4 PostgreSQL-only skips, 0 failed in 332.93s.
+- Required focused suite: PASS, 97 tests collected/executed, 0 failed, 0 skipped.
+- Full local suite: PASS, 616 passed, 4 PostgreSQL-only skips, 0 failed in 334.63s.
 - `python -m ruff check .`: PASS.
 - `python -m compileall src scripts`: PASS.
 - `python -m pip check`: PASS, no broken requirements.

@@ -295,6 +295,15 @@ def test_logistic_candidate_replays_development_events_with_its_fitted_artifact(
 
     assert result.candidate_replay_trades[candidate.candidate_id] == (trade,)
     assert any(replayed_events for replayed_events in replayed)
+    fitted = result.candidates[0]
+    expected_evidence = calibration._candidate_parameter_evidence(fitted)
+    persisted_evidence = result.candidate_metrics[candidate.candidate_id]
+    assert persisted_evidence["parameter_hash"] == expected_evidence["parameter_hash"]
+    assert (
+        persisted_evidence["parameter_diff_from_baseline"]
+        == expected_evidence["parameter_diff_from_baseline"]
+    )
+    assert "logistic_model.checksum" in persisted_evidence["parameter_diff_from_baseline"]
 
 
 def test_governance_rejects_paper_live_transitions() -> None:

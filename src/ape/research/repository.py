@@ -166,7 +166,7 @@ class FrozenReplayEventReader:
             # transaction also prevents long archive scans from holding a snapshot.
             self.repository.session.commit()
             self._report_progress(progress_callback, phase="page")
-            if len(page) < self.page_size:
+            if len(rows) < self.page_size:
                 return
 
     def _report_progress(

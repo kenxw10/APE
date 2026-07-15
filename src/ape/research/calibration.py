@@ -680,6 +680,7 @@ def run_bounded_calibration(
                 model_artifact=artifact,
             )
             candidates[index] = candidate
+            parameter_evidence = _candidate_parameter_evidence(candidate)
         result = DeterministicReplayEngine(parameters=candidate.parameters).replay(
             development_events, outcomes=development_outcomes
         )
