@@ -52,6 +52,16 @@ configuration. Database or environment changes require a worker restart. The tar
 is 5-15 qualified setups, 3-10 preferred fills, and a 3-15 challenger hard fill band
 per 100 markets; these are governance diagnostics, not execution controls.
 
+PR 11f keeps that full-history replay as diagnostic continuity but removes mixed
+history from governed calibration denominators. A strict current-version cohort uses
+resolved markets with complete archived sources, FULL candidate features, mature net
+30-second labels, and the causal first executable book. Immutable 50-market epochs
+run the unchanged 256-candidate search through 250-row keyset pages and fixed
+eight-candidate batches. Candidates remain `DRAFT` / `RESEARCH_ONLY`; the new cohort
+and compact-frontier APIs are read-only. Calibration remains disabled after merge.
+No migration, Railway service, required environment variable, timeout, polling,
+archive budget, strategy threshold, or safety behavior changes.
+
 ## Safety Defaults
 
 The default configuration is intentionally non-trading:

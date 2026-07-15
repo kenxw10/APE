@@ -70,6 +70,8 @@ from ape.models.strategy import (
     strategy_variants_comparison_response,
 )
 from ape.research.status import (
+    build_latest_calibration_cohort,
+    build_latest_calibration_frontier,
     build_latest_zero_entry,
     build_research_records,
     build_research_status,
@@ -384,7 +386,21 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         calibration_run_id: str | None = Query(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,128}$"),
         replay_run_id: str | None = Query(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,128}$"),
         status: (
-            Literal["RUNNING", "COMPLETED", "INSUFFICIENT_DATA", "BLOCKED", "FAILED"]
+            Literal[
+                "RUNNING",
+                "COMPLETED",
+                "INSUFFICIENT_DATA",
+                "BLOCKED",
+                "FAILED",
+                "INSUFFICIENT_CLEAN_DATA",
+                "NO_CANDIDATE_SIGNALS",
+                "SIGNALS_WITHOUT_EXECUTABLE_FILLS",
+                "FILLS_WITHOUT_CLOSED_TRADES",
+                "CLOSED_TRADES_WITHOUT_POSITIVE_HOLDOUT",
+                "POSITIVE_RESEARCH_CANDIDATE",
+                "CALIBRATION_BLOCKED",
+                "CALIBRATION_FAILED",
+            ]
             | None
         ) = None,
     ) -> dict[str, Any]:
@@ -398,6 +414,16 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 "status": status,
             },
         )
+
+    @app.get("/research/cohorts/latest")
+    def research_cohort_latest() -> dict[str, Any]:
+        return build_latest_calibration_cohort(settings)
+
+    @app.get("/research/calibration/frontier/latest")
+    def research_calibration_frontier_latest(
+        limit: int = Query(default=20, ge=1, le=20),
+    ) -> dict[str, Any]:
+        return build_latest_calibration_frontier(settings, limit=limit)
 
     @app.get("/research/candidates/recent")
     def research_candidates_recent(

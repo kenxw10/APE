@@ -1115,7 +1115,7 @@ def test_f6_coverage_matches_the_frozen_pre_pr11b_payload_except_progress_metada
         engine.dispose()
 
 
-def test_f6_enabled_oversized_calibration_persists_a_fail_closed_run_without_materializing(
+def test_f6_enabled_calibration_requires_a_clean_epoch_without_materializing(
     tmp_path, monkeypatch
 ) -> None:
     config, engine, factory = _factory(
@@ -1150,7 +1150,6 @@ def test_f6_enabled_oversized_calibration_persists_a_fail_closed_run_without_mat
             calibration_called = True
             raise AssertionError("oversized replay must not enter calibration")
 
-        monkeypatch.setattr(research_service, "CALIBRATION_MATERIALIZE_EVENT_LIMIT", 1)
         monkeypatch.setattr(ResearchRepository, "frozen_replay_event_reader", track_reader)
         monkeypatch.setattr(research_service, "run_bounded_calibration", forbidden_calibration)
         with factory() as session:
@@ -1164,10 +1163,10 @@ def test_f6_enabled_oversized_calibration_persists_a_fail_closed_run_without_mat
                 result["calibration_run_id"]
             )
 
-        assert result["calibration_status"] == "BLOCKED_REPLAY_EVENT_LIMIT"
+        assert result["calibration_status"] == "INSUFFICIENT_CLEAN_DATA"
         assert calibration is not None
-        assert calibration.status == "BLOCKED_REPLAY_EVENT_LIMIT"
-        assert calibration.blockers == ["calibration_replay_event_limit_exceeded"]
+        assert calibration.status == "INSUFFICIENT_CLEAN_DATA"
+        assert calibration.blockers == ["insufficient_clean_calibration_markets"]
         assert reader_calls == 1
         assert calibration_called is False
     finally:
@@ -1218,7 +1217,8 @@ def test_r8_and_r9_keep_calibration_disabled_and_scope_boundaries_static() -> No
         encoding="utf-8"
     )
     assert "list_events(limit=None)" not in service_source
-    assert "CALIBRATION_MATERIALIZE_EVENT_LIMIT" in service_source
+    assert "CALIBRATION_MATERIALIZE_EVENT_LIMIT" not in service_source
+    assert "run_governed_calibration" in service_source
     assert "REPLAY_EVENT_PAGE_SIZE = 250" in repository_source
     assert "0010_research_replay_calibration" in SCHEMA_VERSIONS
     assert CURRENT_SCHEMA_VERSION == "0011_research_archive_cursors"

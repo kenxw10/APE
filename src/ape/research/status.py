@@ -87,6 +87,25 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
         "last_zero_entry_audit": None,
         "last_replay_run": None,
         "last_calibration_run": None,
+        "calibration_epoch_size": None,
+        "calibration_cohort_hash": None,
+        "calibration_epoch_hash": None,
+        "calibration_due": False,
+        "calibration_run_id": None,
+        "calibration_status": "DISABLED",
+        "calibration_candidate_index": None,
+        "calibration_candidate_count": 256,
+        "calibration_candidates_completed": 0,
+        "calibration_candidate_batch_size": None,
+        "calibration_current_candidate_id": None,
+        "calibration_current_fold": None,
+        "calibration_current_partition": None,
+        "calibration_events_scanned": 0,
+        "calibration_pages_scanned": 0,
+        "calibration_last_progress_at": None,
+        "calibration_reused_existing_run": False,
+        "calibration_result_classification": None,
+        "calibration_cohort_summary": None,
         "candidate_counts_by_state": {},
         "data_coverage": {},
         "event_lag_seconds": None,
@@ -232,6 +251,10 @@ def build_research_status(config: AppConfig, *, now: datetime | None = None) -> 
                 last_zero_entry_audit=repository.latest_zero_entry_report(),
                 last_replay_run=_row(latest_replay),
                 last_calibration_run=_row(latest_calibration),
+                **{
+                    key: details.get(key, base[key])
+                    for key in _CALIBRATION_STATUS_KEYS
+                },
                 candidate_counts_by_state=repository.candidate_state_counts(),
                 data_coverage=(latest_replay.raw_metrics or {}).get(
                     "archive_coverage", {"complete_markets": len(outcomes)}
@@ -316,6 +339,166 @@ def build_latest_zero_entry(config: AppConfig) -> dict[str, Any]:
         return {
             "configured": True,
             "report": None,
+            "error": "research_database_error",
+        }
+    finally:
+        engine.dispose()
+
+
+def build_latest_calibration_cohort(config: AppConfig) -> dict[str, Any]:
+    if not config.database_url:
+        return {"configured": False, "cohort": None}
+    engine = create_engine_from_config(config)
+    try:
+        with create_session_factory(engine)() as session:
+            repository = ResearchRepository(session)
+            run = repository.latest_calibration_run()
+            manifest = (
+                run.partition_manifest
+                if run and isinstance(run.partition_manifest, dict)
+                else {}
+            )
+            cohort = (
+                manifest.get("cohort_manifest")
+                if isinstance(manifest.get("cohort_manifest"), dict)
+                else manifest
+                if run and run.status == "INSUFFICIENT_CLEAN_DATA"
+                else None
+            )
+            heartbeat = WorkerHeartbeatRepository(session).get_latest_heartbeat(
+                WORKER_SERVICE_RESEARCH
+            )
+            heartbeat_metadata = (
+                heartbeat.metadata_
+                if heartbeat is not None and isinstance(heartbeat.metadata_, dict)
+                else {}
+            )
+            heartbeat_details = (
+                heartbeat_metadata.get("research")
+                if isinstance(heartbeat_metadata.get("research"), dict)
+                else {}
+            )
+            current_summary = heartbeat_details.get("calibration_cohort_summary")
+            if isinstance(current_summary, dict):
+                cohort = {**(cohort or {}), **current_summary}
+            if not isinstance(cohort, dict):
+                return {"configured": True, "cohort": None, "readiness": "WAITING"}
+            return {
+                "configured": True,
+                "readiness": (
+                    "READY"
+                    if int(cohort.get("eligible_market_count", 0)) >= 50
+                    else "INSUFFICIENT_CLEAN_DATA"
+                ),
+                "blockers": list(run.blockers or [])[:8] if run else [],
+                "cohort": {
+                    "cohort_schema_version": cohort.get("cohort_schema_version"),
+                    "cohort_hash": cohort.get("cohort_hash"),
+                    "epoch_hash": manifest.get("epoch_hash"),
+                    "frozen_replay_watermark": cohort.get("frozen_replay_watermark"),
+                    "eligible_market_count": cohort.get("eligible_market_count", 0),
+                    "completed_epoch_size": manifest.get(
+                        "current_completed_epoch_size", manifest.get("epoch_size", 0)
+                    ),
+                    "next_epoch_market_count": manifest.get("next_epoch_market_count", 50),
+                    "eligible_feature_frame_count": cohort.get(
+                        "eligible_feature_frame_count", 0
+                    ),
+                    "included_event_count_by_type": cohort.get(
+                        "included_event_count_by_type", {}
+                    ),
+                    "architecture_version_distribution": cohort.get(
+                        "architecture_version_distribution", {}
+                    ),
+                    "feature_schema_version_distribution": cohort.get(
+                        "feature_schema_version_distribution", {}
+                    ),
+                    "replay_schema_version_distribution": cohort.get(
+                        "replay_schema_version_distribution", {}
+                    ),
+                    "exclusion_counts_by_reason": cohort.get(
+                        "exclusion_counts_by_reason", {}
+                    ),
+                    "excluded_market_counts_by_reason": cohort.get(
+                        "excluded_market_counts_by_reason", {}
+                    ),
+                    "source_completeness": cohort.get("source_completeness", {}),
+                    "maximum_relevant_event_gap_seconds": cohort.get(
+                        "maximum_relevant_event_gap_seconds"
+                    ),
+                    "earliest_market_time": cohort.get("earliest_market_time"),
+                    "latest_market_time": cohort.get("latest_market_time"),
+                    "earliest_event_time": cohort.get("earliest_event_time"),
+                    "latest_event_time": cohort.get("latest_event_time"),
+                    "input_outcome_hash": cohort.get("input_outcome_hash"),
+                    "current_baseline_config_version": cohort.get(
+                        "current_baseline_config_version"
+                    ),
+                    "code_commit_sha": cohort.get("code_commit_sha"),
+                },
+            }
+    except SQLAlchemyError:
+        return {
+            "configured": True,
+            "cohort": None,
+            "readiness": "BLOCKED",
+            "error": "research_database_error",
+        }
+    finally:
+        engine.dispose()
+
+
+def build_latest_calibration_frontier(
+    config: AppConfig, *, limit: int = 20
+) -> dict[str, Any]:
+    if not config.database_url:
+        return {"configured": False, "frontier": []}
+    engine = create_engine_from_config(config)
+    try:
+        with create_session_factory(engine)() as session:
+            run = ResearchRepository(session).latest_calibration_run()
+            if run is None:
+                return {"configured": True, "frontier": []}
+            summary = run.test_metrics if isinstance(run.test_metrics, dict) else {}
+            rows = summary.get("frontier") if isinstance(summary.get("frontier"), list) else []
+            required = {
+                summary.get("baseline_candidate_id"),
+                summary.get("selected_finalist_id"),
+            }
+            bounded = list(rows[: max(1, min(limit, 20))])
+            for row in rows:
+                if (
+                    isinstance(row, dict)
+                    and row.get("candidate_id") in required
+                    and row not in bounded
+                ):
+                    bounded.append(row)
+            manifest = run.partition_manifest if isinstance(run.partition_manifest, dict) else {}
+            return {
+                "configured": True,
+                "calibration_run_id": run.calibration_run_id,
+                "status": run.status,
+                "classification": summary.get("classification", run.status),
+                "cohort_hash": (manifest.get("cohort_manifest") or {}).get("cohort_hash"),
+                "epoch_hash": manifest.get("epoch_hash"),
+                "search_space_hash": manifest.get("search_space_hash"),
+                "baseline_candidate_id": summary.get("baseline_candidate_id"),
+                "selected_finalist_id": summary.get("selected_finalist_id"),
+                "partition_evidence": {
+                    "ordered_market_count": len(manifest.get("ordered_market_tickers", [])),
+                    "frozen_holdout_hash": run.frozen_holdout_hash,
+                    "holdout_used_at": run.holdout_used_at.isoformat()
+                    if run.holdout_used_at
+                    else None,
+                },
+                "economic_metrics": run.holdout_metrics,
+                "next_experiment": summary.get("next_experiment"),
+                "frontier": bounded,
+            }
+    except SQLAlchemyError:
+        return {
+            "configured": True,
+            "frontier": [],
             "error": "research_database_error",
         }
     finally:
@@ -424,6 +607,7 @@ def _safe_worker_metadata(details: dict[str, Any]) -> dict[str, Any]:
         "coverage_partitions_total": details.get("coverage_partitions_total"),
         "last_error": _safe_error(details.get("last_error")),
         "statement_timeout_detected": bool(details.get("statement_timeout_detected")),
+        **{key: details.get(key) for key in _CALIBRATION_STATUS_KEYS},
         "warnings": _bounded_strings(details.get("warnings")),
         "blockers": _bounded_strings(details.get("blockers")),
     }
@@ -433,3 +617,26 @@ def _bounded_strings(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item)[:128] for item in value[:8]]
+
+
+_CALIBRATION_STATUS_KEYS = (
+    "calibration_epoch_size",
+    "calibration_cohort_hash",
+    "calibration_epoch_hash",
+    "calibration_due",
+    "calibration_run_id",
+    "calibration_status",
+    "calibration_candidate_index",
+    "calibration_candidate_count",
+    "calibration_candidates_completed",
+    "calibration_candidate_batch_size",
+    "calibration_current_candidate_id",
+    "calibration_current_fold",
+    "calibration_current_partition",
+    "calibration_events_scanned",
+    "calibration_pages_scanned",
+    "calibration_last_progress_at",
+    "calibration_reused_existing_run",
+    "calibration_result_classification",
+    "calibration_cohort_summary",
+)

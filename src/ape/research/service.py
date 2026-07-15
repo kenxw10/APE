@@ -15,14 +15,10 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from ape.config import AppConfig
 from ape.kalshi.client import KalshiRestClient
-from ape.repositories.inputs import StrategyConfigVersionInput, WorkerHeartbeatInput
+from ape.repositories.inputs import WorkerHeartbeatInput
 from ape.repositories.strategy_v2 import StrategyV2Repository
 from ape.repositories.worker_heartbeats import WorkerHeartbeatRepository
-from ape.research import (
-    CALIBRATION_SCHEMA_VERSION,
-    REPLAY_SCHEMA_VERSION,
-    RESEARCH_LABEL_SCHEMA_VERSION,
-)
+from ape.research import REPLAY_SCHEMA_VERSION, RESEARCH_LABEL_SCHEMA_VERSION
 from ape.research.archive import (
     ARCHIVE_MAX_BATCHES_PER_CYCLE,
     ARCHIVE_SOURCE_STAGES,
@@ -36,16 +32,11 @@ from ape.research.archive import (
     refresh_research_archive_labels,
     refresh_research_reference_associations,
 )
-from ape.research.calibration import (
-    LIFECYCLE_DRAFT,
-    complete_search_space_snapshot,
-    run_bounded_calibration,
-)
+from ape.research.calibration import run_bounded_calibration
+from ape.research.governed_calibration import run_governed_calibration
 from ape.research.replay import DeterministicReplayEngine, ReplayTrade
 from ape.research.repository import FrozenReplayProgress, ResearchRepository
 from ape.strategy.momentum_v2 import (
-    V2_ARCHITECTURE_VERSION,
-    V2_FEATURE_SCHEMA_VERSION,
     V2_PARAMETERS,
     built_in_config_version,
     resolve_code_version,
@@ -57,7 +48,27 @@ LOGGER = logging.getLogger(__name__)
 RESEARCH_HEARTBEAT_INTERVAL_SECONDS = 30.0
 ARCHIVE_DUPLICATE_RETRY_LIMIT = 3
 ARCHIVE_DUPLICATE_RETRY_DELAY_SECONDS = 0.05
-CALIBRATION_MATERIALIZE_EVENT_LIMIT = 20_000
+CALIBRATION_HEARTBEAT_FIELDS = (
+    "calibration_epoch_size",
+    "calibration_cohort_hash",
+    "calibration_epoch_hash",
+    "calibration_due",
+    "calibration_run_id",
+    "calibration_status",
+    "calibration_candidate_index",
+    "calibration_candidate_count",
+    "calibration_candidates_completed",
+    "calibration_candidate_batch_size",
+    "calibration_current_candidate_id",
+    "calibration_current_fold",
+    "calibration_current_partition",
+    "calibration_events_scanned",
+    "calibration_pages_scanned",
+    "calibration_last_progress_at",
+    "calibration_reused_existing_run",
+    "calibration_result_classification",
+    "calibration_cohort_summary",
+)
 
 
 @dataclass(frozen=True)
@@ -907,10 +918,9 @@ def run_research_cycle(
             )
         )
     repository.finish_replay_run(replay_run, status="COMPLETED", finished_at=checked_at)
+    # The diagnostic baseline is durable independently of optional calibration.
+    session.commit()
     if progress_callback is not None:
-        # Commit replay evidence before calibration so a later calibration failure
-        # cannot roll back a completed archive/replay stage.
-        session.commit()
         progress_callback(
             "baseline_replay_completed",
             {
@@ -929,6 +939,7 @@ def run_research_cycle(
         )
     calibration_status = "DISABLED"
     calibration_run_id = None
+    calibration_metadata: dict[str, Any] = {}
     if config.calibration_enabled:
         if progress_callback is not None:
             progress_callback(
@@ -940,183 +951,31 @@ def run_research_cycle(
                     "zero_entry_report": replay.zero_entry_report,
                 },
             )
-        calibration_run_id = (
-            "calibration-" + _hash({"replay": run_id, "dataset": replay.dataset_hash})[:24]
+        def report_calibration_progress(details: dict[str, Any]) -> None:
+            if progress_callback is not None:
+                progress_callback(
+                    "calibration_progress",
+                    {
+                        "last_successful_stage": "baseline_replay",
+                        "post_archive_substage": "calibration",
+                        "replay_run_id": run_id,
+                        **details,
+                    },
+                )
+
+        governed = run_governed_calibration(
+            session,
+            snapshot=snapshot,
+            replay_run_id=run_id,
+            baseline_config_version_id=baseline.strategy_config_version_id,
+            code_commit_sha=resolve_code_version(),
+            checked_at=checked_at,
+            progress_callback=report_calibration_progress,
+            candidate_evaluator=run_bounded_calibration,
         )
-        existing_calibration = repository.get_calibration_run(calibration_run_id)
-        if existing_calibration is not None and existing_calibration.holdout_used_at is not None:
-            calibration_status = existing_calibration.status
-        elif snapshot.event_count > CALIBRATION_MATERIALIZE_EVENT_LIMIT:
-            calibration_status = "BLOCKED_REPLAY_EVENT_LIMIT"
-            calibration_run = repository.create_calibration_run(
-                {
-                    "calibration_run_id": calibration_run_id,
-                    "status": calibration_status,
-                    "calibration_schema_version": CALIBRATION_SCHEMA_VERSION,
-                    "replay_run_id": run_id,
-                    "dataset_hash": replay.dataset_hash,
-                    "code_commit_sha": resolve_code_version(),
-                    "random_seed": int(_hash(calibration_run_id)[:8], 16),
-                    "search_space_snapshot": None,
-                    "partition_manifest": {"event_limit": CALIBRATION_MATERIALIZE_EVENT_LIMIT},
-                    "frozen_holdout_hash": None,
-                    "evaluated_candidate_count": 0,
-                    "selected_candidate_id": None,
-                    "training_metrics": None,
-                    "validation_metrics": None,
-                    "test_metrics": None,
-                    "holdout_metrics": None,
-                    "bootstrap_metrics": None,
-                    "penalties": None,
-                    "warnings": [],
-                    "blockers": ["calibration_replay_event_limit_exceeded"],
-                    "started_at": checked_at,
-                    "finished_at": checked_at,
-                    "holdout_used_at": None,
-                }
-            )
-            del calibration_run
-        else:
-            calibration_events = [
-                event
-                for page in repository.frozen_replay_event_reader(snapshot).iter_pages()
-                for event in page
-            ]
-            calibration = run_bounded_calibration(
-                calibration_run_id=calibration_run_id,
-                events=calibration_events,
-                outcomes=outcomes,
-            )
-            calibration_status = calibration.status
-            selected_metrics = calibration.candidate_metrics.get(
-                calibration.selected_candidate_id or "", {}
-            )
-            calibration_run = repository.create_calibration_run(
-                {
-                    "calibration_run_id": calibration_run_id,
-                    "status": calibration.status,
-                    "calibration_schema_version": CALIBRATION_SCHEMA_VERSION,
-                    "replay_run_id": run_id,
-                    "dataset_hash": replay.dataset_hash,
-                    "code_commit_sha": resolve_code_version(),
-                    "random_seed": int(_hash(calibration_run_id)[:8], 16),
-                    "search_space_snapshot": complete_search_space_snapshot(
-                        calibration_run_id,
-                        calibration.candidates,
-                    ),
-                    "partition_manifest": calibration.partition_manifest,
-                    "frozen_holdout_hash": calibration.partition_manifest.get("holdout_hash"),
-                    "evaluated_candidate_count": len(calibration.candidates),
-                    "selected_candidate_id": calibration.selected_candidate_id,
-                    "training_metrics": None,
-                    "validation_metrics": calibration.candidate_metrics,
-                    "test_metrics": None,
-                    "holdout_metrics": selected_metrics.get("holdout"),
-                    "bootstrap_metrics": selected_metrics.get("bootstrap"),
-                    "penalties": selected_metrics.get("penalties"),
-                    "warnings": list(calibration.warnings),
-                    "blockers": list(calibration.blockers),
-                    "started_at": checked_at,
-                    "finished_at": checked_at,
-                    "holdout_used_at": checked_at if calibration.selected_candidate_id else None,
-                }
-            )
-            if calibration.status == "COMPLETED":
-                for candidate in calibration.candidates:
-                    candidate_metrics = calibration.candidate_metrics.get(
-                        candidate.candidate_id,
-                        {},
-                    )
-                    candidate_partition_trades = (
-                        calibration.candidate_partition_replay_trades.get(
-                            candidate.candidate_id,
-                            {
-                                "search_development": calibration.candidate_replay_trades.get(
-                                    candidate.candidate_id,
-                                    (),
-                                )
-                            },
-                        )
-                    )
-                    if candidate.model_type == "BASELINE":
-                        for partition, partition_trades in candidate_partition_trades.items():
-                            for trade in partition_trades:
-                                repository.insert_replay_trade(
-                                    _replay_trade_values(
-                                        replay_run_id=run_id,
-                                        trade=trade,
-                                        candidate_id=candidate.candidate_id,
-                                        strategy_config_version_id=(
-                                            baseline.strategy_config_version_id
-                                        ),
-                                        evidence_partition=partition,
-                                    )
-                                )
-                        continue
-                    artifact = candidate.model_artifact or {}
-                    config_version_id = f"research-{candidate.candidate_id}"
-                    StrategyV2Repository(session).ensure_config_version(
-                        StrategyConfigVersionInput(
-                            strategy_config_version_id=config_version_id,
-                            strategy_id=candidate.generated_strategy_id,
-                            architecture_version=V2_ARCHITECTURE_VERSION,
-                            feature_schema_version=V2_FEATURE_SCHEMA_VERSION,
-                            parameter_snapshot=candidate.parameters,
-                            parameter_hash=_hash(candidate.parameters),
-                            code_commit_sha=resolve_code_version(),
-                            source="RESEARCH_CALIBRATION",
-                            parent_config_version_id=baseline.strategy_config_version_id,
-                            calibration_run_id=calibration_run.calibration_run_id,
-                            lifecycle_state=LIFECYCLE_DRAFT,
-                            approval_state="RESEARCH_ONLY",
-                            model_type=candidate.model_type,
-                            model_artifact_checksum=_hash(artifact),
-                            data_cutoff=checked_at,
-                            candidate_id=candidate.candidate_id,
-                        )
-                    )
-                    repository.create_candidate(
-                        {
-                            "candidate_id": candidate.candidate_id,
-                            "strategy_config_version_id": config_version_id,
-                            "calibration_run_id": calibration_run.calibration_run_id,
-                            "parent_strategy_config_version_id": (
-                                baseline.strategy_config_version_id
-                            ),
-                            "generated_strategy_id": candidate.generated_strategy_id,
-                            "architecture_version": V2_ARCHITECTURE_VERSION,
-                            "feature_schema_version": V2_FEATURE_SCHEMA_VERSION,
-                            "replay_schema_version": REPLAY_SCHEMA_VERSION,
-                            "model_type": candidate.model_type,
-                            "parameter_snapshot": candidate.parameters,
-                            "feature_columns": list(candidate.feature_columns),
-                            "model_artifact": artifact,
-                            "model_artifact_checksum": _hash(artifact),
-                            "training_metrics": candidate_metrics.get("training"),
-                            "validation_metrics": candidate_metrics,
-                            "test_metrics": candidate_metrics.get("development_test"),
-                            "holdout_metrics": candidate_metrics.get("holdout"),
-                            "governance_report": None,
-                            "lifecycle_state": LIFECYCLE_DRAFT,
-                            "eligibility_status": "RESEARCH_ONLY",
-                        }
-                    )
-                    for partition, partition_trades in candidate_partition_trades.items():
-                        for trade in partition_trades:
-                            repository.insert_replay_trade(
-                                _replay_trade_values(
-                                    replay_run_id=run_id,
-                                    trade=trade,
-                                    candidate_id=candidate.candidate_id,
-                                    strategy_config_version_id=config_version_id,
-                                    evidence_partition=partition,
-                                )
-                            )
-                    if candidate.candidate_id == calibration.selected_candidate_id:
-                        repository.advance_candidate_governance(
-                            candidate_id=candidate.candidate_id,
-                            actor="ape-research-worker",
-                        )
+        calibration_status = governed.status
+        calibration_run_id = governed.run_id
+        calibration_metadata = governed.metadata()
         if progress_callback is not None:
             progress_callback(
                 "calibration_completed",
@@ -1124,6 +983,7 @@ def run_research_cycle(
                     "last_successful_stage": "calibration",
                     "replay_run_id": run_id,
                     "calibration_run_id": calibration_run_id,
+                    **calibration_metadata,
                     "zero_entry_report": replay.zero_entry_report,
                 },
             )
@@ -1135,6 +995,7 @@ def run_research_cycle(
         "zero_entry_report": replay.zero_entry_report,
         "calibration_status": calibration_status,
         "calibration_run_id": calibration_run_id,
+        **calibration_metadata,
         "warnings": [],
         "blockers": [],
     }
@@ -1294,6 +1155,10 @@ def _record_research_heartbeat(
                     "coverage_max_page_size": result.get("coverage_max_page_size"),
                     "last_replay_run": result.get("replay_run_id"),
                     "last_calibration_run": result.get("calibration_run_id"),
+                    **{
+                        key: result.get(key)
+                        for key in CALIBRATION_HEARTBEAT_FIELDS
+                    },
                     "zero_entry_report": result.get("zero_entry_report"),
                     "last_error": last_error,
                     "statement_timeout_detected": bool(

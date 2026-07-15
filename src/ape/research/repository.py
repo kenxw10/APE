@@ -83,10 +83,20 @@ class FrozenReplayEventReader:
         snapshot: ReplayEventSnapshot,
         *,
         page_size: int = REPLAY_EVENT_PAGE_SIZE,
+        event_types: tuple[str, ...] | None = None,
+        market_tickers: tuple[str, ...] | None = None,
+        feature_snapshot_ids: frozenset[str] | None = None,
     ) -> None:
+        if page_size < 1 or page_size > REPLAY_EVENT_PAGE_SIZE:
+            raise ValueError(
+                f"Replay page size must be between 1 and {REPLAY_EVENT_PAGE_SIZE}."
+            )
         self.repository = repository
         self.snapshot = snapshot
         self.page_size = page_size
+        self.event_types = event_types
+        self.market_tickers = market_tickers
+        self.feature_snapshot_ids = feature_snapshot_ids
         self.pages_scanned = 0
         self.events_scanned = 0
         self.partitions_completed = 0
@@ -125,6 +135,8 @@ class FrozenReplayEventReader:
                 snapshot=self.snapshot,
                 start=start,
                 end=end,
+                event_types=self.event_types,
+                market_tickers=self.market_tickers,
             )
             if last_key is not None:
                 statement = statement.where(tuple_(*order_columns) > tuple_(*last_key))
@@ -136,17 +148,25 @@ class FrozenReplayEventReader:
             if not rows:
                 return
             page = [_replay_event_record(row) for row in rows]
+            if self.feature_snapshot_ids is not None:
+                page = [
+                    event
+                    for event in page
+                    if event.event_type != "FEATURE_SNAPSHOT"
+                    or event.feature_snapshot_id in self.feature_snapshot_ids
+                ]
             self.pages_scanned += 1
-            self.events_scanned += len(page)
-            self.max_page_size = max(self.max_page_size, len(page))
+            self.events_scanned += len(rows)
+            self.max_page_size = max(self.max_page_size, len(rows))
             last_row = rows[-1]
             last_key = tuple(last_row[column.key] for column in order_columns)
-            yield page
+            if page:
+                yield page
             # Mappings leave no ORM identity state behind; ending each read
             # transaction also prevents long archive scans from holding a snapshot.
             self.repository.session.commit()
             self._report_progress(progress_callback, phase="page")
-            if len(page) < self.page_size:
+            if len(rows) < self.page_size:
                 return
 
     def _report_progress(
@@ -746,12 +766,33 @@ class ResearchRepository:
     ) -> FrozenReplayEventReader:
         return FrozenReplayEventReader(self, snapshot, page_size=page_size)
 
+    def calibration_replay_event_reader(
+        self,
+        snapshot: ReplayEventSnapshot,
+        *,
+        market_tickers: tuple[str, ...] | None = None,
+        event_types: tuple[str, ...] = ("FEATURE_SNAPSHOT", "ORDERBOOK"),
+        feature_snapshot_ids: frozenset[str] | None = None,
+        page_size: int = REPLAY_EVENT_PAGE_SIZE,
+    ) -> FrozenReplayEventReader:
+        """Read only bounded calibration evidence under the frozen watermark."""
+        return FrozenReplayEventReader(
+            self,
+            snapshot,
+            page_size=page_size,
+            event_types=event_types,
+            market_tickers=market_tickers,
+            feature_snapshot_ids=feature_snapshot_ids,
+        )
+
     def _replay_event_statement(
         self,
         *,
         snapshot: ReplayEventSnapshot,
         start: datetime,
         end: datetime,
+        event_types: tuple[str, ...] | None = None,
+        market_tickers: tuple[str, ...] | None = None,
     ) -> tuple[Any, tuple[Any, ...]]:
         source_row_id = ResearchReplayEvent.source_row_id
         if self.session.get_bind().dialect.name == "postgresql":
@@ -815,6 +856,10 @@ class ResearchRepository:
             ResearchReplayEvent.event_time >= start,
             ResearchReplayEvent.event_time < end,
         )
+        if event_types is not None:
+            statement = statement.where(ResearchReplayEvent.event_type.in_(event_types))
+        if market_tickers is not None:
+            statement = statement.where(ResearchReplayEvent.market_ticker.in_(market_tickers))
         return statement, order_columns
 
     def list_events(
@@ -881,6 +926,17 @@ class ResearchRepository:
             select(CalibrationRun)
             .order_by(desc(CalibrationRun.started_at), desc(CalibrationRun.id))
             .limit(1)
+        )
+
+    def list_calibration_runs_for_code_commit(
+        self, code_commit_sha: str
+    ) -> list[CalibrationRun]:
+        return list(
+            self.session.scalars(
+                select(CalibrationRun)
+                .where(CalibrationRun.code_commit_sha == code_commit_sha)
+                .order_by(CalibrationRun.started_at.asc(), CalibrationRun.id.asc())
+            )
         )
 
     def latest_zero_entry_report(self) -> dict[str, Any] | None:

@@ -130,4 +130,16 @@ a worker restart. Qualified setup target is 5-15 per 100 markets, preferred fill
 and the challenger hard fill band is 3-15. These remain research governance
 diagnostics and do not authorize paper or live execution.
 
+PR 11f separates the mixed all-history baseline from governed calibration. The
+baseline remains deterministic diagnostic evidence; the governed denominator is a
+strict current-version cohort of resolved markets with complete archived sources,
+FULL candidate features, mature net 30-second labels, and a causal first executable
+book. Calibration uses immutable 50-market epochs, 250-row keyset pages, compact
+FEATURE/ORDERBOOK input, fixed eight-candidate batches, and the unchanged 256-search
+contract. Generated candidates remain `DRAFT` / `RESEARCH_ONLY` and are never
+automatically promoted. No migration, service, required environment variable,
+timeout, polling, archive budget, strategy, or safety setting changes. Keep
+`APP_MODE=DRY_RUN`, `CALIBRATION_ENABLED=false`, `TRADING_ENABLED=false`, and
+`EXECUTE=false` pending explicit production validation.
+
 Next manual checkpoint after PR 9h: keep API, market, reference, and maintenance workers running, but do not deploy or enable strategy until storage validation is clean. Confirm `/storage/status` uses `liveness_source=component` from `ape-worker.maintenance`, shows `worker_role=maintenance`, `latest_component_heartbeat_mode=storage_retention`, `worker_heartbeat_stale=false`, `retention_config.effective_enabled=true`, and latest run status `success` or `success_partial` with no blockers. `success_partial` is acceptable when bounded cleanup made progress and only the configured time, table, or per-table row budget was reached. Market validation may allow `QUIET_CARRY_FORWARD` when transport is healthy, subscriptions are reconciled, there is no unrecovered blocker, and the snapshot is inside the hard carry-forward cap; `BLOCKED_UNRECOVERED`, stale market transport, or BRTI `stale_transport` remain hard regressions. Keep `TRADING_ENABLED=false` and `EXECUTE=false` everywhere. The API and dashboard may stay read-only; Vercel must not receive Kalshi credentials, WebSocket variables, BRTI env vars, strategy env vars, storage retention env vars, dry-run controls, private-channel controls, account reads, or order/execution controls.
